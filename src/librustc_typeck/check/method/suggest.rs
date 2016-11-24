@@ -19,9 +19,8 @@ use rustc::ty::{self, Ty, ToPolyTraitRef, ToPredicate, TypeFoldable};
 use hir::def::Def;
 use hir::def_id::{CRATE_DEF_INDEX, DefId};
 use middle::lang_items::FnOnceTraitLangItem;
-use rustc::ty::subst::Substs;
 use rustc::traits::{Obligation, SelectionContext};
-use util::nodemap::FnvHashSet;
+use util::nodemap::FxHashSet;
 
 use syntax::ast;
 use errors::DiagnosticBuilder;
@@ -55,7 +54,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
                 self.autoderef(span, ty).any(|(ty, _)| {
                     self.probe(|_| {
-                        let fn_once_substs = Substs::new_trait(tcx, ty, &[self.next_ty_var()]);
+                        let fn_once_substs = tcx.mk_substs_trait(ty, &[self.next_ty_var()]);
                         let trait_ref = ty::TraitRef::new(fn_once, fn_once_substs);
                         let poly_trait_ref = trait_ref.to_poly_trait_ref();
                         let obligation =
@@ -90,20 +89,17 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     CandidateSource::ImplSource(impl_did) => {
                         // Provide the best span we can. Use the item, if local to crate, else
                         // the impl, if local to crate (item may be defaulted), else nothing.
-                        let item = self.impl_or_trait_item(impl_did, item_name)
+                        let item = self.associated_item(impl_did, item_name)
                             .or_else(|| {
-                                self.impl_or_trait_item(self.tcx
-                                                            .impl_trait_ref(impl_did)
-                                                            .unwrap()
-                                                            .def_id,
+                                self.associated_item(
+                                    self.tcx.impl_trait_ref(impl_did).unwrap().def_id,
 
-                                                        item_name)
-                            })
-                            .unwrap();
-                        let note_span = self.tcx
-                            .map
-                            .span_if_local(item.def_id())
-                            .or_else(|| self.tcx.map.span_if_local(impl_did));
+                                    item_name
+                                )
+                            }).unwrap();
+                        let note_span = self.tcx.map.span_if_local(item.def_id).or_else(|| {
+                            self.tcx.map.span_if_local(impl_did)
+                        });
 
                         let impl_ty = self.impl_self_ty(span, impl_did).ty;
 
@@ -128,8 +124,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         }
                     }
                     CandidateSource::TraitSource(trait_did) => {
-                        let item = self.impl_or_trait_item(trait_did, item_name).unwrap();
-                        let item_span = self.tcx.map.def_id_span(item.def_id(), span);
+                        let item = self.associated_item(trait_did, item_name).unwrap();
+                        let item_span = self.tcx.map.def_id_span(item.def_id, span);
                         span_note!(err,
                                    item_span,
                                    "candidate #{} is defined in the trait `{}`",
@@ -312,7 +308,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
             let limit = if candidates.len() == 5 { 5 } else { 4 };
             for (i, trait_did) in candidates.iter().take(limit).enumerate() {
-                err.help(&format!("candidate #{}: `use {}`",
+                err.help(&format!("candidate #{}: `use {};`",
                                   i + 1,
                                   self.tcx.item_path_str(*trait_did)));
             }
@@ -335,8 +331,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 // this isn't perfect (that is, there are cases when
                 // implementing a trait would be legal but is rejected
                 // here).
-                (type_is_local || info.def_id.is_local()) &&
-                self.impl_or_trait_item(info.def_id, item_name).is_some()
+                (type_is_local || info.def_id.is_local())
+                    && self.associated_item(info.def_id, item_name).is_some()
             })
             .collect::<Vec<_>>();
 
@@ -443,7 +439,7 @@ impl Ord for TraitInfo {
 /// Retrieve all traits in this crate and any dependent crates.
 pub fn all_traits<'a>(ccx: &'a CrateCtxt) -> AllTraits<'a> {
     if ccx.all_traits.borrow().is_none() {
-        use rustc::hir::intravisit;
+        use rustc::hir::itemlikevisit;
 
         let mut traits = vec![];
 
@@ -454,7 +450,7 @@ pub fn all_traits<'a>(ccx: &'a CrateCtxt) -> AllTraits<'a> {
             map: &'a hir_map::Map<'tcx>,
             traits: &'a mut AllTraitsVec,
         }
-        impl<'v, 'a, 'tcx> intravisit::Visitor<'v> for Visitor<'a, 'tcx> {
+        impl<'v, 'a, 'tcx> itemlikevisit::ItemLikeVisitor<'v> for Visitor<'a, 'tcx> {
             fn visit_item(&mut self, i: &'v hir::Item) {
                 match i.node {
                     hir::ItemTrait(..) => {
@@ -464,17 +460,20 @@ pub fn all_traits<'a>(ccx: &'a CrateCtxt) -> AllTraits<'a> {
                     _ => {}
                 }
             }
+
+            fn visit_impl_item(&mut self, _impl_item: &hir::ImplItem) {
+            }
         }
-        ccx.tcx.map.krate().visit_all_items(&mut Visitor {
+        ccx.tcx.map.krate().visit_all_item_likes(&mut Visitor {
             map: &ccx.tcx.map,
             traits: &mut traits,
         });
 
         // Cross-crate:
-        let mut external_mods = FnvHashSet();
+        let mut external_mods = FxHashSet();
         fn handle_external_def(ccx: &CrateCtxt,
                                traits: &mut AllTraitsVec,
-                               external_mods: &mut FnvHashSet<DefId>,
+                               external_mods: &mut FxHashSet<DefId>,
                                def: Def) {
             let def_id = def.def_id();
             match def {

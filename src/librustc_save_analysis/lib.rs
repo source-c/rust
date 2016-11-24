@@ -18,7 +18,7 @@
 #![cfg_attr(not(stage0), deny(warnings))]
 
 #![feature(custom_attribute)]
-#![feature(dotdot_in_tuple_patterns)]
+#![cfg_attr(stage0, feature(dotdot_in_tuple_patterns))]
 #![allow(unused_attributes)]
 #![feature(rustc_private)]
 #![feature(staged_api)]
@@ -54,7 +54,8 @@ use std::path::{Path, PathBuf};
 
 use syntax::ast::{self, NodeId, PatKind, Attribute, CRATE_NODE_ID};
 use syntax::parse::lexer::comments::strip_doc_comment_decoration;
-use syntax::parse::token::{self, keywords, InternedString};
+use syntax::parse::token;
+use syntax::symbol::{Symbol, keywords};
 use syntax::visit::{self, Visitor};
 use syntax::print::pprust::{ty_to_string, arg_to_string};
 use syntax::codemap::MacroAttribute;
@@ -119,7 +120,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                 }
             };
             result.push(CrateData {
-                name: (&self.tcx.sess.cstore.crate_name(n)[..]).to_owned(),
+                name: self.tcx.sess.cstore.crate_name(n).to_string(),
                 number: n.as_u32(),
                 span: span,
             });
@@ -286,7 +287,8 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                           scope: NodeId) -> Option<VariableData> {
         if let Some(ident) = field.ident {
             let qualname = format!("::{}::{}", self.tcx.node_path_str(scope), ident);
-            let typ = self.tcx.node_types().get(&field.id).unwrap().to_string();
+            let def_id = self.tcx.map.local_def_id(field.id);
+            let typ = self.tcx.item_type(def_id).to_string();
             let sub_span = self.span_utils.sub_span_before_token(field.span, token::Colon);
             filter!(self.span_utils, sub_span, field.span, None);
             Some(VariableData {
@@ -313,7 +315,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                            name: ast::Name, span: Span) -> Option<FunctionData> {
         // The qualname for a method is the trait name or name of the struct in an impl in
         // which the method is declared in, followed by the method's name.
-        let (qualname, parent_scope, vis, docs) =
+        let (qualname, parent_scope, decl_id, vis, docs) =
           match self.tcx.impl_of_method(self.tcx.map.local_def_id(id)) {
             Some(impl_id) => match self.tcx.map.get_if_local(impl_id) {
                 Some(NodeItem(item)) => {
@@ -323,12 +325,19 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                             result.push_str(&rustc::hir::print::ty_to_string(&ty));
 
                             let trait_id = self.tcx.trait_id_of_impl(impl_id);
+                            let mut decl_id = None;
                             if let Some(def_id) = trait_id {
                                 result.push_str(" as ");
                                 result.push_str(&self.tcx.item_path_str(def_id));
+                                self.tcx.associated_items(def_id)
+                                    .find(|item| item.name == name)
+                                    .map(|item| decl_id = Some(item.def_id));
                             }
                             result.push_str(">");
-                            (result, trait_id, From::from(&item.vis), docs_for_attrs(&item.attrs))
+
+                            (result, trait_id, decl_id,
+                             From::from(&item.vis),
+                             docs_for_attrs(&item.attrs))
                         }
                         _ => {
                             span_bug!(span,
@@ -351,7 +360,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                     match self.tcx.map.get_if_local(def_id) {
                         Some(NodeItem(item)) => {
                             (format!("::{}", self.tcx.item_path_str(def_id)),
-                             Some(def_id),
+                             Some(def_id), None,
                              From::from(&item.vis),
                              docs_for_attrs(&item.attrs))
                         }
@@ -372,15 +381,6 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         };
 
         let qualname = format!("{}::{}", qualname, name);
-
-        let def_id = self.tcx.map.local_def_id(id);
-        let decl_id = self.tcx.trait_item_of_item(def_id).and_then(|new_def_id| {
-            if new_def_id != def_id {
-                Some(new_def_id)
-            } else {
-                None
-            }
-        });
 
         let sub_span = self.span_utils.sub_span_after_keyword(span, keywords::Fn);
         filter!(self.span_utils, sub_span, span, None);
@@ -418,7 +418,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
 
     pub fn get_expr_data(&self, expr: &ast::Expr) -> Option<Data> {
         let hir_node = self.tcx.map.expect_expr(expr.id);
-        let ty = self.tcx.expr_ty_adjusted_opt(&hir_node);
+        let ty = self.tcx.tables().expr_ty_adjusted_opt(&hir_node);
         if ty.is_none() || ty.unwrap().sty == ty::TyError {
             return None;
         }
@@ -432,7 +432,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                         return None;
                     }
                 };
-                match self.tcx.expr_ty_adjusted(&hir_node).sty {
+                match self.tcx.tables().expr_ty_adjusted(&hir_node).sty {
                     ty::TyAdt(def, _) if !def.is_enum() => {
                         let f = def.struct_variant().field_named(ident.node.name);
                         let sub_span = self.span_utils.span_for_last_ident(expr.span);
@@ -451,7 +451,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                 }
             }
             ast::ExprKind::Struct(ref path, ..) => {
-                match self.tcx.expr_ty_adjusted(&hir_node).sty {
+                match self.tcx.tables().expr_ty_adjusted(&hir_node).sty {
                     ty::TyAdt(def, _) if !def.is_enum() => {
                         let sub_span = self.span_utils.span_for_last_ident(path.span);
                         filter!(self.span_utils, sub_span, path.span, None);
@@ -472,8 +472,8 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             }
             ast::ExprKind::MethodCall(..) => {
                 let method_call = ty::MethodCall::expr(expr.id);
-                let method_id = self.tcx.tables.borrow().method_map[&method_call].def_id;
-                let (def_id, decl_id) = match self.tcx.impl_or_trait_item(method_id).container() {
+                let method_id = self.tcx.tables().method_map[&method_call].def_id;
+                let (def_id, decl_id) = match self.tcx.associated_item(method_id).container {
                     ty::ImplContainer(_) => (Some(method_id), None),
                     ty::TraitContainer(_) => (None, Some(method_id)),
                 };
@@ -498,7 +498,12 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
     }
 
     pub fn get_path_data(&self, id: NodeId, path: &ast::Path) -> Option<Data> {
-        let def = self.tcx.expect_def(id);
+        let resolution = self.tcx.expect_resolution(id);
+        if resolution.depth != 0 {
+            return None;
+        }
+        let def = resolution.base_def;
+
         let sub_span = self.span_utils.span_for_last_ident(path.span);
         filter!(self.span_utils, sub_span, path.span, None);
         match def {
@@ -535,21 +540,10 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                 let sub_span = self.span_utils.sub_span_for_meth_name(path.span);
                 filter!(self.span_utils, sub_span, path.span, None);
                 let def_id = if decl_id.is_local() {
-                    let ti = self.tcx.impl_or_trait_item(decl_id);
-                    match ti.container() {
-                        ty::TraitContainer(def_id) => {
-                            self.tcx
-                                .trait_items(def_id)
-                                .iter()
-                                .find(|mr| mr.name() == ti.name() && self.trait_method_has_body(mr))
-                                .map(|mr| mr.def_id())
-                        }
-                        ty::ImplContainer(def_id) => {
-                            Some(*self.tcx.impl_or_trait_items(def_id).iter().find(|&&mr| {
-                                self.tcx.impl_or_trait_item(mr).name() == ti.name()
-                            }).unwrap())
-                        }
-                    }
+                    let ti = self.tcx.associated_item(decl_id);
+                    self.tcx.associated_items(ti.container.id())
+                        .find(|item| item.name == ti.name && item.defaultness.has_value())
+                        .map(|item| item.def_id)
                 } else {
                     None
                 };
@@ -578,21 +572,8 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             Def::PrimTy(..) |
             Def::SelfTy(..) |
             Def::Label(..) |
+            Def::Macro(..) |
             Def::Err => None,
-        }
-    }
-
-    fn trait_method_has_body(&self, mr: &ty::ImplOrTraitItem) -> bool {
-        let def_id = mr.def_id();
-        if let Some(node_id) = self.tcx.map.as_local_node_id(def_id) {
-            let trait_item = self.tcx.map.expect_trait_item(node_id);
-            if let hir::TraitItem_::MethodTraitItem(_, Some(_)) = trait_item.node {
-                true
-            } else {
-                false
-            }
-        } else {
-            false
         }
     }
 
@@ -753,13 +734,17 @@ impl Visitor for PathCollector {
 }
 
 fn docs_for_attrs(attrs: &[Attribute]) -> String {
-    let doc = InternedString::new("doc");
+    let doc = Symbol::intern("doc");
     let mut result = String::new();
 
     for attr in attrs {
         if attr.name() == doc {
-            if let Some(ref val) = attr.value_str() {
-                result.push_str(&strip_doc_comment_decoration(val));
+            if let Some(val) = attr.value_str() {
+                if attr.is_sugared_doc {
+                    result.push_str(&strip_doc_comment_decoration(&val.as_str()));
+                } else {
+                    result.push_str(&val.as_str());
+                }
                 result.push('\n');
             }
         }

@@ -32,14 +32,15 @@ use rustc::hir::def::Def;
 use rustc::hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
 use rustc::hir::map::{Node, NodeItem};
 use rustc::session::Session;
-use rustc::ty::{self, TyCtxt, ImplOrTraitItem, ImplOrTraitItemContainer};
+use rustc::ty::{self, TyCtxt, AssociatedItemContainer};
 
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::*;
 
 use syntax::ast::{self, NodeId, PatKind, Attribute, CRATE_NODE_ID};
-use syntax::parse::token::{self, keywords};
+use syntax::parse::token;
+use syntax::symbol::keywords;
 use syntax::visit::{self, Visitor};
 use syntax::print::pprust::{path_to_string, ty_to_string, bounds_to_string, generics_to_string};
 use syntax::ptr::P;
@@ -153,7 +154,7 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
         // What could go wrong...?
         if spans.len() < path.segments.len() {
             if generated_code(path.span) {
-                return vec!();
+                return vec![];
             }
             error!("Mis-calculated spans for path '{}'. Found {} spans, expected {}. Found spans:",
                    path_to_string(path),
@@ -166,12 +167,13 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
                        loc.file.name,
                        loc.line);
             }
-            return vec!();
+            error!("    master span: {:?}: `{}`", path.span, self.span.snippet(path.span));
+            return vec![];
         }
 
-        let mut result: Vec<(Span, String)> = vec!();
+        let mut result: Vec<(Span, String)> = vec![];
 
-        let mut segs = vec!();
+        let mut segs = vec![];
         for (i, (seg, span)) in path.segments.iter().zip(&spans).enumerate() {
             segs.push(seg.clone());
             let sub_path = ast::Path {
@@ -274,7 +276,7 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
     fn lookup_def_id(&self, ref_id: NodeId) -> Option<DefId> {
         self.tcx.expect_def_or_none(ref_id).and_then(|def| {
             match def {
-                Def::PrimTy(..) | Def::SelfTy(..) => None,
+                Def::Label(..) | Def::PrimTy(..) | Def::SelfTy(..) | Def::Err => None,
                 def => Some(def.def_id()),
             }
         })
@@ -340,6 +342,7 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
             Def::AssociatedTy(..) |
             Def::AssociatedConst(..) |
             Def::PrimTy(_) |
+            Def::Macro(_) |
             Def::Err => {
                span_bug!(span,
                          "process_def_kind for unexpected item: {:?}",
@@ -355,7 +358,10 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
             collector.visit_pat(&arg.pat);
             let span_utils = self.span.clone();
             for &(id, ref p, ..) in &collector.collected_paths {
-                let typ = self.tcx.node_types().get(&id).unwrap().to_string();
+                let typ = match self.tcx.tables().node_types.get(&id) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
                 // get the span only for the name of the variable (I hope the path is only ever a
                 // variable name, but who knows?)
                 let sub_span = span_utils.span_for_last_ident(p.span);
@@ -401,19 +407,19 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
             // with the right name.
             if !self.span.filter_generated(Some(method_data.span), span) {
                 let container =
-                    self.tcx.impl_or_trait_item(self.tcx.map.local_def_id(id)).container();
+                    self.tcx.associated_item(self.tcx.map.local_def_id(id)).container;
                 let mut trait_id;
                 let mut decl_id = None;
                 match container {
-                    ImplOrTraitItemContainer::ImplContainer(id) => {
+                    AssociatedItemContainer::ImplContainer(id) => {
                         trait_id = self.tcx.trait_id_of_impl(id);
 
                         match trait_id {
                             Some(id) => {
-                                for item in &**self.tcx.trait_items(id) {
-                                    if let &ImplOrTraitItem::MethodTraitItem(ref m) = item {
-                                        if m.name == name {
-                                            decl_id = Some(m.def_id);
+                                for item in self.tcx.associated_items(id) {
+                                    if item.kind == ty::AssociatedKind::Method {
+                                        if item.name == name {
+                                            decl_id = Some(item.def_id);
                                             break;
                                         }
                                     }
@@ -428,7 +434,7 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
                             }
                         }
                     }
-                    ImplOrTraitItemContainer::TraitContainer(id) => {
+                    AssociatedItemContainer::TraitContainer(id) => {
                         trait_id = Some(id);
                     }
                 }
@@ -854,9 +860,7 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
         let path_data = match path_data {
             Some(pd) => pd,
             None => {
-                span_bug!(path.span,
-                          "Unexpected def kind while looking up path in `{}`",
-                          self.span.snippet(path.span))
+                return;
             }
         };
 
@@ -917,11 +921,9 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
         // Modules or types in the path prefix.
         match self.tcx.expect_def(id) {
             Def::Method(did) => {
-                let ti = self.tcx.impl_or_trait_item(did);
-                if let ty::MethodTraitItem(m) = ti {
-                    if m.explicit_self == ty::ExplicitSelfCategory::Static {
-                        self.write_sub_path_trait_truncated(path);
-                    }
+                let ti = self.tcx.associated_item(did);
+                if ti.kind == ty::AssociatedKind::Method && ti.method_has_self_argument {
+                    self.write_sub_path_trait_truncated(path);
                 }
             }
             Def::Fn(..) |
@@ -989,7 +991,13 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
         match p.node {
             PatKind::Struct(ref path, ref fields, _) => {
                 visit::walk_path(self, path);
-                let adt = self.tcx.node_id_to_type(p.id).ty_adt_def().unwrap();
+                let adt = match self.tcx.tables().node_id_to_type_opt(p.id) {
+                    Some(ty) => ty.ty_adt_def().unwrap(),
+                    None => {
+                        visit::walk_pat(self, p);
+                        return;
+                    }
+                };
                 let variant = adt.variant_of_def(self.tcx.expect_def(p.id));
 
                 for &Spanned { node: ref field, span } in fields {
@@ -1024,8 +1032,7 @@ impl<'l, 'tcx: 'l, 'll, D: Dump + 'll> DumpVisitor<'l, 'tcx, 'll, D> {
                 ast::Mutability::Immutable => value.to_string(),
                 _ => String::new(),
             };
-            let types = self.tcx.node_types();
-            let typ = match types.get(&id) {
+            let typ = match self.tcx.tables().node_types.get(&id) {
                 Some(typ) => {
                     let typ = typ.to_string();
                     if !value.is_empty() {
@@ -1356,7 +1363,13 @@ impl<'l, 'tcx: 'l, 'll, D: Dump +'ll> Visitor for DumpVisitor<'l, 'tcx, 'll, D> 
             }
             ast::ExprKind::Struct(ref path, ref fields, ref base) => {
                 let hir_expr = self.save_ctxt.tcx.map.expect_expr(ex.id);
-                let adt = self.tcx.expr_ty(&hir_expr).ty_adt_def().unwrap();
+                let adt = match self.tcx.tables().expr_ty_opt(&hir_expr) {
+                    Some(ty) => ty.ty_adt_def().unwrap(),
+                    None => {
+                        visit::walk_expr(self, ex);
+                        return;
+                    }
+                };
                 let def = self.tcx.expect_def(hir_expr.id);
                 self.process_struct_lit(ex, path, fields, adt.variant_of_def(def), base)
             }
@@ -1382,7 +1395,13 @@ impl<'l, 'tcx: 'l, 'll, D: Dump +'ll> Visitor for DumpVisitor<'l, 'tcx, 'll, D> 
                         return;
                     }
                 };
-                let ty = &self.tcx.expr_ty_adjusted(&hir_node).sty;
+                let ty = match self.tcx.tables().expr_ty_adjusted_opt(&hir_node) {
+                    Some(ty) => &ty.sty,
+                    None => {
+                        visit::walk_expr(self, ex);
+                        return;
+                    }
+                };
                 match *ty {
                     ty::TyAdt(def, _) => {
                         let sub_span = self.span.sub_span_after_token(ex.span, token::Dot);
@@ -1416,7 +1435,7 @@ impl<'l, 'tcx: 'l, 'll, D: Dump +'ll> Visitor for DumpVisitor<'l, 'tcx, 'll, D> 
                 }
 
                 // walk the body
-                self.nest(ex.id, |v| v.visit_block(&body));
+                self.nest(ex.id, |v| v.visit_expr(body));
             }
             ast::ExprKind::ForLoop(ref pattern, ref subexpression, ref block, _) |
             ast::ExprKind::WhileLet(ref pattern, ref subexpression, ref block, _) => {
@@ -1469,7 +1488,7 @@ impl<'l, 'tcx: 'l, 'll, D: Dump +'ll> Visitor for DumpVisitor<'l, 'tcx, 'll, D> 
                     } else {
                         "<mutable>".to_string()
                     };
-                    let typ = self.tcx.node_types()
+                    let typ = self.tcx.tables().node_types
                                   .get(&id).map(|t| t.to_string()).unwrap_or(String::new());
                     value.push_str(": ");
                     value.push_str(&typ);
@@ -1495,7 +1514,8 @@ impl<'l, 'tcx: 'l, 'll, D: Dump +'ll> Visitor for DumpVisitor<'l, 'tcx, 'll, D> 
                 Def::StructCtor(..) | Def::VariantCtor(..) |
                 Def::Const(..) | Def::AssociatedConst(..) |
                 Def::Struct(..) | Def::Variant(..) |
-                Def::TyAlias(..) | Def::AssociatedTy(..) => {
+                Def::TyAlias(..) | Def::AssociatedTy(..) |
+                Def::SelfTy(..) => {
                     paths_to_process.push((id, p.clone(), Some(ref_kind)))
                 }
                 def => error!("unexpected definition kind when processing collected paths: {:?}",

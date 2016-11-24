@@ -35,6 +35,7 @@ use back::link;
 use back::linker::LinkerInfo;
 use llvm::{Linkage, ValueRef, Vector, get_param};
 use llvm;
+use rustc::hir::def::Def;
 use rustc::hir::def_id::DefId;
 use middle::lang_items::{LangItem, ExchangeMallocFnLangItem, StartFnLangItem};
 use rustc::ty::subst::Substs;
@@ -44,7 +45,6 @@ use rustc::ty::adjustment::CustomCoerceUnsized;
 use rustc::dep_graph::{DepNode, WorkProduct};
 use rustc::hir::map as hir_map;
 use rustc::util::common::time;
-use rustc::mir::mir_map::MirMap;
 use session::config::{self, NoDebugInfo};
 use rustc_incremental::IncrementalHashesMap;
 use session::Session;
@@ -74,13 +74,12 @@ use monomorphize::{self, Instance};
 use partitioning::{self, PartitioningStrategy, CodegenUnit};
 use symbol_map::SymbolMap;
 use symbol_names_test;
-use trans_item::TransItem;
+use trans_item::{TransItem, DefPathBasedNames};
 use type_::Type;
 use type_of;
 use value::Value;
 use Disr;
-use util::sha2::Sha256;
-use util::nodemap::{NodeSet, FnvHashMap, FnvHashSet};
+use util::nodemap::{NodeSet, FxHashMap, FxHashSet};
 
 use arena::TypedArena;
 use libc::c_uint;
@@ -214,7 +213,7 @@ pub fn malloc_raw_dyn<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
 
     // Allocate space:
     let def_id = require_alloc_fn(bcx, info_ty, ExchangeMallocFnLangItem);
-    let r = Callee::def(bcx.ccx(), def_id, Substs::empty(bcx.tcx()))
+    let r = Callee::def(bcx.ccx(), def_id, bcx.tcx().intern_substs(&[]))
         .call(bcx, debug_loc, &[size, align], None);
 
     Result::new(r.bcx, PointerCast(r.bcx, r.val, llty_ptr))
@@ -405,7 +404,7 @@ pub fn custom_coerce_unsize_info<'scx, 'tcx>(scx: &SharedCrateContext<'scx, 'tcx
                                              -> CustomCoerceUnsized {
     let trait_ref = ty::Binder(ty::TraitRef {
         def_id: scx.tcx().lang_items.coerce_unsized_trait().unwrap(),
-        substs: Substs::new_trait(scx.tcx(), source_ty, &[target_ty])
+        substs: scx.tcx().mk_substs_trait(source_ty, &[target_ty])
     });
 
     match fulfill_obligation(scx, DUMMY_SP, trait_ref) {
@@ -848,7 +847,7 @@ impl<'blk, 'tcx> FunctionContext<'blk, 'tcx> {
                 common::validate_substs(instance.substs);
                 (instance.substs, Some(instance.def))
             }
-            None => (Substs::empty(ccx.tcx()), None)
+            None => (ccx.tcx().intern_substs(&[]), None)
         };
 
         let local_id = def_id.and_then(|id| ccx.tcx().map.as_local_node_id(id));
@@ -866,7 +865,7 @@ impl<'blk, 'tcx> FunctionContext<'blk, 'tcx> {
             false
         };
 
-        let mir = def_id.and_then(|id| ccx.get_mir(id));
+        let mir = def_id.map(|id| ccx.tcx().item_mir(id));
 
         let debug_context = if let (false, Some((instance, sig, abi)), &Some(ref mir)) =
                 (no_debug, definition, &mir) {
@@ -1004,34 +1003,49 @@ impl<'blk, 'tcx> FunctionContext<'blk, 'tcx> {
     }
 }
 
-/// Builds an LLVM function out of a source function.
-///
-/// If the function closes over its environment a closure will be returned.
-pub fn trans_closure<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
-                               llfndecl: ValueRef,
-                               instance: Instance<'tcx>,
-                               sig: &ty::FnSig<'tcx>,
-                               abi: Abi) {
-    ccx.stats().n_closures.set(ccx.stats().n_closures.get() + 1);
-
-    let _icx = push_ctxt("trans_closure");
-    if !ccx.sess().no_landing_pads() {
-        attributes::emit_uwtable(llfndecl, true);
-    }
+pub fn trans_instance<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>, instance: Instance<'tcx>) {
+    let _s = if ccx.sess().trans_stats() {
+        let mut instance_name = String::new();
+        DefPathBasedNames::new(ccx.tcx(), true, true)
+            .push_def_path(instance.def, &mut instance_name);
+        Some(StatRecorder::new(ccx, instance_name))
+    } else {
+        None
+    };
 
     // this is an info! to allow collecting monomorphization statistics
     // and to allow finding the last function before LLVM aborts from
     // release builds.
-    info!("trans_closure(..., {})", instance);
+    info!("trans_instance({})", instance);
 
-    let fn_ty = FnType::new(ccx, abi, sig, &[]);
+    let _icx = push_ctxt("trans_instance");
+
+    let fn_ty = ccx.tcx().item_type(instance.def);
+    let fn_ty = ccx.tcx().erase_regions(&fn_ty);
+    let fn_ty = monomorphize::apply_param_substs(ccx.shared(), instance.substs, &fn_ty);
+
+    let ty::BareFnTy { abi, ref sig, .. } = *common::ty_fn_ty(ccx, fn_ty);
+    let sig = ccx.tcx().erase_late_bound_regions_and_normalize(sig);
+
+    let lldecl = match ccx.instances().borrow().get(&instance) {
+        Some(&val) => val,
+        None => bug!("Instance `{:?}` not already declared", instance)
+    };
+
+    ccx.stats().n_closures.set(ccx.stats().n_closures.get() + 1);
+
+    if !ccx.sess().no_landing_pads() {
+        attributes::emit_uwtable(lldecl, true);
+    }
+
+    let fn_ty = FnType::new(ccx, abi, &sig, &[]);
 
     let (arena, fcx): (TypedArena<_>, FunctionContext);
     arena = TypedArena::new();
     fcx = FunctionContext::new(ccx,
-                               llfndecl,
+                               lldecl,
                                fn_ty,
-                               Some((instance, sig, abi)),
+                               Some((instance, &sig, abi)),
                                &arena);
 
     if fcx.mir.is_none() {
@@ -1039,26 +1053,6 @@ pub fn trans_closure<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
     }
 
     mir::trans_mir(&fcx);
-}
-
-pub fn trans_instance<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>, instance: Instance<'tcx>) {
-    let _s = StatRecorder::new(ccx, ccx.tcx().item_path_str(instance.def));
-    debug!("trans_instance(instance={:?})", instance);
-    let _icx = push_ctxt("trans_instance");
-
-    let fn_ty = ccx.tcx().lookup_item_type(instance.def).ty;
-    let fn_ty = ccx.tcx().erase_regions(&fn_ty);
-    let fn_ty = monomorphize::apply_param_substs(ccx.shared(), instance.substs, &fn_ty);
-
-    let sig = ccx.tcx().erase_late_bound_regions_and_normalize(fn_ty.fn_sig());
-    let abi = fn_ty.fn_abi();
-
-    let lldecl = match ccx.instances().borrow().get(&instance) {
-        Some(&val) => val,
-        None => bug!("Instance `{:?}` not already declared", instance)
-    };
-
-    trans_closure(ccx, lldecl, instance, &sig, abi);
 }
 
 pub fn trans_ctor_shim<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
@@ -1069,7 +1063,7 @@ pub fn trans_ctor_shim<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
     attributes::inline(llfndecl, attributes::InlineAttr::Hint);
     attributes::set_frame_pointer_elimination(ccx, llfndecl);
 
-    let ctor_ty = ccx.tcx().lookup_item_type(def_id).ty;
+    let ctor_ty = ccx.tcx().item_type(def_id);
     let ctor_ty = monomorphize::apply_param_substs(ccx.shared(), substs, &ctor_ty);
 
     let sig = ccx.tcx().erase_late_bound_regions_and_normalize(&ctor_ty.fn_sig());
@@ -1134,11 +1128,11 @@ pub fn set_link_section(ccx: &CrateContext,
                         llval: ValueRef,
                         attrs: &[ast::Attribute]) {
     if let Some(sect) = attr::first_attr_value_str_by_name(attrs, "link_section") {
-        if contains_null(&sect) {
+        if contains_null(&sect.as_str()) {
             ccx.sess().fatal(&format!("Illegal null byte in link_section value: `{}`", &sect));
         }
         unsafe {
-            let buf = CString::new(sect.as_bytes()).unwrap();
+            let buf = CString::new(sect.as_str().as_bytes()).unwrap();
             llvm::LLVMSetSection(llval, buf.as_ptr());
         }
     }
@@ -1197,6 +1191,9 @@ pub fn maybe_create_entry_wrapper(ccx: &CrateContext) {
         }
         let llfn = declare::declare_cfn(ccx, "main", llfty);
 
+        // `main` should respect same config for frame pointer elimination as rest of code
+        attributes::set_frame_pointer_elimination(ccx, llfn);
+
         let llbb = unsafe {
             llvm::LLVMAppendBasicBlockInContext(ccx.llcx(), llfn, "top\0".as_ptr() as *const _)
         };
@@ -1211,7 +1208,7 @@ pub fn maybe_create_entry_wrapper(ccx: &CrateContext) {
                     Ok(id) => id,
                     Err(s) => ccx.sess().fatal(&s)
                 };
-                let empty_substs = Substs::empty(ccx.tcx());
+                let empty_substs = ccx.tcx().intern_substs(&[]);
                 let start_fn = Callee::def(ccx, start_def_id, empty_substs).reify(ccx);
                 let args = {
                     let opaque_rust_main =
@@ -1263,7 +1260,8 @@ fn write_metadata(cx: &SharedCrateContext,
             config::CrateTypeStaticlib |
             config::CrateTypeCdylib => MetadataKind::None,
 
-            config::CrateTypeRlib => MetadataKind::Uncompressed,
+            config::CrateTypeRlib |
+            config::CrateTypeMetadata => MetadataKind::Uncompressed,
 
             config::CrateTypeDylib |
             config::CrateTypeProcMacro => MetadataKind::Compressed,
@@ -1278,8 +1276,7 @@ fn write_metadata(cx: &SharedCrateContext,
     let metadata = cstore.encode_metadata(cx.tcx(),
                                           cx.export_map(),
                                           cx.link_meta(),
-                                          reachable_ids,
-                                          cx.mir_map());
+                                          reachable_ids);
     if kind == MetadataKind::Uncompressed {
         return metadata;
     }
@@ -1317,7 +1314,7 @@ fn write_metadata(cx: &SharedCrateContext,
 fn internalize_symbols<'a, 'tcx>(sess: &Session,
                                  ccxs: &CrateContextList<'a, 'tcx>,
                                  symbol_map: &SymbolMap<'tcx>,
-                                 reachable: &FnvHashSet<&str>) {
+                                 reachable: &FxHashSet<&str>) {
     let scx = ccxs.shared();
     let tcx = scx.tcx();
 
@@ -1331,7 +1328,7 @@ fn internalize_symbols<'a, 'tcx>(sess: &Session,
     // 'unsafe' because we are holding on to CStr's from the LLVM module within
     // this block.
     unsafe {
-        let mut referenced_somewhere = FnvHashSet();
+        let mut referenced_somewhere = FxHashSet();
 
         // Collect all symbols that need to stay externally visible because they
         // are referenced via a declaration in some other codegen unit.
@@ -1352,7 +1349,7 @@ fn internalize_symbols<'a, 'tcx>(sess: &Session,
 
         // Also collect all symbols for which we cannot adjust linkage, because
         // it is fixed by some directive in the source code (e.g. #[no_mangle]).
-        let linkage_fixed_explicitly: FnvHashSet<_> = scx
+        let linkage_fixed_explicitly: FxHashSet<_> = scx
             .translation_items()
             .borrow()
             .iter()
@@ -1513,7 +1510,7 @@ pub fn filter_reachable_ids(tcx: TyCtxt, reachable: NodeSet) -> NodeSet {
             hir_map::NodeImplItem(&hir::ImplItem {
                 node: hir::ImplItemKind::Method(..), .. }) => {
                 let def_id = tcx.map.local_def_id(id);
-                let generics = tcx.lookup_generics(def_id);
+                let generics = tcx.item_generics(def_id);
                 let attributes = tcx.get_attrs(def_id);
                 (generics.parent_types == 0 && generics.types.is_empty()) &&
                 // Functions marked with #[inline] are only ever translated
@@ -1527,7 +1524,6 @@ pub fn filter_reachable_ids(tcx: TyCtxt, reachable: NodeSet) -> NodeSet {
 }
 
 pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                             mir_map: &MirMap<'tcx>,
                              analysis: ty::CrateAnalysis,
                              incremental_hashes_map: &IncrementalHashesMap)
                              -> CrateTranslation {
@@ -1551,9 +1547,7 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let link_meta = link::build_link_meta(incremental_hashes_map, name);
 
     let shared_ccx = SharedCrateContext::new(tcx,
-                                             &mir_map,
                                              export_map,
-                                             Sha256::new(),
                                              link_meta.clone(),
                                              reachable,
                                              check_overflow);
@@ -1607,7 +1601,8 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     assert_module_sources::assert_module_sources(tcx, &modules);
 
     // Skip crate items and just output metadata in -Z no-trans mode.
-    if tcx.sess.opts.debugging_opts.no_trans {
+    if tcx.sess.opts.debugging_opts.no_trans ||
+       tcx.sess.crate_types.borrow().iter().all(|ct| ct == &config::CrateTypeMetadata) {
         let linker_info = LinkerInfo::new(&shared_ccx, &[]);
         return CrateTranslation {
             modules: modules,
@@ -1616,7 +1611,8 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             metadata: metadata,
             reachable: vec![],
             no_builtins: no_builtins,
-            linker_info: linker_info
+            linker_info: linker_info,
+            windows_subsystem: None,
         };
     }
 
@@ -1716,8 +1712,21 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // `reachable_symbols` list later on so it should be ok.
     for cnum in sess.cstore.crates() {
         let syms = sess.cstore.reachable_ids(cnum);
-        reachable_symbols.extend(syms.into_iter().filter(|did| {
-            sess.cstore.is_extern_item(shared_ccx.tcx(), *did)
+        reachable_symbols.extend(syms.into_iter().filter(|&def_id| {
+            let applicable = match sess.cstore.describe_def(def_id) {
+                Some(Def::Static(..)) => true,
+                Some(Def::Fn(_)) => {
+                    shared_ccx.tcx().item_generics(def_id).types.is_empty()
+                }
+                _ => false
+            };
+
+            if applicable {
+                let attrs = shared_ccx.tcx().get_attrs(def_id);
+                attr::contains_extern_indicator(sess.diagnostic(), &attrs)
+            } else {
+                false
+            }
         }).map(|did| {
             symbol_for_def_id(did, &shared_ccx, &symbol_map)
         }));
@@ -1739,6 +1748,17 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     let linker_info = LinkerInfo::new(&shared_ccx, &reachable_symbols);
 
+    let subsystem = attr::first_attr_value_str_by_name(&krate.attrs,
+                                                       "windows_subsystem");
+    let windows_subsystem = subsystem.map(|subsystem| {
+        if subsystem != "windows" && subsystem != "console" {
+            tcx.sess.fatal(&format!("invalid windows subsystem `{}`, only \
+                                     `windows` and `console` are allowed",
+                                    subsystem));
+        }
+        subsystem.to_string()
+    });
+
     CrateTranslation {
         modules: modules,
         metadata_module: metadata_module,
@@ -1746,7 +1766,8 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         metadata: metadata,
         reachable: reachable_symbols,
         no_builtins: no_builtins,
-        linker_info: linker_info
+        linker_info: linker_info,
+        windows_subsystem: windows_subsystem,
     }
 }
 
@@ -1838,7 +1859,7 @@ fn collect_and_partition_translation_items<'a, 'tcx>(scx: &SharedCrateContext<'a
     }
 
     if scx.sess().opts.debugging_opts.print_trans_items.is_some() {
-        let mut item_to_cgus = FnvHashMap();
+        let mut item_to_cgus = FxHashMap();
 
         for cgu in &codegen_units {
             for (&trans_item, &linkage) in cgu.items() {

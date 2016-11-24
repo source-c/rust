@@ -49,12 +49,6 @@ pub trait TypeRelation<'a, 'gcx: 'a+'tcx, 'tcx: 'a> : Sized {
         Relate::relate(self, a, b)
     }
 
-    /// Relete elements of two slices pairwise.
-    fn relate_zip<T: Relate<'tcx>>(&mut self, a: &[T], b: &[T]) -> RelateResult<'tcx, Vec<T>> {
-        assert_eq!(a.len(), b.len());
-        a.iter().zip(b).map(|(a, b)| self.relate(a, b)).collect()
-    }
-
     /// Switch variance for the purpose of relating `a` and `b`.
     fn relate_with_variance<T: Relate<'tcx>>(&mut self,
                                              variance: ty::Variance,
@@ -158,7 +152,7 @@ pub fn relate_substs<'a, 'gcx, 'tcx, R>(relation: &mut R,
         }
     });
 
-    Substs::maybe_new(tcx, params)
+    Ok(tcx.mk_substs(params)?)
 }
 
 impl<'tcx> Relate<'tcx> for &'tcx ty::BareFnTy<'tcx> {
@@ -489,10 +483,7 @@ pub fn super_relate_tys<'a, 'gcx, 'tcx, R>(relation: &mut R,
         (&ty::TyTuple(as_), &ty::TyTuple(bs)) =>
         {
             if as_.len() == bs.len() {
-                let ts = as_.iter().zip(bs)
-                            .map(|(a, b)| relation.relate(a, b))
-                            .collect::<Result<Vec<_>, _>>()?;
-                Ok(tcx.mk_tup(&ts))
+                Ok(tcx.mk_tup(as_.iter().zip(bs).map(|(a, b)| relation.relate(a, b)))?)
             } else if !(as_.is_empty() || bs.is_empty()) {
                 Err(TypeError::TupleSize(
                     expected_found(relation, &as_.len(), &bs.len())))
@@ -543,12 +534,8 @@ impl<'tcx> Relate<'tcx> for ty::ClosureSubsts<'tcx> {
                            -> RelateResult<'tcx, ty::ClosureSubsts<'tcx>>
         where R: TypeRelation<'a, 'gcx, 'tcx>, 'gcx: 'a+'tcx, 'tcx: 'a
     {
-        let substs = relate_substs(relation, None, a.func_substs, b.func_substs)?;
-        let upvar_tys = relation.relate_zip(&a.upvar_tys, &b.upvar_tys)?;
-        Ok(ty::ClosureSubsts {
-            func_substs: substs,
-            upvar_tys: relation.tcx().mk_type_list(&upvar_tys)
-        })
+        let substs = relate_substs(relation, None, a.substs, b.substs)?;
+        Ok(ty::ClosureSubsts { substs: substs })
     }
 }
 

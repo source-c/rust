@@ -30,7 +30,6 @@ use rustc::hir;
 use std::ffi::{CStr, CString};
 use syntax::ast;
 use syntax::attr;
-use syntax::parse::token;
 
 pub fn ptrcast(val: ValueRef, ty: Type) -> ValueRef {
     unsafe {
@@ -44,10 +43,7 @@ pub fn addr_of_mut(ccx: &CrateContext,
                    kind: &str)
                     -> ValueRef {
     unsafe {
-        // FIXME: this totally needs a better name generation scheme, perhaps a simple global
-        // counter? Also most other uses of gensym in trans.
-        let gsym = token::gensym("_");
-        let name = format!("{}{}", kind, gsym.0);
+        let name = ccx.generate_local_symbol_name(kind);
         let gv = declare::define_global(ccx, &name[..], val_ty(cv)).unwrap_or_else(||{
             bug!("symbol `{}` is already defined", name);
         });
@@ -88,7 +84,7 @@ pub fn get_static(ccx: &CrateContext, def_id: DefId) -> ValueRef {
         return g;
     }
 
-    let ty = ccx.tcx().lookup_item_type(def_id).ty;
+    let ty = ccx.tcx().item_type(def_id);
     let g = if let Some(id) = ccx.tcx().map.as_local_node_id(def_id) {
 
         let llty = type_of::type_of(ccx, ty);
@@ -127,7 +123,7 @@ pub fn get_static(ccx: &CrateContext, def_id: DefId) -> ValueRef {
                     // extern "C" fn() from being non-null, so we can't just declare a
                     // static and call it a day. Some linkages (like weak) will make it such
                     // that the static actually has a null value.
-                    let linkage = match base::llvm_linkage_by_name(&name) {
+                    let linkage = match base::llvm_linkage_by_name(&name.as_str()) {
                         Some(linkage) => linkage,
                         None => {
                             ccx.sess().span_fatal(span, "invalid linkage specified");
@@ -230,7 +226,7 @@ pub fn trans_static(ccx: &CrateContext,
             v
         };
 
-        let ty = ccx.tcx().lookup_item_type(def_id).ty;
+        let ty = ccx.tcx().item_type(def_id);
         let llty = type_of::type_of(ccx, ty);
         let g = if val_llty == llty {
             g

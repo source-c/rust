@@ -328,6 +328,8 @@ pub use self::traits::{FromIterator, IntoIterator, DoubleEndedIterator, Extend};
 pub use self::traits::{ExactSizeIterator, Sum, Product};
 #[unstable(feature = "fused", issue = "35602")]
 pub use self::traits::FusedIterator;
+#[unstable(feature = "trusted_len", issue = "37572")]
+pub use self::traits::TrustedLen;
 
 mod iterator;
 mod range;
@@ -372,6 +374,10 @@ impl<I> ExactSizeIterator for Rev<I>
 impl<I> FusedIterator for Rev<I>
     where I: FusedIterator + DoubleEndedIterator {}
 
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<I> TrustedLen for Rev<I>
+    where I: TrustedLen + DoubleEndedIterator {}
+
 /// An iterator that clones the elements of an underlying iterator.
 ///
 /// This `struct` is created by the [`cloned()`] method on [`Iterator`]. See its
@@ -398,6 +404,12 @@ impl<'a, I, T: 'a> Iterator for Cloned<I>
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.it.size_hint()
+    }
+
+    fn fold<Acc, F>(self, init: Acc, mut f: F) -> Acc
+        where F: FnMut(Acc, Self::Item) -> Acc,
+    {
+        self.it.fold(init, move |acc, elt| f(acc, elt.clone()))
     }
 }
 
@@ -431,6 +443,12 @@ unsafe impl<'a, I, T: 'a> TrustedRandomAccess for Cloned<I>
     #[inline]
     fn may_have_side_effect() -> bool { true }
 }
+
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<'a, I, T: 'a> TrustedLen for Cloned<I>
+    where I: TrustedLen<Item=&'a T>,
+          T: Clone
+{}
 
 /// An iterator that repeats endlessly.
 ///
@@ -544,6 +562,25 @@ impl<A, B> Iterator for Chain<A, B> where
         }
     }
 
+    fn fold<Acc, F>(self, init: Acc, mut f: F) -> Acc
+        where F: FnMut(Acc, Self::Item) -> Acc,
+    {
+        let mut accum = init;
+        match self.state {
+            ChainState::Both | ChainState::Front => {
+                accum = self.a.fold(accum, &mut f);
+            }
+            _ => { }
+        }
+        match self.state {
+            ChainState::Both | ChainState::Back => {
+                accum = self.b.fold(accum, &mut f);
+            }
+            _ => { }
+        }
+        accum
+    }
+
     #[inline]
     fn nth(&mut self, mut n: usize) -> Option<A::Item> {
         match self.state {
@@ -640,6 +677,11 @@ impl<A, B> DoubleEndedIterator for Chain<A, B> where
 impl<A, B> FusedIterator for Chain<A, B>
     where A: FusedIterator,
           B: FusedIterator<Item=A::Item>,
+{}
+
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<A, B> TrustedLen for Chain<A, B>
+    where A: TrustedLen, B: TrustedLen<Item=A::Item>,
 {}
 
 /// An iterator that iterates two other iterators simultaneously.
@@ -859,6 +901,11 @@ unsafe impl<A, B> TrustedRandomAccess for Zip<A, B>
 impl<A, B> FusedIterator for Zip<A, B>
     where A: FusedIterator, B: FusedIterator, {}
 
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<A, B> TrustedLen for Zip<A, B>
+    where A: TrustedLen, B: TrustedLen,
+{}
+
 /// An iterator that maps the values of `iter` with `f`.
 ///
 /// This `struct` is created by the [`map()`] method on [`Iterator`]. See its
@@ -939,6 +986,13 @@ impl<B, I: Iterator, F> Iterator for Map<I, F> where F: FnMut(I::Item) -> B {
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.iter.size_hint()
     }
+
+    fn fold<Acc, G>(self, init: Acc, mut g: G) -> Acc
+        where G: FnMut(Acc, Self::Item) -> Acc,
+    {
+        let mut f = self.f;
+        self.iter.fold(init, move |acc, elt| g(acc, f(elt)))
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -958,6 +1012,11 @@ impl<B, I: ExactSizeIterator, F> ExactSizeIterator for Map<I, F>
 #[unstable(feature = "fused", issue = "35602")]
 impl<B, I: FusedIterator, F> FusedIterator for Map<I, F>
     where F: FnMut(I::Item) -> B {}
+
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<B, I, F> TrustedLen for Map<I, F>
+    where I: TrustedLen,
+          F: FnMut(I::Item) -> B {}
 
 #[doc(hidden)]
 unsafe impl<B, I, F> TrustedRandomAccess for Map<I, F>
@@ -1195,6 +1254,12 @@ unsafe impl<I> TrustedRandomAccess for Enumerate<I>
 #[unstable(feature = "fused", issue = "35602")]
 impl<I> FusedIterator for Enumerate<I> where I: FusedIterator {}
 
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<I> TrustedLen for Enumerate<I>
+    where I: TrustedLen,
+{}
+
+
 /// An iterator with a `peek()` that returns an optional reference to the next
 /// element.
 ///
@@ -1208,54 +1273,68 @@ impl<I> FusedIterator for Enumerate<I> where I: FusedIterator {}
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Peekable<I: Iterator> {
     iter: I,
-    peeked: Option<I::Item>,
+    /// Remember a peeked value, even if it was None.
+    peeked: Option<Option<I::Item>>,
 }
 
+// Peekable must remember if a None has been seen in the `.peek()` method.
+// It ensures that `.peek(); .peek();` or `.peek(); .next();` only advances the
+// underlying iterator at most once. This does not by itself make the iterator
+// fused.
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<I: Iterator> Iterator for Peekable<I> {
     type Item = I::Item;
 
     #[inline]
     fn next(&mut self) -> Option<I::Item> {
-        match self.peeked {
-            Some(_) => self.peeked.take(),
+        match self.peeked.take() {
+            Some(v) => v,
             None => self.iter.next(),
         }
     }
 
     #[inline]
     #[rustc_inherit_overflow_checks]
-    fn count(self) -> usize {
-        (if self.peeked.is_some() { 1 } else { 0 }) + self.iter.count()
+    fn count(mut self) -> usize {
+        match self.peeked.take() {
+            Some(None) => 0,
+            Some(Some(_)) => 1 + self.iter.count(),
+            None => self.iter.count(),
+        }
     }
 
     #[inline]
     fn nth(&mut self, n: usize) -> Option<I::Item> {
-        match self.peeked {
-            Some(_) if n == 0 => self.peeked.take(),
-            Some(_) => {
-                self.peeked = None;
-                self.iter.nth(n-1)
-            },
-            None => self.iter.nth(n)
+        match self.peeked.take() {
+            // the .take() below is just to avoid "move into pattern guard"
+            Some(ref mut v) if n == 0 => v.take(),
+            Some(None) => None,
+            Some(Some(_)) => self.iter.nth(n - 1),
+            None => self.iter.nth(n),
         }
     }
 
     #[inline]
-    fn last(self) -> Option<I::Item> {
-        self.iter.last().or(self.peeked)
+    fn last(mut self) -> Option<I::Item> {
+        let peek_opt = match self.peeked.take() {
+            Some(None) => return None,
+            Some(v) => v,
+            None => None,
+        };
+        self.iter.last().or(peek_opt)
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
+        let peek_len = match self.peeked {
+            Some(None) => return (0, Some(0)),
+            Some(Some(_)) => 1,
+            None => 0,
+        };
         let (lo, hi) = self.iter.size_hint();
-        if self.peeked.is_some() {
-            let lo = lo.saturating_add(1);
-            let hi = hi.and_then(|x| x.checked_add(1));
-            (lo, hi)
-        } else {
-            (lo, hi)
-        }
+        let lo = lo.saturating_add(peek_len);
+        let hi = hi.and_then(|x| x.checked_add(peek_len));
+        (lo, hi)
     }
 }
 
@@ -1307,11 +1386,12 @@ impl<I: Iterator> Peekable<I> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn peek(&mut self) -> Option<&I::Item> {
         if self.peeked.is_none() {
-            self.peeked = self.iter.next();
+            self.peeked = Some(self.iter.next());
         }
         match self.peeked {
-            Some(ref value) => Some(value),
-            None => None,
+            Some(Some(ref value)) => Some(value),
+            Some(None) => None,
+            _ => unreachable!(),
         }
     }
 }

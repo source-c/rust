@@ -135,10 +135,10 @@ use boxed::Box;
 /// Indexing is intended to be a constant-time operation, but UTF-8 encoding
 /// does not allow us to do this. Furthermore, it's not clear what sort of
 /// thing the index should return: a byte, a codepoint, or a grapheme cluster.
-/// The [`as_bytes()`] and [`chars()`] methods return iterators over the first
+/// The [`bytes()`] and [`chars()`] methods return iterators over the first
 /// two, respectively.
 ///
-/// [`as_bytes()`]: #method.as_bytes
+/// [`bytes()`]: #method.bytes
 /// [`chars()`]: #method.chars
 ///
 /// # Deref
@@ -1860,6 +1860,13 @@ impl<'a> From<&'a str> for String {
     }
 }
 
+#[stable(feature = "string_from_cow_str", since = "1.14.0")]
+impl<'a> From<Cow<'a, str>> for String {
+    fn from(s: Cow<'a, str>) -> String {
+        s.into_owned()
+    }
+}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a> From<&'a str> for Cow<'a, str> {
     #[inline]
@@ -1897,10 +1904,10 @@ impl<'a> FromIterator<String> for Cow<'a, str> {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl Into<Vec<u8>> for String {
-    fn into(self) -> Vec<u8> {
-        self.into_bytes()
+#[stable(feature = "from_string_for_vec_u8", since = "1.14.0")]
+impl From<String> for Vec<u8> {
+    fn from(string : String) -> Vec<u8> {
+        string.into_bytes()
     }
 }
 

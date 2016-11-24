@@ -17,7 +17,7 @@ use middle::dependency_format;
 use session::search_paths::PathKind;
 use session::config::DebugInfoLevel;
 use ty::tls;
-use util::nodemap::{NodeMap, FnvHashMap};
+use util::nodemap::{NodeMap, FxHashMap, FxHashSet};
 use util::common::duration_to_secs_str;
 use mir::transform as mir_pass;
 
@@ -28,7 +28,7 @@ use syntax::json::JsonEmitter;
 use syntax::feature_gate;
 use syntax::parse;
 use syntax::parse::ParseSess;
-use syntax::parse::token;
+use syntax::symbol::Symbol;
 use syntax::{ast, codemap};
 use syntax::feature_gate::AttributeType;
 use syntax_pos::{Span, MultiSpan};
@@ -74,7 +74,11 @@ pub struct Session {
     pub local_crate_source_file: Option<PathBuf>,
     pub working_dir: PathBuf,
     pub lint_store: RefCell<lint::LintStore>,
-    pub lints: RefCell<NodeMap<Vec<(lint::LintId, Span, String)>>>,
+    pub lints: RefCell<NodeMap<Vec<lint::EarlyLint>>>,
+    /// Set of (LintId, span, message) tuples tracking lint (sub)diagnostics
+    /// that have been set once, but should not be set again, in order to avoid
+    /// redundantly verbose output (Issue #24690).
+    pub one_time_diagnostics: RefCell<FxHashSet<(lint::LintId, Span, String)>>,
     pub plugin_llvm_passes: RefCell<Vec<String>>,
     pub mir_passes: RefCell<mir_pass::Passes>,
     pub plugin_attributes: RefCell<Vec<(String, AttributeType)>>,
@@ -85,7 +89,7 @@ pub struct Session {
     // forms a unique global identifier for the crate. It is used to allow
     // multiple crates with the same name to coexist. See the
     // trans::back::symbol_names module for more information.
-    pub crate_disambiguator: RefCell<token::InternedString>,
+    pub crate_disambiguator: RefCell<Symbol>,
     pub features: RefCell<feature_gate::Features>,
 
     /// The maximum recursion limit for potentially infinitely recursive
@@ -125,8 +129,8 @@ pub struct PerfStats {
 }
 
 impl Session {
-    pub fn local_crate_disambiguator(&self) -> token::InternedString {
-        self.crate_disambiguator.borrow().clone()
+    pub fn local_crate_disambiguator(&self) -> Symbol {
+        *self.crate_disambiguator.borrow()
     }
     pub fn struct_span_warn<'a, S: Into<MultiSpan>>(&'a self,
                                                     sp: S,
@@ -254,21 +258,31 @@ impl Session {
     pub fn unimpl(&self, msg: &str) -> ! {
         self.diagnostic().unimpl(msg)
     }
-    pub fn add_lint(&self,
-                    lint: &'static lint::Lint,
-                    id: ast::NodeId,
-                    sp: Span,
-                    msg: String) {
+    pub fn add_lint<S: Into<MultiSpan>>(&self,
+                                        lint: &'static lint::Lint,
+                                        id: ast::NodeId,
+                                        sp: S,
+                                        msg: String)
+    {
+        self.add_lint_diagnostic(lint, id, (sp, &msg[..]))
+    }
+
+    pub fn add_lint_diagnostic<M>(&self,
+                                  lint: &'static lint::Lint,
+                                  id: ast::NodeId,
+                                  msg: M)
+        where M: lint::IntoEarlyLint,
+    {
         let lint_id = lint::LintId::of(lint);
         let mut lints = self.lints.borrow_mut();
+        let early_lint = msg.into_early_lint(lint_id);
         if let Some(arr) = lints.get_mut(&id) {
-            let tuple = (lint_id, sp, msg);
-            if !arr.contains(&tuple) {
-                arr.push(tuple);
+            if !arr.contains(&early_lint) {
+                arr.push(early_lint);
             }
             return;
         }
-        lints.insert(id, vec!((lint_id, sp, msg)));
+        lints.insert(id, vec![early_lint]);
     }
     pub fn reserve_node_ids(&self, count: usize) -> ast::NodeId {
         let id = self.next_node_id.get();
@@ -288,6 +302,35 @@ impl Session {
     pub fn diagnostic<'a>(&'a self) -> &'a errors::Handler {
         &self.parse_sess.span_diagnostic
     }
+
+    /// Analogous to calling `.span_note` on the given DiagnosticBuilder, but
+    /// deduplicates on lint ID, span, and message for this `Session` if we're
+    /// not outputting in JSON mode.
+    //
+    // FIXME: if the need arises for one-time diagnostics other than
+    // `span_note`, we almost certainly want to generalize this
+    // "check/insert-into the one-time diagnostics map, then set message if
+    // it's not already there" code to accomodate all of them
+    pub fn diag_span_note_once<'a, 'b>(&'a self,
+                                       diag_builder: &'b mut DiagnosticBuilder<'a>,
+                                       lint: &'static lint::Lint, span: Span, message: &str) {
+        match self.opts.error_format {
+            // when outputting JSON for tool consumption, the tool might want
+            // the duplicates
+            config::ErrorOutputType::Json => {
+                diag_builder.span_note(span, &message);
+            },
+            _ => {
+                let lint_id = lint::LintId::of(lint);
+                let id_span_message = (lint_id, span, message.to_owned());
+                let fresh = self.one_time_diagnostics.borrow_mut().insert(id_span_message);
+                if fresh {
+                    diag_builder.span_note(span, &message);
+                }
+            }
+        }
+    }
+
     pub fn codemap<'a>(&'a self) -> &'a codemap::CodeMap {
         self.parse_sess.codemap()
     }
@@ -561,12 +604,13 @@ pub fn build_session_(sopts: config::Options,
         working_dir: env::current_dir().unwrap(),
         lint_store: RefCell::new(lint::LintStore::new()),
         lints: RefCell::new(NodeMap()),
+        one_time_diagnostics: RefCell::new(FxHashSet()),
         plugin_llvm_passes: RefCell::new(Vec::new()),
         mir_passes: RefCell::new(mir_pass::Passes::new()),
         plugin_attributes: RefCell::new(Vec::new()),
         crate_types: RefCell::new(Vec::new()),
-        dependency_formats: RefCell::new(FnvHashMap()),
-        crate_disambiguator: RefCell::new(token::intern("").as_str()),
+        dependency_formats: RefCell::new(FxHashMap()),
+        crate_disambiguator: RefCell::new(Symbol::intern("")),
         features: RefCell::new(feature_gate::Features::new()),
         recursion_limit: Cell::new(64),
         next_node_id: Cell::new(NodeId::new(1)),

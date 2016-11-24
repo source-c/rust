@@ -254,9 +254,14 @@ impl<'ast> Map<'ast> {
                         return DepNode::Hir(def_id);
                     }
 
+                    EntryImplItem(..) => {
+                        let def_id = self.local_def_id(id);
+                        assert!(!self.is_inlined_def_id(def_id));
+                        return DepNode::Hir(def_id);
+                    }
+
                     EntryForeignItem(p, _) |
                     EntryTraitItem(p, _) |
-                    EntryImplItem(p, _) |
                     EntryVariant(p, _) |
                     EntryExpr(p, _) |
                     EntryStmt(p, _) |
@@ -376,6 +381,14 @@ impl<'ast> Map<'ast> {
 
     pub fn krate(&self) -> &'ast Crate {
         self.forest.krate()
+    }
+
+    pub fn impl_item(&self, id: ImplItemId) -> &'ast ImplItem {
+        self.read(id.node_id);
+
+        // NB: intentionally bypass `self.forest.krate()` so that we
+        // do not trigger a read of the whole krate here
+        self.forest.krate.impl_item(id)
     }
 
     /// Get the attributes on the krate. This is preferable to
@@ -752,7 +765,7 @@ impl<'a, 'ast> NodesMatchingSuffix<'a, 'ast> {
                 None => return false,
                 Some((node_id, name)) => (node_id, name),
             };
-            if &part[..] != mod_name.as_str() {
+            if mod_name != &**part {
                 return false;
             }
             cursor = self.map.get_parent(mod_id);
@@ -790,8 +803,7 @@ impl<'a, 'ast> NodesMatchingSuffix<'a, 'ast> {
     // We are looking at some node `n` with a given name and parent
     // id; do their names match what I am seeking?
     fn matches_names(&self, parent_of_n: NodeId, name: Name) -> bool {
-        name.as_str() == &self.item_name[..] &&
-            self.suffix_matches(parent_of_n)
+        name == &**self.item_name && self.suffix_matches(parent_of_n)
     }
 }
 

@@ -12,7 +12,7 @@ use llvm::{self, ValueRef};
 use rustc_const_eval::{ErrKind, ConstEvalErr, note_const_eval_err};
 use rustc::middle::lang_items;
 use rustc::ty;
-use rustc::mir::repr as mir;
+use rustc::mir;
 use abi::{Abi, FnType, ArgType};
 use adt;
 use base;
@@ -29,21 +29,22 @@ use type_of;
 use glue;
 use type_::Type;
 
-use rustc_data_structures::fnv::FnvHashMap;
-use syntax::parse::token;
+use rustc_data_structures::fx::FxHashMap;
+use syntax::symbol::Symbol;
 
 use super::{MirContext, LocalRef};
 use super::analyze::CleanupKind;
 use super::constant::Const;
 use super::lvalue::{LvalueRef};
 use super::operand::OperandRef;
-use super::operand::OperandValue::*;
+use super::operand::OperandValue::{Pair, Ref, Immediate};
+
+use std::cell::Ref as CellRef;
 
 impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
     pub fn trans_block(&mut self, bb: mir::BasicBlock) {
         let mut bcx = self.bcx(bb);
-        let mir = self.mir.clone();
-        let data = &mir[bb];
+        let data = &CellRef::clone(&self.mir)[bb];
 
         debug!("trans_block({:?}={:?})", bb, data);
 
@@ -115,6 +116,9 @@ impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
                 if let Some(cleanup_pad) = cleanup_pad {
                     bcx.cleanup_ret(cleanup_pad, None);
                 } else {
+                    let llpersonality = bcx.fcx().eh_personality();
+                    bcx.set_personality_fn(llpersonality);
+
                     let ps = self.get_personality_slot(&bcx);
                     let lp = bcx.load(ps);
                     bcx.with_block(|bcx| {
@@ -143,7 +147,7 @@ impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
                     adt::trans_get_discr(bcx, ty, discr_lvalue.llval, None, true)
                 );
 
-                let mut bb_hist = FnvHashMap();
+                let mut bb_hist = FxHashMap();
                 for target in targets {
                     *bb_hist.entry(target).or_insert(0) += 1;
                 }
@@ -228,7 +232,7 @@ impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
             }
 
             mir::TerminatorKind::Drop { ref location, target, unwind } => {
-                let ty = location.ty(&mir, bcx.tcx()).to_ty(bcx.tcx());
+                let ty = location.ty(&self.mir, bcx.tcx()).to_ty(bcx.tcx());
                 let ty = bcx.monomorphize(&ty);
 
                 // Double check for necessity to drop
@@ -320,7 +324,7 @@ impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
 
                 // Get the location information.
                 let loc = bcx.sess().codemap().lookup_char_pos(span.lo);
-                let filename = token::intern_and_get_ident(&loc.file.name);
+                let filename = Symbol::intern(&loc.file.name).as_str();
                 let filename = C_str_slice(bcx.ccx(), filename);
                 let line = C_u32(bcx.ccx(), loc.line as u32);
 
@@ -350,7 +354,7 @@ impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
                          const_err)
                     }
                     mir::AssertMessage::Math(ref err) => {
-                        let msg_str = token::intern_and_get_ident(err.description());
+                        let msg_str = Symbol::intern(err.description()).as_str();
                         let msg_str = C_str_slice(bcx.ccx(), msg_str);
                         let msg_file_line = C_struct(bcx.ccx(),
                                                      &[msg_str, filename, line],

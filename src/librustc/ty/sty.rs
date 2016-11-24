@@ -11,6 +11,7 @@
 //! This module contains TypeVariants and its major components
 
 use hir::def_id::DefId;
+
 use middle::region;
 use ty::subst::Substs;
 use ty::{self, AdtDef, ToPredicate, TypeFlags, Ty, TyCtxt, TypeFoldable};
@@ -21,8 +22,9 @@ use collections::enum_set::{self, EnumSet, CLike};
 use std::fmt;
 use std::ops;
 use syntax::abi;
-use syntax::ast::{self, Name};
-use syntax::parse::token::{keywords, InternedString};
+use syntax::ast::{self, Name, NodeId};
+use syntax::symbol::{keywords, InternedString};
+use util::nodemap::FxHashSet;
 
 use serialize;
 
@@ -164,7 +166,7 @@ pub enum TypeVariants<'tcx> {
     /// Anonymized (`impl Trait`) type found in a return type.
     /// The DefId comes from the `impl Trait` ast::Ty node, and the
     /// substitutions are for the generics of the function in question.
-    /// After typeck, the concrete type can be found in the `tcache` map.
+    /// After typeck, the concrete type can be found in the `types` map.
     TyAnon(DefId, &'tcx Substs<'tcx>),
 
     /// A type parameter; for example, `T` in `fn f<T>(x: T) {}
@@ -254,15 +256,23 @@ pub enum TypeVariants<'tcx> {
 /// handle). Plus it fixes an ICE. :P
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, RustcEncodable, RustcDecodable)]
 pub struct ClosureSubsts<'tcx> {
-    /// Lifetime and type parameters from the enclosing function.
+    /// Lifetime and type parameters from the enclosing function,
+    /// concatenated with the types of the upvars.
+    ///
     /// These are separated out because trans wants to pass them around
     /// when monomorphizing.
-    pub func_substs: &'tcx Substs<'tcx>,
+    pub substs: &'tcx Substs<'tcx>,
+}
 
-    /// The types of the upvars. The list parallels the freevars and
-    /// `upvar_borrows` lists. These are kept distinct so that we can
-    /// easily index into them.
-    pub upvar_tys: &'tcx Slice<Ty<'tcx>>
+impl<'a, 'gcx, 'acx, 'tcx> ClosureSubsts<'tcx> {
+    #[inline]
+    pub fn upvar_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'acx>) ->
+        impl Iterator<Item=Ty<'tcx>> + 'tcx
+    {
+        let generics = tcx.item_generics(def_id);
+        self.substs[self.substs.len()-generics.own_count()..].iter().map(
+            |t| t.as_type().expect("unexpected region in upvars"))
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
@@ -406,7 +416,7 @@ impl<T> Binder<T> {
 
 impl fmt::Debug for TypeFlags {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.bits)
+        write!(f, "{:x}", self.bits)
     }
 }
 
@@ -556,7 +566,7 @@ pub struct DebruijnIndex {
 ///
 /// These are regions that are stored behind a binder and must be substituted
 /// with some concrete region before being used. There are 2 kind of
-/// bound regions: early-bound, which are bound in a TypeScheme/TraitDef,
+/// bound regions: early-bound, which are bound in an item's Generics,
 /// and are substituted by a Substs,  and late-bound, which are part of
 /// higher-ranked types (e.g. `for<'a> fn(&'a ())`) and are substituted by
 /// the likes of `liberate_late_bound_regions`. The distinction exists
@@ -866,6 +876,35 @@ impl Region {
             r => r
         }
     }
+
+    pub fn type_flags(&self) -> TypeFlags {
+        let mut flags = TypeFlags::empty();
+
+        match *self {
+            ty::ReVar(..) => {
+                flags = flags | TypeFlags::HAS_RE_INFER;
+                flags = flags | TypeFlags::KEEP_IN_LOCAL_TCX;
+            }
+            ty::ReSkolemized(..) => {
+                flags = flags | TypeFlags::HAS_RE_INFER;
+                flags = flags | TypeFlags::HAS_RE_SKOL;
+                flags = flags | TypeFlags::KEEP_IN_LOCAL_TCX;
+            }
+            ty::ReLateBound(..) => { }
+            ty::ReEarlyBound(..) => { flags = flags | TypeFlags::HAS_RE_EARLY_BOUND; }
+            ty::ReStatic | ty::ReErased => { }
+            _ => { flags = flags | TypeFlags::HAS_FREE_REGIONS; }
+        }
+
+        match *self {
+            ty::ReStatic | ty::ReEmpty | ty::ReErased => (),
+            _ => flags = flags | TypeFlags::HAS_LOCAL_NAMES,
+        }
+
+        debug!("type_flags({:?}) = {:?}", self, flags);
+
+        flags
+    }
 }
 
 // Type utilities
@@ -891,19 +930,27 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
         }
     }
 
-    pub fn is_uninhabited(&self, _cx: TyCtxt) -> bool {
-        // FIXME(#24885): be smarter here, the AdtDefData::is_empty method could easily be made
-        // more complete.
+    /// Checks whether a type is uninhabited.
+    /// If `block` is `Some(id)` it also checks that the uninhabited-ness is visible from `id`.
+    pub fn is_uninhabited(&self, block: Option<NodeId>, cx: TyCtxt<'a, 'gcx, 'tcx>) -> bool {
+        let mut visited = FxHashSet::default();
+        self.is_uninhabited_recurse(&mut visited, block, cx)
+    }
+
+    pub fn is_uninhabited_recurse(&self,
+                                  visited: &mut FxHashSet<(DefId, &'tcx Substs<'tcx>)>,
+                                  block: Option<NodeId>,
+                                  cx: TyCtxt<'a, 'gcx, 'tcx>) -> bool {
         match self.sty {
-            TyAdt(def, _) => def.is_empty(),
+            TyAdt(def, substs) => {
+                def.is_uninhabited_recurse(visited, block, cx, substs)
+            },
 
-            // FIXME(canndrew): There's no reason why these can't be uncommented, they're tested
-            // and they don't break anything. But I'm keeping my changes small for now.
-            //TyNever => true,
-            //TyTuple(ref tys) => tys.iter().any(|ty| ty.is_uninhabited(cx)),
+            TyNever => true,
+            TyTuple(ref tys) => tys.iter().any(|ty| ty.is_uninhabited_recurse(visited, block, cx)),
+            TyArray(ty, len) => len > 0 && ty.is_uninhabited_recurse(visited, block, cx),
+            TyRef(_, ref tm) => tm.ty.is_uninhabited_recurse(visited, block, cx),
 
-            // FIXME(canndrew): this line breaks core::fmt
-            //TyRef(_, ref tm) => tm.ty.is_uninhabited(cx),
             _ => false,
         }
     }
@@ -1205,7 +1252,7 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
                 substs.regions().collect()
             }
             TyClosure(_, ref substs) => {
-                substs.func_substs.regions().collect()
+                substs.substs.regions().collect()
             }
             TyProjection(ref data) => {
                 data.trait_ref.substs.regions().collect()

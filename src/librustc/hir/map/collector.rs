@@ -9,9 +9,7 @@
 // except according to those terms.
 
 use super::*;
-use super::MapEntry::*;
 
-use hir::*;
 use hir::intravisit::Visitor;
 use hir::def_id::DefId;
 use middle::cstore::InlinedItem;
@@ -92,11 +90,20 @@ impl<'ast> Visitor<'ast> for NodeCollector<'ast> {
     /// Because we want to track parent items and so forth, enable
     /// deep walking so that we walk nested items in the context of
     /// their outer items.
+
+    fn nested_visit_map(&mut self) -> Option<&map::Map<'ast>> {
+        panic!("visit_nested_xxx must be manually implemented in this visitor")
+    }
+
     fn visit_nested_item(&mut self, item: ItemId) {
         debug!("visit_nested_item: {:?}", item);
         if !self.ignore_nested_items {
             self.visit_item(self.krate.item(item.id))
         }
+    }
+
+    fn visit_nested_impl_item(&mut self, item_id: ImplItemId) {
+        self.visit_impl_item(self.krate.impl_item(item_id))
     }
 
     fn visit_item(&mut self, i: &'ast Item) {
@@ -211,7 +218,7 @@ impl<'ast> Visitor<'ast> for NodeCollector<'ast> {
     }
 
     fn visit_fn(&mut self, fk: intravisit::FnKind<'ast>, fd: &'ast FnDecl,
-                b: &'ast Block, s: Span, id: NodeId) {
+                b: &'ast Expr, s: Span, id: NodeId) {
         assert_eq!(self.parent_node, id);
         intravisit::walk_fn(self, fk, fd, b, s, id);
     }
@@ -225,5 +232,9 @@ impl<'ast> Visitor<'ast> for NodeCollector<'ast> {
 
     fn visit_lifetime(&mut self, lifetime: &'ast Lifetime) {
         self.insert(lifetime.id, NodeLifetime(lifetime));
+    }
+
+    fn visit_macro_def(&mut self, macro_def: &'ast MacroDef) {
+        self.insert_entry(macro_def.id, NotPresent);
     }
 }

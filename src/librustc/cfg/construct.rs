@@ -33,16 +33,16 @@ struct LoopScope {
 }
 
 pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                           blk: &hir::Block) -> CFG {
+                           body: &hir::Expr) -> CFG {
     let mut graph = graph::Graph::new();
     let entry = graph.add_node(CFGNodeData::Entry);
 
     // `fn_exit` is target of return exprs, which lies somewhere
-    // outside input `blk`. (Distinguishing `fn_exit` and `block_exit`
+    // outside input `body`. (Distinguishing `fn_exit` and `body_exit`
     // also resolves chicken-and-egg problem that arises if you try to
-    // have return exprs jump to `block_exit` during construction.)
+    // have return exprs jump to `body_exit` during construction.)
     let fn_exit = graph.add_node(CFGNodeData::Exit);
-    let block_exit;
+    let body_exit;
 
     let mut cfg_builder = CFGBuilder {
         graph: graph,
@@ -50,8 +50,8 @@ pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         tcx: tcx,
         loop_scopes: Vec::new()
     };
-    block_exit = cfg_builder.block(blk, entry);
-    cfg_builder.add_contained_edge(block_exit, fn_exit);
+    body_exit = cfg_builder.expr(body, entry);
+    cfg_builder.add_contained_edge(body_exit, fn_exit);
     let CFGBuilder {graph, ..} = cfg_builder;
     CFG {graph: graph,
          entry: entry,
@@ -223,7 +223,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 expr_exit
             }
 
-            hir::ExprLoop(ref body, _) => {
+            hir::ExprLoop(ref body, _, _) => {
                 //
                 //     [pred]
                 //       |
@@ -282,9 +282,10 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.add_unreachable_node()
             }
 
-            hir::ExprBreak(label) => {
+            hir::ExprBreak(label, ref opt_expr) => {
+                let v = self.opt_expr(opt_expr, pred);
                 let loop_scope = self.find_scope(expr, label.map(|l| l.node));
-                let b = self.add_ast_node(expr.id, &[pred]);
+                let b = self.add_ast_node(expr.id, &[v]);
                 self.add_exiting_edge(expr, b,
                                       loop_scope, loop_scope.break_index);
                 self.add_unreachable_node()
@@ -299,28 +300,28 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
 
             hir::ExprArray(ref elems) => {
-                self.straightline(expr, pred, elems.iter().map(|e| &**e))
+                self.straightline(expr, pred, elems.iter().map(|e| &*e))
             }
 
             hir::ExprCall(ref func, ref args) => {
-                self.call(expr, pred, &func, args.iter().map(|e| &**e))
+                self.call(expr, pred, &func, args.iter().map(|e| &*e))
             }
 
             hir::ExprMethodCall(.., ref args) => {
-                self.call(expr, pred, &args[0], args[1..].iter().map(|e| &**e))
+                self.call(expr, pred, &args[0], args[1..].iter().map(|e| &*e))
             }
 
             hir::ExprIndex(ref l, ref r) |
-            hir::ExprBinary(_, ref l, ref r) if self.tcx.is_method_call(expr.id) => {
+            hir::ExprBinary(_, ref l, ref r) if self.tcx.tables().is_method_call(expr.id) => {
                 self.call(expr, pred, &l, Some(&**r).into_iter())
             }
 
-            hir::ExprUnary(_, ref e) if self.tcx.is_method_call(expr.id) => {
+            hir::ExprUnary(_, ref e) if self.tcx.tables().is_method_call(expr.id) => {
                 self.call(expr, pred, &e, None::<hir::Expr>.iter())
             }
 
             hir::ExprTup(ref exprs) => {
-                self.straightline(expr, pred, exprs.iter().map(|e| &**e))
+                self.straightline(expr, pred, exprs.iter().map(|e| &*e))
             }
 
             hir::ExprStruct(_, ref fields, ref base) => {
@@ -353,8 +354,8 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
 
             hir::ExprInlineAsm(_, ref outputs, ref inputs) => {
-                let post_outputs = self.exprs(outputs.iter().map(|e| &**e), pred);
-                let post_inputs = self.exprs(inputs.iter().map(|e| &**e), post_outputs);
+                let post_outputs = self.exprs(outputs.iter().map(|e| &*e), pred);
+                let post_inputs = self.exprs(inputs.iter().map(|e| &*e), post_outputs);
                 self.add_ast_node(expr.id, &[post_inputs])
             }
 
@@ -372,9 +373,9 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             func_or_rcvr: &hir::Expr,
             args: I) -> CFGIndex {
         let method_call = ty::MethodCall::expr(call_expr.id);
-        let fn_ty = match self.tcx.tables.borrow().method_map.get(&method_call) {
+        let fn_ty = match self.tcx.tables().method_map.get(&method_call) {
             Some(method) => method.ty,
-            None => self.tcx.expr_ty_adjusted(func_or_rcvr)
+            None => self.tcx.tables().expr_ty_adjusted(func_or_rcvr)
         };
 
         let func_or_rcvr_exit = self.expr(func_or_rcvr, pred);
@@ -536,7 +537,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn add_contained_edge(&mut self,
                           source: CFGIndex,
                           target: CFGIndex) {
-        let data = CFGEdgeData {exiting_scopes: vec!() };
+        let data = CFGEdgeData {exiting_scopes: vec![] };
         self.graph.add_edge(source, target, data);
     }
 
@@ -545,7 +546,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                         from_index: CFGIndex,
                         to_loop: LoopScope,
                         to_index: CFGIndex) {
-        let mut data = CFGEdgeData {exiting_scopes: vec!() };
+        let mut data = CFGEdgeData {exiting_scopes: vec![] };
         let mut scope = self.tcx.region_maps.node_extent(from_expr.id);
         let target_scope = self.tcx.region_maps.node_extent(to_loop.loop_id);
         while scope != target_scope {
@@ -559,7 +560,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                           _from_expr: &hir::Expr,
                           from_index: CFGIndex) {
         let mut data = CFGEdgeData {
-            exiting_scopes: vec!(),
+            exiting_scopes: vec![],
         };
         for &LoopScope { loop_id: id, .. } in self.loop_scopes.iter().rev() {
             data.exiting_scopes.push(id);

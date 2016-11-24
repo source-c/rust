@@ -27,11 +27,11 @@ use session::Session;
 use hir::def_id::DefId;
 use ty;
 use middle::weak_lang_items;
-use util::nodemap::FnvHashMap;
+use util::nodemap::FxHashMap;
 
 use syntax::ast;
-use syntax::parse::token::InternedString;
-use hir::intravisit::Visitor;
+use syntax::symbol::Symbol;
+use hir::itemlikevisit::ItemLikeVisitor;
 use hir;
 
 // The actual lang items defined come at the end of this file in one handy table.
@@ -59,7 +59,7 @@ impl LanguageItems {
         fn foo(_: LangItem) -> Option<DefId> { None }
 
         LanguageItems {
-            items: vec!($(foo($variant)),*),
+            items: vec![$(foo($variant)),*],
             missing: Vec::new(),
         }
     }
@@ -146,13 +146,13 @@ struct LanguageItemCollector<'a, 'tcx: 'a> {
 
     session: &'a Session,
 
-    item_refs: FnvHashMap<&'static str, usize>,
+    item_refs: FxHashMap<&'static str, usize>,
 }
 
-impl<'a, 'v, 'tcx> Visitor<'v> for LanguageItemCollector<'a, 'tcx> {
+impl<'a, 'v, 'tcx> ItemLikeVisitor<'v> for LanguageItemCollector<'a, 'tcx> {
     fn visit_item(&mut self, item: &hir::Item) {
         if let Some(value) = extract(&item.attrs) {
-            let item_index = self.item_refs.get(&value[..]).cloned();
+            let item_index = self.item_refs.get(&*value.as_str()).cloned();
 
             if let Some(item_index) = item_index {
                 self.collect_item(item_index, self.ast_map.local_def_id(item.id))
@@ -160,16 +160,20 @@ impl<'a, 'v, 'tcx> Visitor<'v> for LanguageItemCollector<'a, 'tcx> {
                 let span = self.ast_map.span(item.id);
                 span_err!(self.session, span, E0522,
                           "definition of an unknown language item: `{}`.",
-                          &value[..]);
+                          value);
             }
         }
+    }
+
+    fn visit_impl_item(&mut self, _impl_item: &hir::ImplItem) {
+        // at present, lang items are always items, not impl items
     }
 }
 
 impl<'a, 'tcx> LanguageItemCollector<'a, 'tcx> {
     pub fn new(session: &'a Session, ast_map: &'a hir_map::Map<'tcx>)
                -> LanguageItemCollector<'a, 'tcx> {
-        let mut item_refs = FnvHashMap();
+        let mut item_refs = FxHashMap();
 
         $( item_refs.insert($name, $variant as usize); )*
 
@@ -219,7 +223,7 @@ impl<'a, 'tcx> LanguageItemCollector<'a, 'tcx> {
     }
 
     pub fn collect_local_language_items(&mut self, krate: &hir::Crate) {
-        krate.visit_all_items(self);
+        krate.visit_all_item_likes(self);
     }
 
     pub fn collect_external_language_items(&mut self) {
@@ -239,12 +243,10 @@ impl<'a, 'tcx> LanguageItemCollector<'a, 'tcx> {
     }
 }
 
-pub fn extract(attrs: &[ast::Attribute]) -> Option<InternedString> {
+pub fn extract(attrs: &[ast::Attribute]) -> Option<Symbol> {
     for attribute in attrs {
         match attribute.value_str() {
-            Some(ref value) if attribute.check_name("lang") => {
-                return Some(value.clone());
-            }
+            Some(value) if attribute.check_name("lang") => return Some(value),
             _ => {}
         }
     }

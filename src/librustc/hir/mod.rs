@@ -33,15 +33,15 @@ pub use self::PathParameters::*;
 
 use hir::def::Def;
 use hir::def_id::DefId;
-use util::nodemap::{NodeMap, FnvHashSet};
+use util::nodemap::{NodeMap, FxHashSet};
 
 use syntax_pos::{mk_sp, Span, ExpnId, DUMMY_SP};
 use syntax::codemap::{self, respan, Spanned};
 use syntax::abi::Abi;
 use syntax::ast::{Name, NodeId, DUMMY_NODE_ID, AsmDialect};
 use syntax::ast::{Attribute, Lit, StrStyle, FloatTy, IntTy, UintTy, MetaItem};
-use syntax::parse::token::{keywords, InternedString};
 use syntax::ptr::P;
+use syntax::symbol::{Symbol, keywords};
 use syntax::tokenstream::TokenTree;
 use syntax::util::ThinVec;
 
@@ -68,6 +68,7 @@ pub mod check_attr;
 pub mod def;
 pub mod def_id;
 pub mod intravisit;
+pub mod itemlikevisit;
 pub mod lowering;
 pub mod map;
 pub mod pat_util;
@@ -413,7 +414,6 @@ pub type CrateConfig = HirVec<P<MetaItem>>;
 pub struct Crate {
     pub module: Mod,
     pub attrs: HirVec<Attribute>,
-    pub config: CrateConfig,
     pub span: Span,
     pub exported_macros: HirVec<MacroDef>,
 
@@ -424,11 +424,17 @@ pub struct Crate {
     // detected, which in turn can make compile-fail tests yield
     // slightly different results.
     pub items: BTreeMap<NodeId, Item>,
+
+    pub impl_items: BTreeMap<ImplItemId, ImplItem>,
 }
 
 impl Crate {
     pub fn item(&self, id: NodeId) -> &Item {
         &self.items[&id]
+    }
+
+    pub fn impl_item(&self, id: ImplItemId) -> &ImplItem {
+        &self.impl_items[&id]
     }
 
     /// Visits all items in the crate in some determinstic (but
@@ -439,11 +445,15 @@ impl Crate {
     /// follows lexical scoping rules -- then you want a different
     /// approach. You should override `visit_nested_item` in your
     /// visitor and then call `intravisit::walk_crate` instead.
-    pub fn visit_all_items<'hir, V>(&'hir self, visitor: &mut V)
-        where V: intravisit::Visitor<'hir>
+    pub fn visit_all_item_likes<'hir, V>(&'hir self, visitor: &mut V)
+        where V: itemlikevisit::ItemLikeVisitor<'hir>
     {
         for (_, item) in &self.items {
             visitor.visit_item(item);
+        }
+
+        for (_, impl_item) in &self.impl_items {
+            visitor.visit_impl_item(impl_item);
         }
     }
 }
@@ -458,8 +468,6 @@ pub struct MacroDef {
     pub id: NodeId,
     pub span: Span,
     pub imported_from: Option<Name>,
-    pub export: bool,
-    pub use_locally: bool,
     pub allow_internal_unstable: bool,
     pub body: HirVec<TokenTree>,
 }
@@ -819,6 +827,7 @@ pub struct Field {
     pub name: Spanned<Name>,
     pub expr: P<Expr>,
     pub span: Span,
+    pub is_shorthand: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug, Copy)]
@@ -842,8 +851,8 @@ pub enum UnsafeSource {
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash)]
 pub struct Expr {
     pub id: NodeId,
-    pub node: Expr_,
     pub span: Span,
+    pub node: Expr_,
     pub attrs: ThinVec<Attribute>,
 }
 
@@ -858,12 +867,12 @@ pub enum Expr_ {
     /// A `box x` expression.
     ExprBox(P<Expr>),
     /// An array (`[a, b, c, d]`)
-    ExprArray(HirVec<P<Expr>>),
+    ExprArray(HirVec<Expr>),
     /// A function call
     ///
     /// The first field resolves to the function itself (usually an `ExprPath`),
     /// and the second field is the list of arguments
-    ExprCall(P<Expr>, HirVec<P<Expr>>),
+    ExprCall(P<Expr>, HirVec<Expr>),
     /// A method call (`x.foo::<Bar, Baz>(a, b, c, d)`)
     ///
     /// The `Spanned<Name>` is the identifier for the method name.
@@ -876,9 +885,9 @@ pub enum Expr_ {
     ///
     /// Thus, `x.foo::<Bar, Baz>(a, b, c, d)` is represented as
     /// `ExprMethodCall(foo, [Bar, Baz], [x, a, b, c, d])`.
-    ExprMethodCall(Spanned<Name>, HirVec<P<Ty>>, HirVec<P<Expr>>),
+    ExprMethodCall(Spanned<Name>, HirVec<P<Ty>>, HirVec<Expr>),
     /// A tuple (`(a, b, c ,d)`)
-    ExprTup(HirVec<P<Expr>>),
+    ExprTup(HirVec<Expr>),
     /// A binary operation (For example: `a + b`, `a * b`)
     ExprBinary(BinOp, P<Expr>, P<Expr>),
     /// A unary operation (For example: `!x`, `*x`)
@@ -899,14 +908,14 @@ pub enum Expr_ {
     /// Conditionless loop (can be exited with break, continue, or return)
     ///
     /// `'label: loop { block }`
-    ExprLoop(P<Block>, Option<Spanned<Name>>),
+    ExprLoop(P<Block>, Option<Spanned<Name>>, LoopSource),
     /// A `match` block, with a source that indicates whether or not it is
     /// the result of a desugaring, and if so, which kind.
     ExprMatch(P<Expr>, HirVec<Arm>, MatchSource),
     /// A closure (for example, `move |a, b, c| {a + b + c}`).
     ///
     /// The final span is the span of the argument block `|...|`
-    ExprClosure(CaptureClause, P<FnDecl>, P<Block>, Span),
+    ExprClosure(CaptureClause, P<FnDecl>, P<Expr>, Span),
     /// A block (`{ ... }`)
     ExprBlock(P<Block>),
 
@@ -935,20 +944,20 @@ pub enum Expr_ {
     /// A referencing operation (`&a` or `&mut a`)
     ExprAddrOf(Mutability, P<Expr>),
     /// A `break`, with an optional label to break
-    ExprBreak(Option<Spanned<Name>>),
+    ExprBreak(Option<Spanned<Name>>, Option<P<Expr>>),
     /// A `continue`, with an optional label
     ExprAgain(Option<Spanned<Name>>),
     /// A `return`, with an optional value to be returned
     ExprRet(Option<P<Expr>>),
 
     /// Inline assembly (from `asm!`), with its outputs and inputs.
-    ExprInlineAsm(InlineAsm, Vec<P<Expr>>, Vec<P<Expr>>),
+    ExprInlineAsm(P<InlineAsm>, HirVec<Expr>, HirVec<Expr>),
 
     /// A struct or struct-like variant literal expression.
     ///
     /// For example, `Foo {x: 1, y: 2}`, or
     /// `Foo {x: 1, .. base}`, where `base` is the `Option<Expr>`.
-    ExprStruct(Path, HirVec<Field>, Option<P<Expr>>),
+    ExprStruct(P<Path>, HirVec<Field>, Option<P<Expr>>),
 
     /// An array literal constructed from one repeated element.
     ///
@@ -992,6 +1001,18 @@ pub enum MatchSource {
     /// A desugared `?` operator
     TryDesugar,
 }
+
+/// The loop type that yielded an ExprLoop
+#[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug, Copy)]
+pub enum LoopSource {
+    /// A `loop { .. }` loop
+    Loop,
+    /// A `while let _ = _ { .. }` loop
+    WhileLet,
+    /// A `for _ in _ { .. }` loop
+    ForLoop,
+}
+
 
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug, Copy)]
 pub enum CaptureClause {
@@ -1037,10 +1058,18 @@ pub enum TraitItem_ {
     /// must contain a value)
     ConstTraitItem(P<Ty>, Option<P<Expr>>),
     /// A method with an optional body
-    MethodTraitItem(MethodSig, Option<P<Block>>),
+    MethodTraitItem(MethodSig, Option<P<Expr>>),
     /// An associated type with (possibly empty) bounds and optional concrete
     /// type
     TypeTraitItem(TyParamBounds, Option<P<Ty>>),
+}
+
+// The bodies for items are stored "out of line", in a separate
+// hashmap in the `Crate`. Here we just record the node-id of the item
+// so it can fetched later.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, RustcEncodable, RustcDecodable, Hash, Debug)]
+pub struct ImplItemId {
+    pub node_id: NodeId,
 }
 
 /// Represents anything within an `impl` block
@@ -1062,7 +1091,7 @@ pub enum ImplItemKind {
     /// of the expression
     Const(P<Ty>, P<Expr>),
     /// A method implementation with the given signature and body
-    Method(MethodSig, P<Block>),
+    Method(MethodSig, P<Expr>),
     /// An associated type
     Type(P<Ty>),
 }
@@ -1146,18 +1175,18 @@ pub enum Ty_ {
 
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
 pub struct InlineAsmOutput {
-    pub constraint: InternedString,
+    pub constraint: Symbol,
     pub is_rw: bool,
     pub is_indirect: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
 pub struct InlineAsm {
-    pub asm: InternedString,
+    pub asm: Symbol,
     pub asm_str_style: StrStyle,
     pub outputs: HirVec<InlineAsmOutput>,
-    pub inputs: HirVec<InternedString>,
-    pub clobbers: HirVec<InternedString>,
+    pub inputs: HirVec<Symbol>,
+    pub clobbers: HirVec<Symbol>,
     pub volatile: bool,
     pub alignstack: bool,
     pub dialect: AsmDialect,
@@ -1242,17 +1271,27 @@ pub enum Constness {
 
 #[derive(Copy, Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
 pub enum Defaultness {
-    Default,
+    Default { has_value: bool },
     Final,
 }
 
 impl Defaultness {
+    pub fn has_value(&self) -> bool {
+        match *self {
+            Defaultness::Default { has_value, .. } => has_value,
+            Defaultness::Final => true,
+        }
+    }
+
     pub fn is_final(&self) -> bool {
         *self == Defaultness::Final
     }
 
     pub fn is_default(&self) -> bool {
-        *self == Defaultness::Default
+        match *self {
+            Defaultness::Default { .. } => true,
+            _ => false,
+        }
     }
 }
 
@@ -1503,7 +1542,7 @@ pub enum Item_ {
     /// A `const` item
     ItemConst(P<Ty>, P<Expr>),
     /// A function declaration
-    ItemFn(P<FnDecl>, Unsafety, Constness, Abi, Generics, P<Block>),
+    ItemFn(P<FnDecl>, Unsafety, Constness, Abi, Generics, P<Expr>),
     /// A module
     ItemMod(Mod),
     /// An external module
@@ -1529,7 +1568,7 @@ pub enum Item_ {
              Generics,
              Option<TraitRef>, // (optional) trait this impl implements
              P<Ty>, // self
-             HirVec<ImplItem>),
+             HirVec<ImplItemRef>),
 }
 
 impl Item_ {
@@ -1551,6 +1590,29 @@ impl Item_ {
             ItemDefaultImpl(..) => "item",
         }
     }
+}
+
+/// A reference from an impl to one of its associated items. This
+/// contains the item's id, naturally, but also the item's name and
+/// some other high-level details (like whether it is an associated
+/// type or method, and whether it is public). This allows other
+/// passes to find the impl they want without loading the id (which
+/// means fewer edges in the incremental compilation graph).
+#[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
+pub struct ImplItemRef {
+    pub id: ImplItemId,
+    pub name: Name,
+    pub kind: AssociatedItemKind,
+    pub span: Span,
+    pub vis: Visibility,
+    pub defaultness: Defaultness,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
+pub enum AssociatedItemKind {
+    Const,
+    Method { has_self: bool },
+    Type,
 }
 
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
@@ -1607,4 +1669,4 @@ pub type TraitMap = NodeMap<Vec<TraitCandidate>>;
 
 // Map from the NodeId of a glob import to a list of items which are actually
 // imported.
-pub type GlobMap = NodeMap<FnvHashSet<Name>>;
+pub type GlobMap = NodeMap<FxHashSet<Name>>;

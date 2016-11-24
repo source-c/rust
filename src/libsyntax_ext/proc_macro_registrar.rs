@@ -17,19 +17,20 @@ use syntax::ext::base::ExtCtxt;
 use syntax::ext::build::AstBuilder;
 use syntax::ext::expand::ExpansionConfig;
 use syntax::parse::ParseSess;
-use syntax::parse::token::{self, InternedString};
 use syntax::feature_gate::Features;
 use syntax::fold::Folder;
 use syntax::ptr::P;
+use syntax::symbol::Symbol;
 use syntax_pos::{Span, DUMMY_SP};
 use syntax::visit::{self, Visitor};
 
 use deriving;
 
 struct CustomDerive {
-    trait_name: InternedString,
+    trait_name: ast::Name,
     function_name: Ident,
     span: Span,
+    attrs: Vec<ast::Name>,
 }
 
 struct CollectCustomDerives<'a> {
@@ -37,23 +38,26 @@ struct CollectCustomDerives<'a> {
     in_root: bool,
     handler: &'a errors::Handler,
     is_proc_macro_crate: bool,
+    is_test_crate: bool,
 }
 
 pub fn modify(sess: &ParseSess,
               resolver: &mut ::syntax::ext::base::Resolver,
               mut krate: ast::Crate,
               is_proc_macro_crate: bool,
+              is_test_crate: bool,
               num_crate_types: usize,
               handler: &errors::Handler,
               features: &Features) -> ast::Crate {
     let ecfg = ExpansionConfig::default("proc_macro".to_string());
-    let mut cx = ExtCtxt::new(sess, Vec::new(), ecfg, resolver);
+    let mut cx = ExtCtxt::new(sess, ecfg, resolver);
 
     let mut collect = CollectCustomDerives {
         derives: Vec::new(),
         in_root: true,
         handler: handler,
         is_proc_macro_crate: is_proc_macro_crate,
+        is_test_crate: is_test_crate,
     };
     visit::walk_crate(&mut collect, &krate);
 
@@ -105,6 +109,17 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
         match item.node {
             ast::ItemKind::Fn(..) => {}
             _ => {
+                // Check for invalid use of proc_macro_derive
+                let attr = item.attrs.iter()
+                    .filter(|a| a.check_name("proc_macro_derive"))
+                    .next();
+                if let Some(attr) = attr {
+                    self.handler.span_err(attr.span(),
+                                          "the `#[proc_macro_derive]` \
+                                          attribute may only be used \
+                                          on bare functions");
+                    return;
+                }
                 self.check_not_pub_in_root(&item.vis, item.span);
                 return visit::walk_item(self, item)
             }
@@ -125,6 +140,12 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
                                              attributes found");
         }
 
+        if self.is_test_crate {
+            self.handler.span_err(attr.span(),
+                                  "`--test` cannot be used with proc-macro crates");
+            return;
+        }
+
         if !self.is_proc_macro_crate {
             self.handler.span_err(attr.span(),
                                   "the `#[proc_macro_derive]` attribute is \
@@ -133,7 +154,8 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
         }
 
         // Once we've located the `#[proc_macro_derive]` attribute, verify
-        // that it's of the form `#[proc_macro_derive(Foo)]`
+        // that it's of the form `#[proc_macro_derive(Foo)]` or
+        // `#[proc_macro_derive(Foo, attributes(A, ..))]`
         let list = match attr.meta_item_list() {
             Some(list) => list,
             None => {
@@ -143,38 +165,69 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
                 return
             }
         };
-        if list.len() != 1 {
+        if list.len() != 1 && list.len() != 2 {
             self.handler.span_err(attr.span(),
-                                  "attribute must only have one argument");
+                                  "attribute must have either one or two arguments");
             return
         }
-        let attr = &list[0];
-        let trait_name = match attr.name() {
+        let trait_attr = &list[0];
+        let attributes_attr = list.get(1);
+        let trait_name = match trait_attr.name() {
             Some(name) => name,
             _ => {
-                self.handler.span_err(attr.span(), "not a meta item");
+                self.handler.span_err(trait_attr.span(), "not a meta item");
                 return
             }
         };
-        if !attr.is_word() {
-            self.handler.span_err(attr.span(), "must only be one word");
+        if !trait_attr.is_word() {
+            self.handler.span_err(trait_attr.span(), "must only be one word");
         }
 
-        if deriving::is_builtin_trait(&trait_name) {
-            self.handler.span_err(attr.span(),
+        if deriving::is_builtin_trait(trait_name) {
+            self.handler.span_err(trait_attr.span(),
                                   "cannot override a built-in #[derive] mode");
         }
 
         if self.derives.iter().any(|d| d.trait_name == trait_name) {
-            self.handler.span_err(attr.span(),
+            self.handler.span_err(trait_attr.span(),
                                   "derive mode defined twice in this crate");
         }
+
+        let proc_attrs: Vec<_> = if let Some(attr) = attributes_attr {
+            if !attr.check_name("attributes") {
+                self.handler.span_err(attr.span(), "second argument must be `attributes`")
+            }
+            attr.meta_item_list().unwrap_or_else(|| {
+                self.handler.span_err(attr.span(),
+                                      "attribute must be of form: \
+                                       `attributes(foo, bar)`");
+                &[]
+            }).into_iter().filter_map(|attr| {
+                let name = match attr.name() {
+                    Some(name) => name,
+                    _ => {
+                        self.handler.span_err(attr.span(), "not a meta item");
+                        return None;
+                    },
+                };
+
+                if !attr.is_word() {
+                    self.handler.span_err(attr.span(), "must only be one word");
+                    return None;
+                }
+
+                Some(name)
+            }).collect()
+        } else {
+            Vec::new()
+        };
 
         if self.in_root {
             self.derives.push(CustomDerive {
                 span: item.span,
                 trait_name: trait_name,
                 function_name: item.ident,
+                attrs: proc_attrs,
             });
         } else {
             let msg = "functions tagged with `#[proc_macro_derive]` must \
@@ -208,8 +261,8 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
 //
 //          #[plugin_registrar]
 //          fn registrar(registrar: &mut Registry) {
-//              registrar.register_custom_derive($name_trait1, ::$name1);
-//              registrar.register_custom_derive($name_trait2, ::$name2);
+//              registrar.register_custom_derive($name_trait1, ::$name1, &[]);
+//              registrar.register_custom_derive($name_trait2, ::$name2, &["attribute_name"]);
 //              // ...
 //          }
 //      }
@@ -218,34 +271,38 @@ fn mk_registrar(cx: &mut ExtCtxt,
     let eid = cx.codemap().record_expansion(ExpnInfo {
         call_site: DUMMY_SP,
         callee: NameAndSpan {
-            format: MacroAttribute(token::intern("proc_macro")),
+            format: MacroAttribute(Symbol::intern("proc_macro")),
             span: None,
             allow_internal_unstable: true,
         }
     });
     let span = Span { expn_id: eid, ..DUMMY_SP };
 
-    let proc_macro = token::str_to_ident("proc_macro");
+    let proc_macro = Ident::from_str("proc_macro");
     let krate = cx.item(span,
                         proc_macro,
                         Vec::new(),
                         ast::ItemKind::ExternCrate(None));
 
-    let __internal = token::str_to_ident("__internal");
-    let registry = token::str_to_ident("Registry");
-    let registrar = token::str_to_ident("registrar");
-    let register_custom_derive = token::str_to_ident("register_custom_derive");
+    let __internal = Ident::from_str("__internal");
+    let registry = Ident::from_str("Registry");
+    let registrar = Ident::from_str("registrar");
+    let register_custom_derive = Ident::from_str("register_custom_derive");
     let stmts = custom_derives.iter().map(|cd| {
         let path = cx.path_global(cd.span, vec![cd.function_name]);
-        let trait_name = cx.expr_str(cd.span, cd.trait_name.clone());
-        (path, trait_name)
-    }).map(|(path, trait_name)| {
+        let trait_name = cx.expr_str(cd.span, cd.trait_name);
+        let attrs = cx.expr_vec_slice(
+            span,
+            cd.attrs.iter().map(|&s| cx.expr_str(cd.span, s)).collect::<Vec<_>>()
+        );
+        (path, trait_name, attrs)
+    }).map(|(path, trait_name, attrs)| {
         let registrar = cx.expr_ident(span, registrar);
         let ufcs_path = cx.path(span, vec![proc_macro, __internal, registry,
                                            register_custom_derive]);
         cx.expr_call(span,
                      cx.expr_path(ufcs_path),
-                     vec![registrar, trait_name, cx.expr_path(path)])
+                     vec![registrar, trait_name, cx.expr_path(path), attrs])
     }).map(|expr| {
         cx.stmt_expr(expr)
     }).collect::<Vec<_>>();
@@ -259,15 +316,14 @@ fn mk_registrar(cx: &mut ExtCtxt,
                           cx.ty(span, ast::TyKind::Tup(Vec::new())),
                           cx.block(span, stmts));
 
-    let derive_registrar = token::intern_and_get_ident("rustc_derive_registrar");
-    let derive_registrar = cx.meta_word(span, derive_registrar);
+    let derive_registrar = cx.meta_word(span, Symbol::intern("rustc_derive_registrar"));
     let derive_registrar = cx.attribute(span, derive_registrar);
     let func = func.map(|mut i| {
         i.attrs.push(derive_registrar);
         i.vis = ast::Visibility::Public;
         i
     });
-    let ident = ast::Ident::with_empty_ctxt(token::gensym("registrar"));
+    let ident = ast::Ident::with_empty_ctxt(Symbol::gensym("registrar"));
     let module = cx.item_mod(span, span, ident, Vec::new(), vec![krate, func]).map(|mut i| {
         i.vis = ast::Visibility::Public;
         i

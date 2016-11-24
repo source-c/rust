@@ -11,7 +11,7 @@
 use rustc::hir::pat_util;
 use rustc::ty;
 use rustc::ty::adjustment;
-use util::nodemap::FnvHashMap;
+use util::nodemap::FxHashMap;
 use lint::{LateContext, EarlyContext, LintContext, LintArray};
 use lint::{LintPass, EarlyLintPass, LateLintPass};
 
@@ -19,8 +19,8 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 
 use syntax::ast;
 use syntax::attr;
-use syntax::feature_gate::{KNOWN_ATTRIBUTES, AttributeType};
-use syntax::parse::token::keywords;
+use syntax::feature_gate::{BUILTIN_ATTRIBUTES, AttributeType};
+use syntax::symbol::keywords;
 use syntax::ptr::P;
 use syntax_pos::Span;
 
@@ -42,13 +42,13 @@ impl UnusedMut {
         // collect all mutable pattern and group their NodeIDs by their Identifier to
         // avoid false warnings in match arms with multiple patterns
 
-        let mut mutables = FnvHashMap();
+        let mut mutables = FxHashMap();
         for p in pats {
             pat_util::pat_bindings(p, |mode, id, _, path1| {
                 let name = path1.node;
                 if let hir::BindByValue(hir::MutMutable) = mode {
                     if !name.as_str().starts_with("_") {
-                        match mutables.entry(name.0 as usize) {
+                        match mutables.entry(name) {
                             Vacant(entry) => {
                                 entry.insert(vec![id]);
                             }
@@ -99,7 +99,7 @@ impl LateLintPass for UnusedMut {
                 cx: &LateContext,
                 _: FnKind,
                 decl: &hir::FnDecl,
-                _: &hir::Block,
+                _: &hir::Expr,
                 _: Span,
                 _: ast::NodeId) {
         for a in &decl.inputs {
@@ -140,7 +140,7 @@ impl LateLintPass for UnusedResults {
             return;
         }
 
-        let t = cx.tcx.expr_ty(&expr);
+        let t = cx.tcx.tables().expr_ty(&expr);
         let warned = match t.sty {
             ty::TyTuple(ref tys) if tys.is_empty() => return,
             ty::TyNever => return,
@@ -162,7 +162,7 @@ impl LateLintPass for UnusedResults {
                     // check for #[must_use="..."]
                     if let Some(s) = attr.value_str() {
                         msg.push_str(": ");
-                        msg.push_str(&s);
+                        msg.push_str(&s.as_str());
                     }
                     cx.span_lint(UNUSED_MUST_USE, sp, &msg);
                     return true;
@@ -245,7 +245,7 @@ impl LateLintPass for UnusedAttributes {
         debug!("checking attribute: {:?}", attr);
 
         // Note that check_name() marks the attribute as used if it matches.
-        for &(ref name, ty, _) in KNOWN_ATTRIBUTES {
+        for &(ref name, ty, _) in BUILTIN_ATTRIBUTES {
             match ty {
                 AttributeType::Whitelisted if attr.check_name(name) => {
                     debug!("{:?} is Whitelisted", name);
@@ -267,17 +267,17 @@ impl LateLintPass for UnusedAttributes {
             debug!("Emitting warning for: {:?}", attr);
             cx.span_lint(UNUSED_ATTRIBUTES, attr.span, "unused attribute");
             // Is it a builtin attribute that must be used at the crate level?
-            let known_crate = KNOWN_ATTRIBUTES.iter()
+            let known_crate = BUILTIN_ATTRIBUTES.iter()
                 .find(|&&(name, ty, _)| attr.name() == name && ty == AttributeType::CrateLevel)
                 .is_some();
 
             // Has a plugin registered this attribute as one which must be used at
             // the crate level?
             let plugin_crate = plugin_attributes.iter()
-                .find(|&&(ref x, t)| &*attr.name() == x && AttributeType::CrateLevel == t)
+                .find(|&&(ref x, t)| attr.name() == &**x && AttributeType::CrateLevel == t)
                 .is_some();
             if known_crate || plugin_crate {
-                let msg = match attr.node.style {
+                let msg = match attr.style {
                     ast::AttrStyle::Outer => {
                         "crate-level attribute should be an inner attribute: add an exclamation \
                          mark: #![foo]"
@@ -441,16 +441,15 @@ impl LateLintPass for UnusedAllocation {
             _ => return,
         }
 
-        if let Some(adjustment) = cx.tcx.tables.borrow().adjustments.get(&e.id) {
-            if let adjustment::AdjustDerefRef(adjustment::AutoDerefRef { ref autoref, .. }) =
-                *adjustment {
+        if let Some(adjustment) = cx.tcx.tables().adjustments.get(&e.id) {
+            if let adjustment::Adjust::DerefRef { autoref, .. } = adjustment.kind {
                 match autoref {
-                    &Some(adjustment::AutoPtr(_, hir::MutImmutable)) => {
+                    Some(adjustment::AutoBorrow::Ref(_, hir::MutImmutable)) => {
                         cx.span_lint(UNUSED_ALLOCATION,
                                      e.span,
                                      "unnecessary allocation, use & instead");
                     }
-                    &Some(adjustment::AutoPtr(_, hir::MutMutable)) => {
+                    Some(adjustment::AutoBorrow::Ref(_, hir::MutMutable)) => {
                         cx.span_lint(UNUSED_ALLOCATION,
                                      e.span,
                                      "unnecessary allocation, use &mut instead");

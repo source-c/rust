@@ -47,11 +47,7 @@ use syntax_pos::{MultiSpan, Span};
 use errors::DiagnosticBuilder;
 
 use rustc::hir;
-use rustc::hir::{FnDecl, Block};
-use rustc::hir::intravisit;
-use rustc::hir::intravisit::{Visitor, FnKind};
-
-use rustc::mir::mir_map::MirMap;
+use rustc::hir::intravisit::{self, Visitor, FnKind};
 
 pub mod check_loans;
 
@@ -67,8 +63,8 @@ pub struct LoanDataFlowOperator;
 pub type LoanDataFlow<'a, 'tcx> = DataFlowContext<'a, 'tcx, LoanDataFlowOperator>;
 
 impl<'a, 'tcx, 'v> Visitor<'v> for BorrowckCtxt<'a, 'tcx> {
-    fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v FnDecl,
-                b: &'v Block, s: Span, id: ast::NodeId) {
+    fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v hir::FnDecl,
+                b: &'v hir::Expr, s: Span, id: ast::NodeId) {
         match fk {
             FnKind::ItemFn(..) |
             FnKind::Method(..) => {
@@ -102,10 +98,9 @@ impl<'a, 'tcx, 'v> Visitor<'v> for BorrowckCtxt<'a, 'tcx> {
     }
 }
 
-pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, mir_map: &MirMap<'tcx>) {
+pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
     let mut bccx = BorrowckCtxt {
         tcx: tcx,
-        mir_map: Some(mir_map),
         free_region_map: FreeRegionMap::new(),
         stats: BorrowStats {
             loaned_paths_same: 0,
@@ -115,7 +110,7 @@ pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, mir_map: &MirMap<'tcx>
         }
     };
 
-    tcx.visit_all_items_in_krate(DepNode::BorrowCheck, &mut bccx);
+    tcx.visit_all_item_likes_in_krate(DepNode::BorrowCheck, &mut bccx.as_deep_visitor());
 
     if tcx.sess.borrowck_stats() {
         println!("--- borrowck stats ---");
@@ -162,18 +157,15 @@ pub struct AnalysisData<'a, 'tcx: 'a> {
 fn borrowck_fn(this: &mut BorrowckCtxt,
                fk: FnKind,
                decl: &hir::FnDecl,
-               body: &hir::Block,
+               body: &hir::Expr,
                sp: Span,
                id: ast::NodeId,
                attributes: &[ast::Attribute]) {
     debug!("borrowck_fn(id={})", id);
 
-    let def_id = this.tcx.map.local_def_id(id);
-
     if attributes.iter().any(|item| item.check_name("rustc_mir_borrowck")) {
-        let mir = this.mir_map.unwrap().map.get(&def_id).unwrap();
         this.with_temp_region_map(id, |this| {
-            mir::borrowck_mir(this, fk, decl, mir, body, sp, id, attributes)
+            mir::borrowck_mir(this, fk, decl, body, sp, id, attributes)
         });
     }
 
@@ -206,7 +198,7 @@ fn build_borrowck_dataflow_data<'a, 'tcx>(this: &mut BorrowckCtxt<'a, 'tcx>,
                                           fk: FnKind,
                                           decl: &hir::FnDecl,
                                           cfg: &cfg::CFG,
-                                          body: &hir::Block,
+                                          body: &hir::Expr,
                                           sp: Span,
                                           id: ast::NodeId)
                                           -> AnalysisData<'a, 'tcx>
@@ -249,7 +241,6 @@ fn build_borrowck_dataflow_data<'a, 'tcx>(this: &mut BorrowckCtxt<'a, 'tcx>,
 /// the `BorrowckCtxt` itself , e.g. the flowgraph visualizer.
 pub fn build_borrowck_dataflow_data_for_fn<'a, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
-    mir_map: Option<&'a MirMap<'tcx>>,
     fn_parts: FnParts<'a>,
     cfg: &cfg::CFG)
     -> (BorrowckCtxt<'a, 'tcx>, AnalysisData<'a, 'tcx>)
@@ -257,7 +248,6 @@ pub fn build_borrowck_dataflow_data_for_fn<'a, 'tcx>(
 
     let mut bccx = BorrowckCtxt {
         tcx: tcx,
-        mir_map: mir_map,
         free_region_map: FreeRegionMap::new(),
         stats: BorrowStats {
             loaned_paths_same: 0,
@@ -297,10 +287,7 @@ pub struct BorrowckCtxt<'a, 'tcx: 'a> {
     free_region_map: FreeRegionMap,
 
     // Statistics:
-    stats: BorrowStats,
-
-    // NodeId to MIR mapping (for methods that carry the #[rustc_mir] attribute).
-    mir_map: Option<&'a MirMap<'tcx>>,
+    stats: BorrowStats
 }
 
 #[derive(Clone)]
@@ -310,8 +297,6 @@ struct BorrowStats {
     stable_paths: usize,
     guaranteed_paths: usize
 }
-
-pub type BckResult<'tcx, T> = Result<T, BckError<'tcx>>;
 
 ///////////////////////////////////////////////////////////////////////////
 // Loans and loan paths
@@ -1008,16 +993,23 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                         if let Categorization::Local(local_id) = err.cmt.cat {
                             let span = self.tcx.map.span(local_id);
                             if let Ok(snippet) = self.tcx.sess.codemap().span_to_snippet(span) {
-                                if snippet.starts_with("ref ") {
-                                    db.span_label(span,
-                                        &format!("use `{}` here to make mutable",
-                                            snippet.replace("ref ", "ref mut ")));
-                                } else if snippet != "self" {
-                                    db.span_label(span,
-                                        &format!("use `mut {}` here to make mutable", snippet));
+                                if snippet.starts_with("ref mut ") || snippet.starts_with("&mut ") {
+                                    db.span_label(error_span, &format!("cannot reborrow mutably"));
+                                    db.span_label(error_span, &format!("try removing `&mut` here"));
+                                } else {
+                                    if snippet.starts_with("ref ") {
+                                        db.span_label(span,
+                                            &format!("use `{}` here to make mutable",
+                                                snippet.replace("ref ", "ref mut ")));
+                                    } else if snippet != "self" {
+                                        db.span_label(span,
+                                            &format!("use `mut {}` here to make mutable", snippet));
+                                    }
+                                    db.span_label(error_span, &format!("cannot borrow mutably"));
                                 }
+                            } else {
+                                db.span_label(error_span, &format!("cannot borrow mutably"));
                             }
-                            db.span_label(error_span, &format!("cannot borrow mutably"));
                         }
                     }
                 }
@@ -1028,9 +1020,10 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                     mc::Categorization::Rvalue(_) =>
                         ("temporary value", "temporary value created here"),
                     _ =>
-                        ("borrowed value", "does not live long enough")
+                        ("borrowed value", "borrow occurs here")
                 };
-                match cause {
+
+                let is_closure = match cause {
                     euv::ClosureCapture(s) => {
                         // The primary span starts out as the closure creation point.
                         // Change the primary span here to highlight the use of the variable
@@ -1040,24 +1033,51 @@ impl<'a, 'tcx> BorrowckCtxt<'a, 'tcx> {
                             Some(primary) => {
                                 db.span = MultiSpan::from_span(s);
                                 db.span_label(primary, &format!("capture occurs here"));
-                                db.span_label(s, &value_msg);
+                                db.span_label(s, &"does not live long enough");
+                                true
                             }
-                            None => ()
+                            None => false
                         }
                     }
                     _ => {
-                        db.span_label(error_span, &value_msg);
+                        db.span_label(error_span, &"does not live long enough");
+                        false
                     }
-                }
+                };
 
                 let sub_span = self.region_end_span(sub_scope);
                 let super_span = self.region_end_span(super_scope);
 
                 match (sub_span, super_span) {
                     (Some(s1), Some(s2)) if s1 == s2 => {
-                        db.span_label(s1, &format!("{} dropped before borrower", value_kind));
+                        if !is_closure {
+                            db.span = MultiSpan::from_span(s1);
+                            db.span_label(error_span, &value_msg);
+                            let msg = match opt_loan_path(&err.cmt) {
+                                None => value_kind.to_string(),
+                                Some(lp) => {
+                                    format!("`{}`", self.loan_path_to_string(&lp))
+                                }
+                            };
+                            db.span_label(s1,
+                                          &format!("{} dropped here while still borrowed", msg));
+                        } else {
+                            db.span_label(s1, &format!("{} dropped before borrower", value_kind));
+                        }
                         db.note("values in a scope are dropped in the opposite order \
                                 they are created");
+                    }
+                    (Some(s1), Some(s2)) if !is_closure => {
+                        db.span = MultiSpan::from_span(s2);
+                        db.span_label(error_span, &value_msg);
+                        let msg = match opt_loan_path(&err.cmt) {
+                            None => value_kind.to_string(),
+                            Some(lp) => {
+                                format!("`{}`", self.loan_path_to_string(&lp))
+                            }
+                        };
+                        db.span_label(s2, &format!("{} dropped here while still borrowed", msg));
+                        db.span_label(s1, &format!("{} needs to live until here", value_kind));
                     }
                     _ => {
                         match sub_span {

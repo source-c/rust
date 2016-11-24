@@ -31,7 +31,7 @@
 #![cfg_attr(test, feature(test))]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(dotdot_in_tuple_patterns)]
+#![cfg_attr(stage0, feature(dotdot_in_tuple_patterns))]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(rustc_private)]
@@ -95,6 +95,14 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
             )
     }
 
+    macro_rules! add_early_builtin_with_new {
+        ($sess:ident, $($name:ident),*,) => (
+            {$(
+                store.register_early_pass($sess, false, box $name::new());
+                )*}
+            )
+    }
+
     macro_rules! add_lint_group {
         ($sess:ident, $name:expr, $($lint:ident),*) => (
             store.register_group($sess, false, $name, vec![$(LintId::of($lint)),*]);
@@ -104,6 +112,10 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
     add_early_builtin!(sess,
                        UnusedParens,
                        );
+
+    add_early_builtin_with_new!(sess,
+                                DeprecatedAttr,
+                                );
 
     add_builtin!(sess,
                  HardwiredLints,
@@ -174,15 +186,15 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
         },
         FutureIncompatibleInfo {
             id: LintId::of(INACCESSIBLE_EXTERN_CRATE),
-            reference: "PR 31362 <https://github.com/rust-lang/rust/pull/31362>",
+            reference: "issue #36886 <https://github.com/rust-lang/rust/issues/36886>",
         },
         FutureIncompatibleInfo {
             id: LintId::of(INVALID_TYPE_PARAM_DEFAULT),
-            reference: "PR 30724 <https://github.com/rust-lang/rust/pull/30724>",
+            reference: "issue #36887 <https://github.com/rust-lang/rust/issues/36887>",
         },
         FutureIncompatibleInfo {
             id: LintId::of(SUPER_OR_SELF_IN_GLOBAL_PATH),
-            reference: "PR #32403 <https://github.com/rust-lang/rust/pull/32403>",
+            reference: "issue #36888 <https://github.com/rust-lang/rust/issues/36888>",
         },
         FutureIncompatibleInfo {
             id: LintId::of(TRANSMUTE_FROM_FN_ITEM_TYPES),
@@ -190,15 +202,15 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
         },
         FutureIncompatibleInfo {
             id: LintId::of(OVERLAPPING_INHERENT_IMPLS),
-            reference: "issue #22889 <https://github.com/rust-lang/rust/issues/22889>",
+            reference: "issue #36889 <https://github.com/rust-lang/rust/issues/36889>",
         },
         FutureIncompatibleInfo {
             id: LintId::of(ILLEGAL_FLOATING_POINT_CONSTANT_PATTERN),
-            reference: "RFC 1445 <https://github.com/rust-lang/rfcs/pull/1445>",
+            reference: "issue #36890 <https://github.com/rust-lang/rust/issues/36890>",
         },
         FutureIncompatibleInfo {
             id: LintId::of(ILLEGAL_STRUCT_OR_ENUM_CONSTANT_PATTERN),
-            reference: "RFC 1445 <https://github.com/rust-lang/rfcs/pull/1445>",
+            reference: "issue #36891 <https://github.com/rust-lang/rust/issues/36891>",
         },
         FutureIncompatibleInfo {
             id: LintId::of(HR_LIFETIME_IN_ASSOC_TYPE),
@@ -206,11 +218,23 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
         },
         FutureIncompatibleInfo {
             id: LintId::of(LIFETIME_UNDERSCORE),
-            reference: "RFC 1177 <https://github.com/rust-lang/rfcs/pull/1177>",
+            reference: "issue #36892 <https://github.com/rust-lang/rust/issues/36892>",
         },
         FutureIncompatibleInfo {
             id: LintId::of(SAFE_EXTERN_STATICS),
-            reference: "issue 36247 <https://github.com/rust-lang/rust/issues/35112>",
+            reference: "issue #36247 <https://github.com/rust-lang/rust/issues/35112>",
+        },
+        FutureIncompatibleInfo {
+            id: LintId::of(PATTERNS_IN_FNS_WITHOUT_BODY),
+            reference: "issue #35203 <https://github.com/rust-lang/rust/issues/35203>",
+        },
+        FutureIncompatibleInfo {
+            id: LintId::of(EXTRA_REQUIREMENT_IN_IMPL),
+            reference: "issue #37166 <https://github.com/rust-lang/rust/issues/37166>",
+        },
+        FutureIncompatibleInfo {
+            id: LintId::of(LEGACY_DIRECTORY_OWNERSHIP),
+            reference: "issue #37872 <https://github.com/rust-lang/rust/issues/37872>",
         },
         ]);
 

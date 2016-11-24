@@ -48,7 +48,7 @@ pub fn trans_exchange_free_dyn<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
 
     let def_id = langcall(bcx.tcx(), None, "", ExchangeFreeFnLangItem);
     let args = [PointerCast(bcx, v, Type::i8p(bcx.ccx())), size, align];
-    Callee::def(bcx.ccx(), def_id, Substs::empty(bcx.tcx()))
+    Callee::def(bcx.ccx(), def_id, bcx.tcx().intern_substs(&[]))
         .call(bcx, debug_loc, &args, None).bcx
 }
 
@@ -292,7 +292,7 @@ fn trans_custom_dtor<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
 
     let trait_ref = ty::Binder(ty::TraitRef {
         def_id: tcx.lang_items.drop_trait().unwrap(),
-        substs: Substs::new_trait(tcx, t, &[])
+        substs: tcx.mk_substs_trait(t, &[])
     });
     let vtbl = match fulfill_obligation(bcx.ccx().shared(), DUMMY_SP, trait_ref) {
         traits::VtableImpl(data) => data,
@@ -531,8 +531,8 @@ fn drop_structural_ty<'blk, 'tcx>(cx: Block<'blk, 'tcx>,
 
     let mut cx = cx;
     match t.sty {
-        ty::TyClosure(_, ref substs) => {
-            for (i, upvar_ty) in substs.upvar_tys.iter().enumerate() {
+        ty::TyClosure(def_id, substs) => {
+            for (i, upvar_ty) in substs.upvar_tys(def_id, cx.tcx()).enumerate() {
                 let llupvar = adt::trans_field_ptr(cx, t, value, Disr(0), i);
                 cx = drop_ty(cx, llupvar, upvar_ty, DebugLoc::None);
             }

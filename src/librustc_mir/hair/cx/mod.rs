@@ -16,7 +16,6 @@
  */
 
 use hair::*;
-use rustc::mir::repr::*;
 use rustc::mir::transform::MirSource;
 
 use rustc::middle::const_val::ConstVal;
@@ -27,9 +26,9 @@ use rustc::hir::def_id::DefId;
 use rustc::hir::intravisit::FnKind;
 use rustc::hir::map::blocks::FnLikeNode;
 use rustc::infer::InferCtxt;
-use rustc::ty::subst::{Subst, Substs};
+use rustc::ty::subst::Subst;
 use rustc::ty::{self, Ty, TyCtxt};
-use syntax::parse::token;
+use syntax::symbol::{Symbol, InternedString};
 use rustc::hir;
 use rustc_const_math::{ConstInt, ConstUsize};
 
@@ -121,7 +120,7 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
         self.tcx.mk_nil()
     }
 
-    pub fn str_literal(&mut self, value: token::InternedString) -> Literal<'tcx> {
+    pub fn str_literal(&mut self, value: InternedString) -> Literal<'tcx> {
         Literal::Value { value: ConstVal::Str(value) }
     }
 
@@ -145,22 +144,16 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
                         self_ty: Ty<'tcx>,
                         params: &[Ty<'tcx>])
                         -> (Ty<'tcx>, Literal<'tcx>) {
-        let method_name = token::intern(method_name);
-        let substs = Substs::new_trait(self.tcx, self_ty, params);
-        for trait_item in self.tcx.trait_items(trait_def_id).iter() {
-            match *trait_item {
-                ty::ImplOrTraitItem::MethodTraitItem(ref method) => {
-                    if method.name == method_name {
-                        let method_ty = self.tcx.lookup_item_type(method.def_id);
-                        let method_ty = method_ty.ty.subst(self.tcx, substs);
-                        return (method_ty, Literal::Item {
-                            def_id: method.def_id,
-                            substs: substs,
-                        });
-                    }
-                }
-                ty::ImplOrTraitItem::ConstTraitItem(..) |
-                ty::ImplOrTraitItem::TypeTraitItem(..) => {}
+        let method_name = Symbol::intern(method_name);
+        let substs = self.tcx.mk_substs_trait(self_ty, params);
+        for item in self.tcx.associated_items(trait_def_id) {
+            if item.kind == ty::AssociatedKind::Method && item.name == method_name {
+                let method_ty = self.tcx.item_type(item.def_id);
+                let method_ty = method_ty.subst(self.tcx, substs);
+                return (method_ty, Literal::Item {
+                    def_id: item.def_id,
+                    substs: substs,
+                });
             }
         }
 
@@ -196,5 +189,4 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
 
 mod block;
 mod expr;
-mod pattern;
 mod to_ref;

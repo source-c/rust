@@ -157,13 +157,15 @@ impl<T> TypedArena<T> {
 
     /// Allocates a slice of objects that are copy into the `TypedArena`, returning a mutable
     /// reference to it. Will panic if passed a zero-sized types.
+    ///
+    /// Panics:
+    ///  - Zero-sized types
+    ///  - Zero-length slices
     #[inline]
     pub fn alloc_slice(&self, slice: &[T]) -> &mut [T]
         where T: Copy {
         assert!(mem::size_of::<T>() != 0);
-        if slice.len() == 0 {
-            return unsafe { slice::from_raw_parts_mut(heap::EMPTY as *mut T, 0) };
-        }
+        assert!(slice.len() != 0);
 
         let available_capacity_bytes = self.end.get() as usize - self.ptr.get() as usize;
         let at_least_bytes = slice.len() * mem::size_of::<T>();
@@ -335,9 +337,8 @@ mod tests {
 
         let arena = Wrap(TypedArena::new());
 
-        let result = arena.alloc_outer(|| {
-            Outer { inner: arena.alloc_inner(|| Inner { value: 10 }) }
-        });
+        let result =
+            arena.alloc_outer(|| Outer { inner: arena.alloc_inner(|| Inner { value: 10 }) });
 
         assert_eq!(result.inner.value, 10);
     }

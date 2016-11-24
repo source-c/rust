@@ -12,7 +12,7 @@ use attr::HasAttrs;
 use feature_gate::{feature_err, EXPLAIN_STMT_ATTR_SYNTAX, Features, get_features, GateIssue};
 use {fold, attr};
 use ast;
-use codemap::{Spanned, respan};
+use codemap::Spanned;
 use parse::ParseSess;
 use ptr::P;
 
@@ -20,7 +20,6 @@ use util::small_vector::SmallVector;
 
 /// A folder that strips out items that do not belong in the current configuration.
 pub struct StripUnconfigured<'a> {
-    pub config: &'a ast::CrateConfig,
     pub should_test: bool,
     pub sess: &'a ParseSess,
     pub features: Option<&'a Features>,
@@ -32,7 +31,6 @@ pub fn features(mut krate: ast::Crate, sess: &ParseSess, should_test: bool)
     let features;
     {
         let mut strip_unconfigured = StripUnconfigured {
-            config: &krate.config.clone(),
             should_test: should_test,
             sess: sess,
             features: None,
@@ -107,13 +105,14 @@ impl<'a> StripUnconfigured<'a> {
         use attr::cfg_matches;
         match (cfg.meta_item(), mi.meta_item()) {
             (Some(cfg), Some(mi)) =>
-                if cfg_matches(self.config, &cfg, self.sess, self.features) {
-                    self.process_cfg_attr(respan(mi.span, ast::Attribute_ {
+                if cfg_matches(&cfg, self.sess, self.features) {
+                    self.process_cfg_attr(ast::Attribute {
                         id: attr::mk_attr_id(),
-                        style: attr.node.style,
+                        style: attr.style,
                         value: mi.clone(),
                         is_sugared_doc: false,
-                    }))
+                        span: mi.span,
+                    })
                 } else {
                     None
                 },
@@ -133,8 +132,8 @@ impl<'a> StripUnconfigured<'a> {
                 return false;
             }
 
-            let mis = match attr.node.value.node {
-                ast::MetaItemKind::List(_, ref mis) if is_cfg(&attr) => mis,
+            let mis = match attr.value.node {
+                ast::MetaItemKind::List(ref mis) if is_cfg(&attr) => mis,
                 _ => return true
             };
 
@@ -148,7 +147,7 @@ impl<'a> StripUnconfigured<'a> {
                 return true;
             }
 
-            attr::cfg_matches(self.config, mis[0].meta_item().unwrap(), self.sess, self.features)
+            attr::cfg_matches(mis[0].meta_item().unwrap(), self.sess, self.features)
         })
     }
 
@@ -162,7 +161,7 @@ impl<'a> StripUnconfigured<'a> {
                                           attr.span,
                                           GateIssue::Language,
                                           EXPLAIN_STMT_ATTR_SYNTAX);
-                if attr.node.is_sugared_doc {
+                if attr.is_sugared_doc {
                     err.help("`///` is for documentation comments. For a plain comment, use `//`.");
                 }
                 err.emit();
@@ -279,7 +278,7 @@ impl<'a> fold::Folder for StripUnconfigured<'a> {
     fn fold_stmt(&mut self, stmt: ast::Stmt) -> SmallVector<ast::Stmt> {
         match self.configure_stmt(stmt) {
             Some(stmt) => fold::noop_fold_stmt(stmt, self),
-            None => return SmallVector::zero(),
+            None => return SmallVector::new(),
         }
     }
 

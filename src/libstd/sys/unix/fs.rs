@@ -312,7 +312,8 @@ impl DirEntry {
               target_os = "emscripten",
               target_os = "android",
               target_os = "solaris",
-              target_os = "haiku"))]
+              target_os = "haiku",
+              target_os = "fuchsia"))]
     pub fn ino(&self) -> u64 {
         self.entry.d_ino as u64
     }
@@ -342,7 +343,8 @@ impl DirEntry {
     #[cfg(any(target_os = "android",
               target_os = "linux",
               target_os = "emscripten",
-              target_os = "haiku"))]
+              target_os = "haiku",
+              target_os = "fuchsia"))]
     fn name_bytes(&self) -> &[u8] {
         unsafe {
             CStr::from_ptr(self.entry.d_name.as_ptr()).to_bytes()
@@ -524,6 +526,11 @@ impl File {
     pub fn fd(&self) -> &FileDesc { &self.0 }
 
     pub fn into_fd(self) -> FileDesc { self.0 }
+
+    pub fn set_permissions(&self, perm: FilePermissions) -> io::Result<()> {
+        cvt_r(|| unsafe { libc::fchmod(self.0.raw(), perm.mode) })?;
+        Ok(())
+    }
 }
 
 impl DirBuilder {
