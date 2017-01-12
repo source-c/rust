@@ -143,11 +143,25 @@ impl Iterator for Vars {
     fn size_hint(&self) -> (usize, Option<usize>) { self.inner.size_hint() }
 }
 
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl fmt::Debug for Vars {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("Vars { .. }")
+    }
+}
+
 #[stable(feature = "env", since = "1.0.0")]
 impl Iterator for VarsOs {
     type Item = (OsString, OsString);
     fn next(&mut self) -> Option<(OsString, OsString)> { self.inner.next() }
     fn size_hint(&self) -> (usize, Option<usize>) { self.inner.size_hint() }
+}
+
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl fmt::Debug for VarsOs {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("VarsOs { .. }")
+    }
 }
 
 /// Fetches the environment variable `key` from the current process.
@@ -362,6 +376,13 @@ impl<'a> Iterator for SplitPaths<'a> {
     type Item = PathBuf;
     fn next(&mut self) -> Option<PathBuf> { self.inner.next() }
     fn size_hint(&self) -> (usize, Option<usize>) { self.inner.size_hint() }
+}
+
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl<'a> fmt::Debug for SplitPaths<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("SplitPaths { .. }")
+    }
 }
 
 /// Error type returned from `std::env::join_paths` when paths fail to be
@@ -630,12 +651,20 @@ impl Iterator for Args {
 #[stable(feature = "env", since = "1.0.0")]
 impl ExactSizeIterator for Args {
     fn len(&self) -> usize { self.inner.len() }
+    fn is_empty(&self) -> bool { self.inner.is_empty() }
 }
 
 #[stable(feature = "env_iterators", since = "1.11.0")]
 impl DoubleEndedIterator for Args {
     fn next_back(&mut self) -> Option<String> {
         self.inner.next_back().map(|s| s.into_string().unwrap())
+    }
+}
+
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl fmt::Debug for Args {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("Args { .. }")
     }
 }
 
@@ -649,12 +678,21 @@ impl Iterator for ArgsOs {
 #[stable(feature = "env", since = "1.0.0")]
 impl ExactSizeIterator for ArgsOs {
     fn len(&self) -> usize { self.inner.len() }
+    fn is_empty(&self) -> bool { self.inner.is_empty() }
 }
 
 #[stable(feature = "env_iterators", since = "1.11.0")]
 impl DoubleEndedIterator for ArgsOs {
     fn next_back(&mut self) -> Option<OsString> { self.inner.next_back() }
 }
+
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl fmt::Debug for ArgsOs {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("ArgsOs { .. }")
+    }
+}
+
 /// Constants associated with the current target
 #[stable(feature = "env", since = "1.0.0")]
 pub mod consts {
@@ -674,6 +712,7 @@ pub mod consts {
     /// - powerpc
     /// - powerpc64
     /// - s390x
+    /// - sparc64
     #[stable(feature = "env", since = "1.0.0")]
     pub const ARCH: &'static str = super::arch::ARCH;
 
@@ -803,6 +842,11 @@ mod arch {
 #[cfg(target_arch = "s390x")]
 mod arch {
     pub const ARCH: &'static str = "s390x";
+}
+
+#[cfg(target_arch = "sparc64")]
+mod arch {
+    pub const ARCH: &'static str = "sparc64";
 }
 
 #[cfg(target_arch = "le32")]

@@ -41,10 +41,14 @@ pub fn check(build: &mut Build) {
         }
     }
     let have_cmd = |cmd: &OsStr| {
-        for path in env::split_paths(&path).map(|p| p.join(cmd)) {
-            if fs::metadata(&path).is_ok() ||
-               fs::metadata(path.with_extension("exe")).is_ok() {
-                return Some(path);
+        for path in env::split_paths(&path) {
+            let target = path.join(cmd);
+            let mut cmd_alt = cmd.to_os_string();
+            cmd_alt.push(".exe");
+            if target.exists() ||
+               target.with_extension("exe").exists() ||
+               target.join(cmd_alt).exists() {
+                return Some(target);
             }
         }
         return None;
@@ -74,7 +78,11 @@ pub fn check(build: &mut Build) {
         }
         need_cmd("cmake".as_ref());
         if build.config.ninja {
-            need_cmd("ninja".as_ref())
+            // Some Linux distros rename `ninja` to `ninja-build`.
+            // CMake can work with either binary name.
+            if have_cmd("ninja-build".as_ref()).is_none() {
+                need_cmd("ninja".as_ref());
+            }
         }
         break
     }
@@ -139,7 +147,7 @@ pub fn check(build: &mut Build) {
     // Externally configured LLVM requires FileCheck to exist
     let filecheck = build.llvm_filecheck(&build.config.build);
     if !filecheck.starts_with(&build.out) && !filecheck.exists() && build.config.codegen_tests {
-        panic!("filecheck executable {:?} does not exist", filecheck);
+        panic!("FileCheck executable {:?} does not exist", filecheck);
     }
 
     for target in build.config.target.iter() {
@@ -218,5 +226,9 @@ $ pacman -R cmake && pacman -S mingw-w64-x86_64-cmake
     build.lldb_version = run(Command::new("lldb").arg("--version")).ok();
     if build.lldb_version.is_some() {
         build.lldb_python_dir = run(Command::new("lldb").arg("-P")).ok();
+    }
+
+    if let Some(ref s) = build.config.ccache {
+        need_cmd(s.as_ref());
     }
 }

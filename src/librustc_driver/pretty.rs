@@ -15,10 +15,9 @@ pub use self::PpSourceMode::*;
 pub use self::PpMode::*;
 use self::NodesMatchingUII::*;
 
-use abort_on_err;
-use driver::{self, Resolutions};
+use {abort_on_err, driver};
 
-use rustc::ty::{self, TyCtxt};
+use rustc::ty::{self, TyCtxt, GlobalArenas, Resolutions};
 use rustc::cfg;
 use rustc::cfg::graphviz::LabelledCFG;
 use rustc::dep_graph::DepGraph;
@@ -40,6 +39,7 @@ use syntax_pos;
 
 use graphviz as dot;
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, Write};
 use std::iter;
@@ -48,9 +48,11 @@ use std::path::Path;
 use std::str::FromStr;
 
 use rustc::hir::map as hir_map;
-use rustc::hir::map::{blocks, NodePrinter};
+use rustc::hir::map::blocks;
 use rustc::hir;
 use rustc::hir::print as pprust_hir;
+
+use arena::DroplessArena;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum PpSourceMode {
@@ -200,9 +202,10 @@ impl PpSourceMode {
     fn call_with_pp_support_hir<'tcx, A, B, F>(&self,
                                                sess: &'tcx Session,
                                                ast_map: &hir_map::Map<'tcx>,
-                                               analysis: &ty::CrateAnalysis,
+                                               analysis: &ty::CrateAnalysis<'tcx>,
                                                resolutions: &Resolutions,
-                                               arenas: &'tcx ty::CtxtArenas<'tcx>,
+                                               arena: &'tcx DroplessArena,
+                                               arenas: &'tcx GlobalArenas<'tcx>,
                                                id: &str,
                                                payload: B,
                                                f: F)
@@ -230,10 +233,15 @@ impl PpSourceMode {
                                                                  ast_map.clone(),
                                                                  analysis.clone(),
                                                                  resolutions.clone(),
+                                                                 arena,
                                                                  arenas,
                                                                  id,
                                                                  |tcx, _, _, _| {
-                    let annotation = TypedAnnotation { tcx: tcx };
+                    let empty_tables = ty::Tables::empty();
+                    let annotation = TypedAnnotation {
+                        tcx: tcx,
+                        tables: Cell::new(&empty_tables)
+                    };
                     let _ignore = tcx.dep_graph.in_ignore();
                     f(&annotation, payload, ast_map.forest.krate())
                 }),
@@ -321,7 +329,16 @@ impl<'ast> HirPrinterSupport<'ast> for NoAnn<'ast> {
 }
 
 impl<'ast> pprust::PpAnn for NoAnn<'ast> {}
-impl<'ast> pprust_hir::PpAnn for NoAnn<'ast> {}
+impl<'ast> pprust_hir::PpAnn for NoAnn<'ast> {
+    fn nested(&self, state: &mut pprust_hir::State, nested: pprust_hir::Nested)
+              -> io::Result<()> {
+        if let Some(ref map) = self.ast_map {
+            pprust_hir::PpAnn::nested(map, state, nested)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 struct IdentifiedAnnotation<'ast> {
     sess: &'ast Session,
@@ -394,6 +411,14 @@ impl<'ast> HirPrinterSupport<'ast> for IdentifiedAnnotation<'ast> {
 }
 
 impl<'ast> pprust_hir::PpAnn for IdentifiedAnnotation<'ast> {
+    fn nested(&self, state: &mut pprust_hir::State, nested: pprust_hir::Nested)
+              -> io::Result<()> {
+        if let Some(ref map) = self.ast_map {
+            pprust_hir::PpAnn::nested(map, state, nested)
+        } else {
+            Ok(())
+        }
+    }
     fn pre(&self, s: &mut pprust_hir::State, node: pprust_hir::AnnNode) -> io::Result<()> {
         match node {
             pprust_hir::NodeExpr(_) => s.popen(),
@@ -468,6 +493,7 @@ impl<'ast> pprust::PpAnn for HygieneAnnotation<'ast> {
 
 struct TypedAnnotation<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    tables: Cell<&'a ty::Tables<'tcx>>,
 }
 
 impl<'b, 'tcx> HirPrinterSupport<'tcx> for TypedAnnotation<'b, 'tcx> {
@@ -489,6 +515,16 @@ impl<'b, 'tcx> HirPrinterSupport<'tcx> for TypedAnnotation<'b, 'tcx> {
 }
 
 impl<'a, 'tcx> pprust_hir::PpAnn for TypedAnnotation<'a, 'tcx> {
+    fn nested(&self, state: &mut pprust_hir::State, nested: pprust_hir::Nested)
+              -> io::Result<()> {
+        let old_tables = self.tables.get();
+        if let pprust_hir::Nested::Body(id) = nested {
+            self.tables.set(self.tcx.body_tables(id));
+        }
+        pprust_hir::PpAnn::nested(&self.tcx.map, state, nested)?;
+        self.tables.set(old_tables);
+        Ok(())
+    }
     fn pre(&self, s: &mut pprust_hir::State, node: pprust_hir::AnnNode) -> io::Result<()> {
         match node {
             pprust_hir::NodeExpr(_) => s.popen(),
@@ -501,7 +537,7 @@ impl<'a, 'tcx> pprust_hir::PpAnn for TypedAnnotation<'a, 'tcx> {
                 pp::space(&mut s.s)?;
                 pp::word(&mut s.s, "as")?;
                 pp::space(&mut s.s)?;
-                pp::word(&mut s.s, &self.tcx.tables().expr_ty(expr).to_string())?;
+                pp::word(&mut s.s, &self.tables.get().expr_ty(expr).to_string())?;
                 s.pclose()
             }
             _ => Ok(()),
@@ -696,13 +732,16 @@ impl fold::Folder for ReplaceBodyWithLoop {
 
 fn print_flowgraph<'a, 'tcx, W: Write>(variants: Vec<borrowck_dot::Variant>,
                                        tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                       code: blocks::Code,
+                                       code: blocks::Code<'tcx>,
                                        mode: PpFlowGraphMode,
                                        mut out: W)
                                        -> io::Result<()> {
     let cfg = match code {
         blocks::Code::Expr(expr) => cfg::CFG::new(tcx, expr),
-        blocks::Code::FnLike(fn_like) => cfg::CFG::new(tcx, fn_like.body()),
+        blocks::Code::FnLike(fn_like) => {
+            let body = tcx.map.body(fn_like.body());
+            cfg::CFG::new(tcx, &body.value)
+        },
     };
     let labelled_edges = mode != PpFlowGraphMode::UnlabelledEdges;
     let lcfg = LabelledCFG {
@@ -724,7 +763,7 @@ fn print_flowgraph<'a, 'tcx, W: Write>(variants: Vec<borrowck_dot::Variant>,
         }
         blocks::Code::FnLike(fn_like) => {
             let (bccx, analysis_data) =
-                borrowck::build_borrowck_dataflow_data_for_fn(tcx, fn_like.to_fn_parts(), &cfg);
+                borrowck::build_borrowck_dataflow_data_for_fn(tcx, fn_like.body(), &cfg);
 
             let lcfg = borrowck_dot::DataflowLabeller {
                 inner: lcfg,
@@ -817,13 +856,14 @@ pub fn print_after_parsing(sess: &Session,
 
 pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
                                                 ast_map: &hir_map::Map<'tcx>,
-                                                analysis: &ty::CrateAnalysis,
+                                                analysis: &ty::CrateAnalysis<'tcx>,
                                                 resolutions: &Resolutions,
                                                 input: &Input,
                                                 krate: &ast::Crate,
                                                 crate_name: &str,
                                                 ppm: PpMode,
-                                                arenas: &'tcx ty::CtxtArenas<'tcx>,
+                                                arena: &'tcx DroplessArena,
+                                                arenas: &'tcx GlobalArenas<'tcx>,
                                                 opt_uii: Option<UserIdentifiedItem>,
                                                 ofile: Option<&Path>) {
     let dep_graph = DepGraph::new(false);
@@ -835,6 +875,7 @@ pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
                             analysis,
                             resolutions,
                             crate_name,
+                            arena,
                             arenas,
                             ppm,
                             opt_uii,
@@ -871,6 +912,7 @@ pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
                                            ast_map,
                                            analysis,
                                            resolutions,
+                                           arena,
                                            arenas,
                                            crate_name,
                                            box out,
@@ -894,6 +936,7 @@ pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
                                            ast_map,
                                            analysis,
                                            resolutions,
+                                           arena,
                                            arenas,
                                            crate_name,
                                            (out, uii),
@@ -907,11 +950,10 @@ pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
                                                                          &mut rdr,
                                                                          box out,
                                                                          annotation.pp_ann(),
-                                                                         true,
-                                                                         Some(ast_map.krate()));
+                                                                         true);
                     for node_id in uii.all_matching_node_ids(ast_map) {
                         let node = ast_map.get(node_id);
-                        pp_state.print_node(&node)?;
+                        pp_state.print_node(node)?;
                         pp::space(&mut pp_state.s)?;
                         let path = annotation.node_path(node_id)
                             .expect("--unpretty missing node paths");
@@ -934,10 +976,11 @@ pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
 // Instead, we call that function ourselves.
 fn print_with_analysis<'tcx, 'a: 'tcx>(sess: &'a Session,
                                        ast_map: &hir_map::Map<'tcx>,
-                                       analysis: &ty::CrateAnalysis,
+                                       analysis: &ty::CrateAnalysis<'tcx>,
                                        resolutions: &Resolutions,
                                        crate_name: &str,
-                                       arenas: &'tcx ty::CtxtArenas<'tcx>,
+                                       arena: &'tcx DroplessArena,
+                                       arenas: &'tcx GlobalArenas<'tcx>,
                                        ppm: PpMode,
                                        uii: Option<UserIdentifiedItem>,
                                        ofile: Option<&Path>) {
@@ -955,6 +998,7 @@ fn print_with_analysis<'tcx, 'a: 'tcx>(sess: &'a Session,
                                                      ast_map.clone(),
                                                      analysis.clone(),
                                                      resolutions.clone(),
+                                                     arena,
                                                      arenas,
                                                      crate_name,
                                                      |tcx, _, _, _| {
@@ -1003,11 +1047,7 @@ fn print_with_analysis<'tcx, 'a: 'tcx>(sess: &'a Session,
                                                got {:?}",
                                               node);
 
-                        // Point to what was found, if there's an accessible span.
-                        match tcx.map.opt_span(nodeid) {
-                            Some(sp) => tcx.sess.span_fatal(sp, &message),
-                            None => tcx.sess.fatal(&message),
-                        }
+                        tcx.sess.span_fatal(tcx.map.span(nodeid), &message)
                     }
                 }
             }

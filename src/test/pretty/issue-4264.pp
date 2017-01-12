@@ -39,8 +39,8 @@ pub fn bar() ({
 
 
 
-                  (($crate::fmt::format as
-                       fn(std::fmt::Arguments<'_>) -> std::string::String {std::fmt::format})(((::std::fmt::Arguments::new_v1
+                  ((::fmt::format as
+                       fn(std::fmt::Arguments<'_>) -> std::string::String {std::fmt::format})(((<::std::fmt::Arguments>::new_v1
                                                                                                    as
                                                                                                    fn(&[&str], &[std::fmt::ArgumentV1<'_>]) -> std::fmt::Arguments<'_> {std::fmt::Arguments<'_>::new_v1})(({
                                                                                                                                                                                                                static __STATIC_FMTSTR:

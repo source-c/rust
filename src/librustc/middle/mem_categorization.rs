@@ -73,7 +73,6 @@ use self::Aliasability::*;
 use hir::def_id::DefId;
 use hir::map as ast_map;
 use infer::InferCtxt;
-use middle::const_qualif::ConstQualif;
 use hir::def::{Def, CtorKind};
 use ty::adjustment;
 use ty::{self, Ty, TyCtxt};
@@ -385,7 +384,7 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
     }
 
     pub fn cat_expr(&self, expr: &hir::Expr) -> McResult<cmt<'tcx>> {
-        match self.infcx.adjustments().get(&expr.id) {
+        match self.infcx.tables.borrow().adjustments.get(&expr.id) {
             None => {
                 // No adjustments.
                 self.cat_expr_unadjusted(expr)
@@ -488,8 +487,9 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
             }
           }
 
-          hir::ExprPath(..) => {
-            self.cat_def(expr.id, expr.span, expr_ty, self.tcx().expect_def(expr.id))
+          hir::ExprPath(ref qpath) => {
+            let def = self.infcx.tables.borrow().qpath_def(qpath, expr.id);
+            self.cat_def(expr.id, expr.span, expr_ty, def)
           }
 
           hir::ExprType(ref e, _) => {
@@ -704,7 +704,7 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
             };
 
             match fn_expr.node {
-                hir::ExprClosure(.., ref body, _) => body.id,
+                hir::ExprClosure(.., body_id, _) => body_id.node_id,
                 _ => bug!()
             }
         };
@@ -772,23 +772,23 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
                            span: Span,
                            expr_ty: Ty<'tcx>)
                            -> cmt<'tcx> {
-        let qualif = self.tcx().const_qualif_map.borrow().get(&id).cloned()
-                               .unwrap_or(ConstQualif::NOT_CONST);
+        let promotable = self.tcx().rvalue_promotable_to_static.borrow().get(&id).cloned()
+                                   .unwrap_or(false);
 
         // Only promote `[T; 0]` before an RFC for rvalue promotions
         // is accepted.
-        let qualif = match expr_ty.sty {
-            ty::TyArray(_, 0) => qualif,
-            _ => ConstQualif::NOT_CONST
+        let promotable = match expr_ty.sty {
+            ty::TyArray(_, 0) => true,
+            _ => promotable & false
         };
 
         // Compute maximum lifetime of this rvalue. This is 'static if
         // we can promote to a constant, otherwise equal to enclosing temp
         // lifetime.
-        let re = if qualif.intersects(ConstQualif::NON_STATIC_BORROWS) {
-            self.temporary_scope(id)
-        } else {
+        let re = if promotable {
             self.tcx().mk_region(ty::ReStatic)
+        } else {
+            self.temporary_scope(id)
         };
         let ret = self.cat_rvalue(id, span, re, expr_ty);
         debug!("cat_rvalue_node ret {:?}", ret);
@@ -1062,24 +1062,32 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
 
         // Note: This goes up here (rather than within the PatKind::TupleStruct arm
         // alone) because PatKind::Struct can also refer to variants.
-        let cmt = match self.tcx().expect_def_or_none(pat.id) {
-            Some(Def::Err) => return Err(()),
-            Some(Def::Variant(variant_did)) |
-            Some(Def::VariantCtor(variant_did, ..)) => {
-                // univariant enums do not need downcasts
-                let enum_did = self.tcx().parent_def_id(variant_did).unwrap();
-                if !self.tcx().lookup_adt_def(enum_did).is_univariant() {
-                    self.cat_downcast(pat, cmt.clone(), cmt.ty, variant_did)
-                } else {
-                    cmt
+        let cmt = match pat.node {
+            PatKind::Path(hir::QPath::Resolved(_, ref path)) |
+            PatKind::TupleStruct(hir::QPath::Resolved(_, ref path), ..) |
+            PatKind::Struct(hir::QPath::Resolved(_, ref path), ..) => {
+                match path.def {
+                    Def::Err => return Err(()),
+                    Def::Variant(variant_did) |
+                    Def::VariantCtor(variant_did, ..) => {
+                        // univariant enums do not need downcasts
+                        let enum_did = self.tcx().parent_def_id(variant_did).unwrap();
+                        if !self.tcx().lookup_adt_def(enum_did).is_univariant() {
+                            self.cat_downcast(pat, cmt.clone(), cmt.ty, variant_did)
+                        } else {
+                            cmt
+                        }
+                    }
+                    _ => cmt
                 }
             }
             _ => cmt
         };
 
         match pat.node {
-          PatKind::TupleStruct(_, ref subpats, ddpos) => {
-            let expected_len = match self.tcx().expect_def(pat.id) {
+          PatKind::TupleStruct(ref qpath, ref subpats, ddpos) => {
+            let def = self.infcx.tables.borrow().qpath_def(qpath, pat.id);
+            let expected_len = match def {
                 Def::VariantCtor(def_id, CtorKind::Fn) => {
                     let enum_def = self.tcx().parent_def_id(def_id).unwrap();
                     self.tcx().lookup_adt_def(enum_def).variant_with_id(def_id).fields.len()
@@ -1157,7 +1165,7 @@ impl<'a, 'gcx, 'tcx> MemCategorizationContext<'a, 'gcx, 'tcx> {
             }
           }
 
-          PatKind::Path(..) | PatKind::Binding(.., None) |
+          PatKind::Path(_) | PatKind::Binding(.., None) |
           PatKind::Lit(..) | PatKind::Range(..) | PatKind::Wild => {
             // always ok
           }

@@ -29,7 +29,7 @@ use std::fmt::{self, Debug, Formatter, Write};
 use std::{iter, u32};
 use std::ops::{Index, IndexMut};
 use std::vec::IntoIter;
-use syntax::ast::{self, Name};
+use syntax::ast::Name;
 use syntax_pos::Span;
 
 mod cache;
@@ -462,7 +462,7 @@ pub enum TerminatorKind<'tcx> {
     /// lvalue evaluates to some enum; jump depending on the branch
     Switch {
         discr: Lvalue<'tcx>,
-        adt_def: AdtDef<'tcx>,
+        adt_def: &'tcx AdtDef,
         targets: Vec<BasicBlock>,
     },
 
@@ -866,7 +866,7 @@ pub enum ProjectionElem<'tcx, V> {
     /// "Downcast" to a variant of an ADT. Currently, we only introduce
     /// this for ADTs with more than one variant. It may be better to
     /// just introduce it always, or always for enums.
-    Downcast(AdtDef<'tcx>, usize),
+    Downcast(&'tcx AdtDef, usize),
 }
 
 /// Alias for projections as they appear in lvalues, where the base is an lvalue
@@ -886,6 +886,10 @@ impl<'tcx> Lvalue<'tcx> {
 
     pub fn deref(self) -> Lvalue<'tcx> {
         self.elem(ProjectionElem::Deref)
+    }
+
+    pub fn downcast(self, adt_def: &'tcx AdtDef, variant_index: usize) -> Lvalue<'tcx> {
+        self.elem(ProjectionElem::Downcast(adt_def, variant_index))
     }
 
     pub fn index(self, index: Operand<'tcx>) -> Lvalue<'tcx> {
@@ -1035,7 +1039,7 @@ pub enum AggregateKind<'tcx> {
     /// The second field is variant number (discriminant), it's equal to 0
     /// for struct and union expressions. The fourth field is active field
     /// number and is present only for union expressions.
-    Adt(AdtDef<'tcx>, usize, &'tcx Substs<'tcx>, Option<usize>),
+    Adt(&'tcx AdtDef, usize, &'tcx Substs<'tcx>, Option<usize>),
     Closure(DefId, ClosureSubsts<'tcx>),
 }
 
@@ -1267,15 +1271,10 @@ fn fmt_const_val<W: Write>(fmt: &mut W, const_val: &ConstVal) -> fmt::Result {
         }
         Bool(b) => write!(fmt, "{:?}", b),
         Function(def_id) => write!(fmt, "{}", item_path_str(def_id)),
-        Struct(node_id) | Tuple(node_id) | Array(node_id, _) | Repeat(node_id, _) =>
-            write!(fmt, "{}", node_to_string(node_id)),
+        Struct(_) | Tuple(_) | Array(_) | Repeat(..) =>
+            bug!("ConstVal `{:?}` should not be in MIR", const_val),
         Char(c) => write!(fmt, "{:?}", c),
-        Dummy => bug!(),
     }
-}
-
-fn node_to_string(node_id: ast::NodeId) -> String {
-    ty::tls::with(|tcx| tcx.map.node_to_user_string(node_id))
 }
 
 fn item_path_str(def_id: DefId) -> String {

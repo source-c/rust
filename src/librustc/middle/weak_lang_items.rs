@@ -18,7 +18,7 @@ use rustc_back::PanicStrategy;
 use syntax::ast;
 use syntax::symbol::Symbol;
 use syntax_pos::Span;
-use hir::intravisit::Visitor;
+use hir::intravisit::{Visitor, NestedVisitorMap};
 use hir::intravisit;
 use hir;
 
@@ -75,8 +75,7 @@ fn verify(sess: &Session, items: &lang_items::LanguageItems) {
             config::CrateTypeCdylib |
             config::CrateTypeExecutable |
             config::CrateTypeStaticlib => true,
-            config::CrateTypeRlib |
-            config::CrateTypeMetadata => false,
+            config::CrateTypeRlib => false,
         }
     });
     if !needs_check {
@@ -125,6 +124,10 @@ impl<'a> Context<'a> {
 }
 
 impl<'a, 'v> Visitor<'v> for Context<'a> {
+    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
+        NestedVisitorMap::None
+    }
+
     fn visit_foreign_item(&mut self, i: &hir::ForeignItem) {
         if let Some(lang_item) = lang_items::extract(&i.attrs) {
             self.register(&lang_item.as_str(), i.span);

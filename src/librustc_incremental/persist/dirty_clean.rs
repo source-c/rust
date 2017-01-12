@@ -114,7 +114,8 @@ impl<'a, 'tcx> DirtyCleanVisitor<'a, 'tcx> {
 
         match dep_node {
             DepNode::Krate |
-            DepNode::Hir(_) => {
+            DepNode::Hir(_) |
+            DepNode::HirBody(_) => {
                 // HIR nodes are inputs, so if we are asserting that the HIR node is
                 // dirty, we check the dirty input set.
                 if !self.dirty_inputs.contains(&dep_node) {
@@ -143,7 +144,8 @@ impl<'a, 'tcx> DirtyCleanVisitor<'a, 'tcx> {
 
         match dep_node {
             DepNode::Krate |
-            DepNode::Hir(_) => {
+            DepNode::Hir(_) |
+            DepNode::HirBody(_) => {
                 // For HIR nodes, check the inputs.
                 if self.dirty_inputs.contains(&dep_node) {
                     let dep_node_str = self.dep_node_str(&dep_node);
@@ -181,6 +183,9 @@ impl<'a, 'tcx> ItemLikeVisitor<'tcx> for DirtyCleanVisitor<'a, 'tcx> {
                 }
             }
         }
+    }
+
+    fn visit_trait_item(&mut self, _trait_item: &hir::TraitItem) {
     }
 
     fn visit_impl_item(&mut self, _impl_item: &hir::ImplItem) {
@@ -225,6 +230,9 @@ impl<'a, 'tcx, 'm> ItemLikeVisitor<'tcx> for DirtyCleanMetadataVisitor<'a, 'tcx,
                 }
             }
         }
+    }
+
+    fn visit_trait_item(&mut self, _trait_item: &hir::TraitItem) {
     }
 
     fn visit_impl_item(&mut self, _impl_item: &hir::ImplItem) {

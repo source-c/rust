@@ -10,8 +10,6 @@
 
 use rustc_data_structures::graph;
 use cfg::*;
-use hir::def::Def;
-use hir::pat_util;
 use ty::{self, TyCtxt};
 use syntax::ast;
 use syntax::ptr::P;
@@ -20,6 +18,7 @@ use hir::{self, PatKind};
 
 struct CFGBuilder<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    tables: &'a ty::Tables<'tcx>,
     graph: CFGGraph,
     fn_exit: CFGIndex,
     loop_scopes: Vec<LoopScope>,
@@ -44,10 +43,23 @@ pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let fn_exit = graph.add_node(CFGNodeData::Exit);
     let body_exit;
 
+    // Find the function this expression is from.
+    let mut node_id = body.id;
+    loop {
+        let node = tcx.map.get(node_id);
+        if hir::map::blocks::FnLikeNode::from_node(node).is_some() {
+            break;
+        }
+        let parent = tcx.map.get_parent_node(node_id);
+        assert!(node_id != parent);
+        node_id = parent;
+    }
+
     let mut cfg_builder = CFGBuilder {
+        tcx: tcx,
+        tables: tcx.item_tables(tcx.map.local_def_id(node_id)),
         graph: graph,
         fn_exit: fn_exit,
-        tcx: tcx,
         loop_scopes: Vec::new()
     };
     body_exit = cfg_builder.expr(body, entry);
@@ -100,7 +112,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn pat(&mut self, pat: &hir::Pat, pred: CFGIndex) -> CFGIndex {
         match pat.node {
             PatKind::Binding(.., None) |
-            PatKind::Path(..) |
+            PatKind::Path(_) |
             PatKind::Lit(..) |
             PatKind::Range(..) |
             PatKind::Wild => {
@@ -284,7 +296,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
             hir::ExprBreak(label, ref opt_expr) => {
                 let v = self.opt_expr(opt_expr, pred);
-                let loop_scope = self.find_scope(expr, label.map(|l| l.node));
+                let loop_scope = self.find_scope(expr, label);
                 let b = self.add_ast_node(expr.id, &[v]);
                 self.add_exiting_edge(expr, b,
                                       loop_scope, loop_scope.break_index);
@@ -292,7 +304,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
 
             hir::ExprAgain(label) => {
-                let loop_scope = self.find_scope(expr, label.map(|l| l.node));
+                let loop_scope = self.find_scope(expr, label);
                 let a = self.add_ast_node(expr.id, &[pred]);
                 self.add_exiting_edge(expr, a,
                                       loop_scope, loop_scope.continue_index);
@@ -312,11 +324,11 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
 
             hir::ExprIndex(ref l, ref r) |
-            hir::ExprBinary(_, ref l, ref r) if self.tcx.tables().is_method_call(expr.id) => {
+            hir::ExprBinary(_, ref l, ref r) if self.tables.is_method_call(expr.id) => {
                 self.call(expr, pred, &l, Some(&**r).into_iter())
             }
 
-            hir::ExprUnary(_, ref e) if self.tcx.tables().is_method_call(expr.id) => {
+            hir::ExprUnary(_, ref e) if self.tables.is_method_call(expr.id) => {
                 self.call(expr, pred, &e, None::<hir::Expr>.iter())
             }
 
@@ -327,10 +339,6 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             hir::ExprStruct(_, ref fields, ref base) => {
                 let field_cfg = self.straightline(expr, pred, fields.iter().map(|f| &*f.expr));
                 self.opt_expr(base, field_cfg)
-            }
-
-            hir::ExprRepeat(ref elem, ref count) => {
-                self.straightline(expr, pred, [elem, count].iter().map(|&e| &**e))
             }
 
             hir::ExprAssign(ref l, ref r) |
@@ -349,7 +357,8 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             hir::ExprType(ref e, _) |
             hir::ExprUnary(_, ref e) |
             hir::ExprField(ref e, _) |
-            hir::ExprTupField(ref e, _) => {
+            hir::ExprTupField(ref e, _) |
+            hir::ExprRepeat(ref e, _) => {
                 self.straightline(expr, pred, Some(&**e).into_iter())
             }
 
@@ -361,7 +370,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
             hir::ExprClosure(..) |
             hir::ExprLit(..) |
-            hir::ExprPath(..) => {
+            hir::ExprPath(_) => {
                 self.straightline(expr, pred, None::<hir::Expr>.iter())
             }
         }
@@ -373,9 +382,9 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             func_or_rcvr: &hir::Expr,
             args: I) -> CFGIndex {
         let method_call = ty::MethodCall::expr(call_expr.id);
-        let fn_ty = match self.tcx.tables().method_map.get(&method_call) {
+        let fn_ty = match self.tables.method_map.get(&method_call) {
             Some(method) => method.ty,
-            None => self.tcx.tables().expr_ty_adjusted(func_or_rcvr)
+            None => self.tables.expr_ty_adjusted(func_or_rcvr)
         };
 
         let func_or_rcvr_exit = self.expr(func_or_rcvr, pred);
@@ -457,7 +466,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                     // Visit the guard expression
                     let guard_exit = self.expr(&guard, guard_start);
 
-                    let this_has_bindings = pat_util::pat_contains_bindings_or_wild(&pat);
+                    let this_has_bindings = pat.contains_bindings_or_wild();
 
                     // If both this pattern and the previous pattern
                     // were free of bindings, they must consist only
@@ -570,23 +579,16 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
     fn find_scope(&self,
                   expr: &hir::Expr,
-                  label: Option<ast::Name>) -> LoopScope {
-        if label.is_none() {
-            return *self.loop_scopes.last().unwrap();
-        }
-
-        match self.tcx.expect_def(expr.id) {
-            Def::Label(loop_id) => {
+                  label: Option<hir::Label>) -> LoopScope {
+        match label {
+            None => *self.loop_scopes.last().unwrap(),
+            Some(label) => {
                 for l in &self.loop_scopes {
-                    if l.loop_id == loop_id {
+                    if l.loop_id == label.loop_id {
                         return *l;
                     }
                 }
-                span_bug!(expr.span, "no loop scope for id {}", loop_id);
-            }
-
-            r => {
-                span_bug!(expr.span, "bad entry `{:?}` in def_map for label", r);
+                span_bug!(expr.span, "no loop scope for id {}", label.loop_id);
             }
         }
     }

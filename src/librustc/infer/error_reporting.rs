@@ -75,7 +75,6 @@ use std::collections::HashSet;
 
 use hir::map as ast_map;
 use hir;
-use hir::print as pprust;
 
 use lint;
 use hir::def::Def;
@@ -114,6 +113,22 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             }
         }
 
+        fn trait_item_scope_tag(item: &hir::TraitItem) -> &'static str {
+            match item.node {
+                hir::TraitItemKind::Method(..) => "method body",
+                hir::TraitItemKind::Const(..) |
+                hir::TraitItemKind::Type(..) => "associated item"
+            }
+        }
+
+        fn impl_item_scope_tag(item: &hir::ImplItem) -> &'static str {
+            match item.node {
+                hir::ImplItemKind::Method(..) => "method body",
+                hir::ImplItemKind::Const(..) |
+                hir::ImplItemKind::Type(_) => "associated item"
+            }
+        }
+
         fn explain_span<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
                                         heading: &str, span: Span)
                                         -> (String, Option<Span>) {
@@ -149,6 +164,8 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                     },
                     Some(ast_map::NodeStmt(_)) => "statement",
                     Some(ast_map::NodeItem(it)) => item_scope_tag(&it),
+                    Some(ast_map::NodeTraitItem(it)) => trait_item_scope_tag(&it),
+                    Some(ast_map::NodeImplItem(it)) => impl_item_scope_tag(&it),
                     Some(_) | None => {
                         err.span_note(span, &unknown_scope());
                         return;
@@ -187,23 +204,31 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                     }
                 };
 
-                match self.map.find(fr.scope.node_id(&self.region_maps)) {
-                    Some(ast_map::NodeBlock(ref blk)) => {
-                        let (msg, opt_span) = explain_span(self, "block", blk.span);
-                        (format!("{} {}", prefix, msg), opt_span)
+                let node = fr.scope.node_id(&self.region_maps);
+                let unknown;
+                let tag = match self.map.find(node) {
+                    Some(ast_map::NodeBlock(_)) |
+                    Some(ast_map::NodeExpr(_)) => "body",
+                    Some(ast_map::NodeItem(it)) => item_scope_tag(&it),
+                    Some(ast_map::NodeTraitItem(it)) => trait_item_scope_tag(&it),
+                    Some(ast_map::NodeImplItem(it)) => impl_item_scope_tag(&it),
+
+                    // this really should not happen, but it does:
+                    // FIXME(#27942)
+                    Some(_) => {
+                        unknown = format!("unexpected node ({}) for scope {:?}.  \
+                                           Please report a bug.",
+                                          self.map.node_to_string(node), fr.scope);
+                        &unknown
                     }
-                    Some(ast_map::NodeItem(it)) => {
-                        let tag = item_scope_tag(&it);
-                        let (msg, opt_span) = explain_span(self, tag, it.span);
-                        (format!("{} {}", prefix, msg), opt_span)
+                    None => {
+                        unknown = format!("unknown node for scope {:?}.  \
+                                           Please report a bug.", fr.scope);
+                        &unknown
                     }
-                    Some(_) | None => {
-                        // this really should not happen, but it does:
-                        // FIXME(#27942)
-                        (format!("{} unknown free region bounded by scope {:?}",
-                                 prefix, fr.scope), None)
-                    }
-                }
+                };
+                let (msg, opt_span) = explain_span(self, tag, self.map.span(node));
+                (format!("{} {}", prefix, msg), opt_span)
             }
 
             ty::ReStatic => ("the static lifetime".to_owned(), None),
@@ -1051,8 +1076,8 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             Some(ref node) => match *node {
                 ast_map::NodeItem(ref item) => {
                     match item.node {
-                        hir::ItemFn(ref fn_decl, unsafety, constness, _, ref gen, _) => {
-                            Some((fn_decl, gen, unsafety, constness, item.name, item.span))
+                        hir::ItemFn(ref fn_decl, unsafety, constness, _, ref gen, body) => {
+                            Some((fn_decl, gen, unsafety, constness, item.name, item.span, body))
                         }
                         _ => None,
                     }
@@ -1066,26 +1091,28 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                             return;
                         }
                     }
-                    if let hir::ImplItemKind::Method(ref sig, _) = item.node {
+                    if let hir::ImplItemKind::Method(ref sig, body) = item.node {
                         Some((&sig.decl,
                               &sig.generics,
                               sig.unsafety,
                               sig.constness,
                               item.name,
-                              item.span))
+                              item.span,
+                              body))
                     } else {
                         None
                     }
                 },
                 ast_map::NodeTraitItem(item) => {
                     match item.node {
-                        hir::MethodTraitItem(ref sig, Some(_)) => {
+                        hir::TraitItemKind::Method(ref sig, hir::TraitMethod::Provided(body)) => {
                             Some((&sig.decl,
                                   &sig.generics,
                                   sig.unsafety,
                                   sig.constness,
                                   item.name,
-                                  item.span))
+                                  item.span,
+                                  body))
                         }
                         _ => None,
                     }
@@ -1094,12 +1121,12 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             },
             None => None,
         };
-        let (fn_decl, generics, unsafety, constness, name, span)
+        let (fn_decl, generics, unsafety, constness, name, span, body)
                                     = node_inner.expect("expect item fn");
         let rebuilder = Rebuilder::new(self.tcx, fn_decl, generics, same_regions, &life_giver);
         let (fn_decl, generics) = rebuilder.rebuild();
         self.give_expl_lifetime_param(
-            err, &fn_decl, unsafety, constness, name, &generics, span);
+            err, &fn_decl, unsafety, constness, name, &generics, span, body);
     }
 
     pub fn issue_32330_warnings(&self, span: Span, issue32330s: &[ty::Issue32330]) {
@@ -1375,23 +1402,14 @@ impl<'a, 'gcx, 'tcx> Rebuilder<'a, 'gcx, 'tcx> {
     }
 
     fn rebuild_args_ty(&self,
-                       inputs: &[hir::Arg],
+                       inputs: &[P<hir::Ty>],
                        lifetime: hir::Lifetime,
                        anon_nums: &HashSet<u32>,
                        region_names: &HashSet<ast::Name>)
-                       -> hir::HirVec<hir::Arg> {
-        let mut new_inputs = Vec::new();
-        for arg in inputs {
-            let new_ty = self.rebuild_arg_ty_or_output(&arg.ty, lifetime,
-                                                       anon_nums, region_names);
-            let possibly_new_arg = hir::Arg {
-                ty: new_ty,
-                pat: arg.pat.clone(),
-                id: arg.id
-            };
-            new_inputs.push(possibly_new_arg);
-        }
-        new_inputs.into()
+                       -> hir::HirVec<P<hir::Ty>> {
+        inputs.iter().map(|arg_ty| {
+            self.rebuild_arg_ty_or_output(arg_ty, lifetime, anon_nums, region_names)
+        }).collect()
     }
 
     fn rebuild_output(&self, ty: &hir::FunctionRetTy,
@@ -1440,8 +1458,8 @@ impl<'a, 'gcx, 'tcx> Rebuilder<'a, 'gcx, 'tcx> {
                     }
                     ty_queue.push(&mut_ty.ty);
                 }
-                hir::TyPath(ref maybe_qself, ref path) => {
-                    match self.tcx.expect_def(cur_ty.id) {
+                hir::TyPath(hir::QPath::Resolved(ref maybe_qself, ref path)) => {
+                    match path.def {
                         Def::Enum(did) | Def::TyAlias(did) |
                         Def::Struct(did) | Def::Union(did) => {
                             let generics = self.tcx.item_generics(did);
@@ -1476,15 +1494,12 @@ impl<'a, 'gcx, 'tcx> Rebuilder<'a, 'gcx, 'tcx> {
                             };
                             let new_path = self.rebuild_path(rebuild_info, lifetime);
                             let qself = maybe_qself.as_ref().map(|qself| {
-                                hir::QSelf {
-                                    ty: self.rebuild_arg_ty_or_output(&qself.ty, lifetime,
-                                                                      anon_nums, region_names),
-                                    position: qself.position
-                                }
+                                self.rebuild_arg_ty_or_output(qself, lifetime,
+                                                              anon_nums, region_names)
                             });
                             let to = hir::Ty {
                                 id: cur_ty.id,
-                                node: hir::TyPath(qself, new_path),
+                                node: hir::TyPath(hir::QPath::Resolved(qself, P(new_path))),
                                 span: cur_ty.span
                             };
                             new_ty = self.rebuild_ty(new_ty, P(to));
@@ -1609,6 +1624,7 @@ impl<'a, 'gcx, 'tcx> Rebuilder<'a, 'gcx, 'tcx> {
                 hir::AngleBracketedParameters(hir::AngleBracketedParameterData {
                     lifetimes: new_lts.into(),
                     types: new_types,
+                    infer_types: data.infer_types,
                     bindings: new_bindings,
                })
             }
@@ -1622,7 +1638,7 @@ impl<'a, 'gcx, 'tcx> Rebuilder<'a, 'gcx, 'tcx> {
         new_segs.push(new_seg);
         hir::Path {
             span: path.span,
-            global: path.global,
+            def: path.def,
             segments: new_segs.into()
         }
     }
@@ -1636,10 +1652,26 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                                 constness: hir::Constness,
                                 name: ast::Name,
                                 generics: &hir::Generics,
-                                span: Span) {
-        let suggested_fn = pprust::fun_to_string(decl, unsafety, constness, name, generics);
-        let msg = format!("consider using an explicit lifetime \
-                           parameter as shown: {}", suggested_fn);
+                                span: Span,
+                                body: hir::BodyId) {
+        let s = hir::print::to_string(&self.tcx.map, |s| {
+            use syntax::abi::Abi;
+            use syntax::print::pprust::PrintState;
+
+            s.head("")?;
+            s.print_fn(decl,
+                       unsafety,
+                       constness,
+                       Abi::Rust,
+                       Some(name),
+                       generics,
+                       &hir::Inherited,
+                       &[],
+                       Some(body))?;
+            s.end()?; // Close the head box
+            s.end()   // Close the outer box
+        });
+        let msg = format!("consider using an explicit lifetime parameter as shown: {}", s);
         err.span_help(span, &msg[..]);
     }
 

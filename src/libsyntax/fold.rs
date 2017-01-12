@@ -302,23 +302,22 @@ pub fn noop_fold_view_path<T: Folder>(view_path: P<ViewPath>, fld: &mut T) -> P<
     view_path.map(|Spanned {node, span}| Spanned {
         node: match node {
             ViewPathSimple(ident, path) => {
-                ViewPathSimple(ident, fld.fold_path(path))
+                ViewPathSimple(fld.fold_ident(ident), fld.fold_path(path))
             }
             ViewPathGlob(path) => {
                 ViewPathGlob(fld.fold_path(path))
             }
             ViewPathList(path, path_list_idents) => {
-                ViewPathList(fld.fold_path(path),
-                             path_list_idents.move_map(|path_list_ident| {
-                                Spanned {
-                                    node: PathListItem_ {
-                                        id: fld.new_id(path_list_ident.node.id),
-                                        rename: path_list_ident.node.rename,
-                                        name: path_list_ident.node.name,
-                                    },
-                                    span: fld.new_span(path_list_ident.span)
-                                }
-                             }))
+                let path = fld.fold_path(path);
+                let path_list_idents = path_list_idents.move_map(|path_list_ident| Spanned {
+                    node: PathListItem_ {
+                        id: fld.new_id(path_list_ident.node.id),
+                        rename: path_list_ident.node.rename.map(|ident| fld.fold_ident(ident)),
+                        name: fld.fold_ident(path_list_ident.node.name),
+                    },
+                    span: fld.new_span(path_list_ident.span)
+                });
+                ViewPathList(path, path_list_idents)
             }
         },
         span: fld.new_span(span)
@@ -345,7 +344,7 @@ pub fn noop_fold_arm<T: Folder>(Arm {attrs, pats, guard, body}: Arm, fld: &mut T
 pub fn noop_fold_ty_binding<T: Folder>(b: TypeBinding, fld: &mut T) -> TypeBinding {
     TypeBinding {
         id: fld.new_id(b.id),
-        ident: b.ident,
+        ident: fld.fold_ident(b.ident),
         ty: fld.fold_ty(b.ty),
         span: fld.new_span(b.span),
     }
@@ -433,12 +432,11 @@ pub fn noop_fold_usize<T: Folder>(i: usize, _: &mut T) -> usize {
     i
 }
 
-pub fn noop_fold_path<T: Folder>(Path {global, segments, span}: Path, fld: &mut T) -> Path {
+pub fn noop_fold_path<T: Folder>(Path { segments, span }: Path, fld: &mut T) -> Path {
     Path {
-        global: global,
         segments: segments.move_map(|PathSegment {identifier, parameters}| PathSegment {
             identifier: fld.fold_ident(identifier),
-            parameters: fld.fold_path_parameters(parameters),
+            parameters: parameters.map(|ps| ps.map(|ps| fld.fold_path_parameters(ps))),
         }),
         span: fld.new_span(span)
     }
@@ -544,19 +542,19 @@ pub fn noop_fold_arg<T: Folder>(Arg {id, pat, ty}: Arg, fld: &mut T) -> Arg {
 pub fn noop_fold_tt<T: Folder>(tt: &TokenTree, fld: &mut T) -> TokenTree {
     match *tt {
         TokenTree::Token(span, ref tok) =>
-            TokenTree::Token(span, fld.fold_token(tok.clone())),
+            TokenTree::Token(fld.new_span(span), fld.fold_token(tok.clone())),
         TokenTree::Delimited(span, ref delimed) => {
-            TokenTree::Delimited(span, Rc::new(
+            TokenTree::Delimited(fld.new_span(span), Rc::new(
                             Delimited {
                                 delim: delimed.delim,
-                                open_span: delimed.open_span,
+                                open_span: fld.new_span(delimed.open_span),
                                 tts: fld.fold_tts(&delimed.tts),
-                                close_span: delimed.close_span,
+                                close_span: fld.new_span(delimed.close_span),
                             }
                         ))
         },
         TokenTree::Sequence(span, ref seq) =>
-            TokenTree::Sequence(span,
+            TokenTree::Sequence(fld.new_span(span),
                        Rc::new(SequenceRepetition {
                            tts: fld.fold_tts(&seq.tts),
                            separator: seq.separator.clone().map(|tok| fld.fold_token(tok)),
@@ -649,7 +647,7 @@ pub fn noop_fold_fn_decl<T: Folder>(decl: P<FnDecl>, fld: &mut T) -> P<FnDecl> {
         inputs: inputs.move_map(|x| fld.fold_arg(x)),
         output: match output {
             FunctionRetTy::Ty(ty) => FunctionRetTy::Ty(fld.fold_ty(ty)),
-            FunctionRetTy::Default(span) => FunctionRetTy::Default(span),
+            FunctionRetTy::Default(span) => FunctionRetTy::Default(fld.new_span(span)),
         },
         variadic: variadic
     })
@@ -673,10 +671,10 @@ pub fn noop_fold_ty_param<T: Folder>(tp: TyParam, fld: &mut T) -> TyParam {
             .collect::<Vec<_>>()
             .into(),
         id: fld.new_id(id),
-        ident: ident,
+        ident: fld.fold_ident(ident),
         bounds: fld.fold_bounds(bounds),
         default: default.map(|x| fld.fold_ty(x)),
-        span: span
+        span: fld.new_span(span),
     }
 }
 
@@ -1088,7 +1086,7 @@ pub fn noop_fold_pat<T: Folder>(p: P<Pat>, folder: &mut T) -> P<Pat> {
                 let fs = fields.move_map(|f| {
                     Spanned { span: folder.new_span(f.span),
                               node: ast::FieldPat {
-                                  ident: f.node.ident,
+                                  ident: folder.fold_ident(f.node.ident),
                                   pat: folder.fold_pat(f.node.pat),
                                   is_shorthand: f.node.is_shorthand,
                               }}

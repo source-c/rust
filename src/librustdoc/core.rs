@@ -15,10 +15,10 @@ use rustc::session::{self, config};
 use rustc::hir::def_id::DefId;
 use rustc::hir::def::{Def, ExportMap};
 use rustc::middle::privacy::AccessLevels;
-use rustc::ty::{self, TyCtxt};
+use rustc::ty::{self, TyCtxt, GlobalArenas, Ty};
 use rustc::hir::map as hir_map;
 use rustc::lint;
-use rustc::util::nodemap::FxHashMap;
+use rustc::util::nodemap::{FxHashMap, NodeMap};
 use rustc_trans::back::link;
 use rustc_resolve as resolve;
 use rustc_metadata::cstore::CStore;
@@ -37,6 +37,7 @@ use visit_ast::RustdocVisitor;
 use clean;
 use clean::Clean;
 use html::render::RenderInfo;
+use arena::DroplessArena;
 
 pub use rustc::session::config::Input;
 pub use rustc::session::search_paths::SearchPaths;
@@ -45,7 +46,6 @@ pub type ExternalPaths = FxHashMap<DefId, (Vec<String>, clean::TypeKind)>;
 
 pub struct DocContext<'a, 'tcx: 'a> {
     pub tcx: TyCtxt<'a, 'tcx, 'tcx>,
-    pub input: Input,
     pub populated_all_crate_impls: Cell<bool>,
     // Note that external items for which `doc(hidden)` applies to are shown as
     // non-reachable while local items aren't. This is because we're reusing
@@ -65,6 +65,9 @@ pub struct DocContext<'a, 'tcx: 'a> {
     /// Table node id of lifetime parameter definition -> substituted lifetime
     pub lt_substs: RefCell<FxHashMap<ast::NodeId, clean::Lifetime>>,
     pub export_map: ExportMap,
+
+    /// Table from HIR Ty nodes to their resolved Ty.
+    pub hir_ty_to_ty: NodeMap<Ty<'tcx>>,
 }
 
 impl<'a, 'tcx> DocContext<'a, 'tcx> {
@@ -153,18 +156,26 @@ pub fn run_core(search_paths: SearchPaths,
     let name = link::find_crate_name(Some(&sess), &krate.attrs, &input);
 
     let driver::ExpansionResult { defs, analysis, resolutions, mut hir_forest, .. } = {
-        driver::phase_2_configure_and_expand(
-            &sess, &cstore, krate, None, &name, None, resolve::MakeGlobMap::No, |_| Ok(()),
-        ).expect("phase_2_configure_and_expand aborted in rustdoc!")
+        let result = driver::phase_2_configure_and_expand(&sess,
+                                                          &cstore,
+                                                          krate,
+                                                          None,
+                                                          &name,
+                                                          None,
+                                                          resolve::MakeGlobMap::No,
+                                                          |_| Ok(()));
+        abort_on_err(result, &sess)
     };
 
-    let arenas = ty::CtxtArenas::new();
+    let arena = DroplessArena::new();
+    let arenas = GlobalArenas::new();
     let hir_map = hir_map::map_crate(&mut hir_forest, defs);
 
     abort_on_err(driver::phase_3_run_analysis_passes(&sess,
                                                      hir_map,
                                                      analysis,
                                                      resolutions,
+                                                     &arena,
                                                      &arenas,
                                                      &name,
                                                      |tcx, analysis, _, result| {
@@ -172,7 +183,7 @@ pub fn run_core(search_paths: SearchPaths,
             sess.fatal("Compilation failed, aborting rustdoc");
         }
 
-        let ty::CrateAnalysis { access_levels, export_map, .. } = analysis;
+        let ty::CrateAnalysis { access_levels, export_map, hir_ty_to_ty, .. } = analysis;
 
         // Convert from a NodeId set to a DefId set since we don't always have easy access
         // to the map from defid -> nodeid
@@ -184,7 +195,6 @@ pub fn run_core(search_paths: SearchPaths,
 
         let ctxt = DocContext {
             tcx: tcx,
-            input: input,
             populated_all_crate_impls: Cell::new(false),
             access_levels: RefCell::new(access_levels),
             external_traits: Default::default(),
@@ -192,6 +202,7 @@ pub fn run_core(search_paths: SearchPaths,
             ty_substs: Default::default(),
             lt_substs: Default::default(),
             export_map: export_map,
+            hir_ty_to_ty: hir_ty_to_ty,
         };
         debug!("crate: {:?}", tcx.map.krate());
 

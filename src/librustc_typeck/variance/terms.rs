@@ -246,7 +246,7 @@ impl<'a, 'tcx, 'v> ItemLikeVisitor<'v> for TermsContext<'a, 'tcx> {
             }
 
             hir::ItemExternCrate(_) |
-            hir::ItemUse(_) |
+            hir::ItemUse(..) |
             hir::ItemDefaultImpl(..) |
             hir::ItemImpl(..) |
             hir::ItemStatic(..) |
@@ -256,6 +256,9 @@ impl<'a, 'tcx, 'v> ItemLikeVisitor<'v> for TermsContext<'a, 'tcx> {
             hir::ItemForeignMod(..) |
             hir::ItemTy(..) => {}
         }
+    }
+
+    fn visit_trait_item(&mut self, _trait_item: &hir::TraitItem) {
     }
 
     fn visit_impl_item(&mut self, _impl_item: &hir::ImplItem) {

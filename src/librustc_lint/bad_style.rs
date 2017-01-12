@@ -99,7 +99,7 @@ impl LintPass for NonCamelCaseTypes {
     }
 }
 
-impl LateLintPass for NonCamelCaseTypes {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonCamelCaseTypes {
     fn check_item(&mut self, cx: &LateContext, it: &hir::Item) {
         let extern_repr_count = it.attrs
             .iter()
@@ -226,7 +226,7 @@ impl LintPass for NonSnakeCase {
     }
 }
 
-impl LateLintPass for NonSnakeCase {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonSnakeCase {
     fn check_crate(&mut self, cx: &LateContext, cr: &hir::Crate) {
         let attr_crate_name = cr.attrs
             .iter()
@@ -243,7 +243,7 @@ impl LateLintPass for NonSnakeCase {
                 cx: &LateContext,
                 fk: FnKind,
                 _: &hir::FnDecl,
-                _: &hir::Expr,
+                _: &hir::Body,
                 span: Span,
                 id: ast::NodeId) {
         match fk {
@@ -271,12 +271,15 @@ impl LateLintPass for NonSnakeCase {
         }
     }
 
-    fn check_trait_item(&mut self, cx: &LateContext, trait_item: &hir::TraitItem) {
-        if let hir::MethodTraitItem(_, None) = trait_item.node {
+    fn check_trait_item(&mut self, cx: &LateContext, item: &hir::TraitItem) {
+        if let hir::TraitItemKind::Method(_, hir::TraitMethod::Required(ref names)) = item.node {
             self.check_snake_case(cx,
                                   "trait method",
-                                  &trait_item.name.as_str(),
-                                  Some(trait_item.span));
+                                  &item.name.as_str(),
+                                  Some(item.span));
+            for name in names {
+                self.check_snake_case(cx, "variable", &name.node.as_str(), Some(name.span));
+            }
         }
     }
 
@@ -288,11 +291,8 @@ impl LateLintPass for NonSnakeCase {
     }
 
     fn check_pat(&mut self, cx: &LateContext, p: &hir::Pat) {
-        if let &PatKind::Binding(_, ref path1, _) = &p.node {
-            // Exclude parameter names from foreign functions (they have no `Def`)
-            if cx.tcx.expect_def_or_none(p.id).is_some() {
-                self.check_snake_case(cx, "variable", &path1.node.as_str(), Some(p.span));
-            }
+        if let &PatKind::Binding(_, _, ref path1, _) = &p.node {
+            self.check_snake_case(cx, "variable", &path1.node.as_str(), Some(p.span));
         }
     }
 
@@ -343,7 +343,7 @@ impl LintPass for NonUpperCaseGlobals {
     }
 }
 
-impl LateLintPass for NonUpperCaseGlobals {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonUpperCaseGlobals {
     fn check_item(&mut self, cx: &LateContext, it: &hir::Item) {
         match it.node {
             hir::ItemStatic(..) => {
@@ -358,7 +358,7 @@ impl LateLintPass for NonUpperCaseGlobals {
 
     fn check_trait_item(&mut self, cx: &LateContext, ti: &hir::TraitItem) {
         match ti.node {
-            hir::ConstTraitItem(..) => {
+            hir::TraitItemKind::Const(..) => {
                 NonUpperCaseGlobals::check_upper_case(cx, "associated constant", ti.name, ti.span);
             }
             _ => {}
@@ -376,9 +376,9 @@ impl LateLintPass for NonUpperCaseGlobals {
 
     fn check_pat(&mut self, cx: &LateContext, p: &hir::Pat) {
         // Lint for constants that look like binding identifiers (#7526)
-        if let PatKind::Path(None, ref path) = p.node {
-            if !path.global && path.segments.len() == 1 && path.segments[0].parameters.is_empty() {
-                if let Def::Const(..) = cx.tcx.expect_def(p.id) {
+        if let PatKind::Path(hir::QPath::Resolved(None, ref path)) = p.node {
+            if path.segments.len() == 1 && path.segments[0].parameters.is_empty() {
+                if let Def::Const(..) = path.def {
                     NonUpperCaseGlobals::check_upper_case(cx,
                                                           "constant in pattern",
                                                           path.segments[0].name,

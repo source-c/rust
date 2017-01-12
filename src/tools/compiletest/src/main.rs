@@ -16,13 +16,15 @@
 #![feature(test)]
 #![feature(libc)]
 
-#![cfg_attr(stage0, feature(question_mark))]
-
 #![deny(warnings)]
 
 extern crate libc;
 extern crate test;
 extern crate getopts;
+
+#[cfg(cargobuild)]
+extern crate rustc_serialize;
+#[cfg(not(cargobuild))]
 extern crate serialize as rustc_serialize;
 
 #[macro_use]
@@ -91,6 +93,7 @@ pub fn parse_config(args: Vec<String> ) -> Config {
                  "(compile-fail|parse-fail|run-fail|run-pass|\
                   run-pass-valgrind|pretty|debug-info|incremental|mir-opt)"),
           optflag("", "ignored", "run tests marked as ignored"),
+          optflag("", "exact", "filters match exactly"),
           optopt("", "runtool", "supervisor program to run tests under \
                                  (eg. emulator, valgrind)", "PROGRAM"),
           optopt("", "host-rustcflags", "flags to pass to rustc for host", "FLAGS"),
@@ -169,6 +172,7 @@ pub fn parse_config(args: Vec<String> ) -> Config {
         mode: matches.opt_str("mode").unwrap().parse().ok().expect("invalid mode"),
         run_ignored: matches.opt_present("ignored"),
         filter: matches.free.first().cloned(),
+        filter_exact: matches.opt_present("exact"),
         logfile: matches.opt_str("logfile").map(|s| PathBuf::from(&s)),
         runtool: matches.opt_str("runtool"),
         host_rustcflags: matches.opt_str("host-rustcflags"),
@@ -218,6 +222,7 @@ pub fn log_config(config: &Config) {
                     opt_str(&config.filter
                                    .as_ref()
                                    .map(|re| re.to_owned()))));
+    logv(c, format!("filter_exact: {}", config.filter_exact));
     logv(c, format!("runtool: {}", opt_str(&config.runtool)));
     logv(c, format!("host-rustcflags: {}",
                     opt_str(&config.host_rustcflags)));
@@ -260,7 +265,23 @@ pub fn run_tests(config: &Config) {
         // android debug-info test uses remote debugger
         // so, we test 1 thread at once.
         // also trying to isolate problems with adb_run_wrapper.sh ilooping
-        env::set_var("RUST_TEST_THREADS","1");
+        match config.mode {
+            // These tests don't actually run code or don't run for android, so
+            // we don't need to limit ourselves there
+            Mode::Ui |
+            Mode::CompileFail |
+            Mode::ParseFail |
+            Mode::RunMake |
+            Mode::Codegen |
+            Mode::CodegenUnits |
+            Mode::Pretty |
+            Mode::Rustdoc => {}
+
+            _ => {
+                env::set_var("RUST_TEST_THREADS", "1");
+            }
+
+        }
     }
 
     match config.mode {
@@ -311,6 +332,7 @@ pub fn run_tests(config: &Config) {
 pub fn test_opts(config: &Config) -> test::TestOpts {
     test::TestOpts {
         filter: config.filter.clone(),
+        filter_exact: config.filter_exact,
         run_ignored: config.run_ignored,
         quiet: config.quiet,
         logfile: config.logfile.clone(),
@@ -323,6 +345,7 @@ pub fn test_opts(config: &Config) -> test::TestOpts {
         color: test::AutoColor,
         test_threads: None,
         skip: vec![],
+        list: false,
     }
 }
 

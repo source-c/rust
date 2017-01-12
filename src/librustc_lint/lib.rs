@@ -26,12 +26,11 @@
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
 #![cfg_attr(test, feature(test))]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![cfg_attr(stage0, feature(dotdot_in_tuple_patterns))]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(rustc_private)]
@@ -47,6 +46,8 @@ extern crate log;
 extern crate rustc_back;
 extern crate rustc_const_eval;
 extern crate syntax_pos;
+
+extern crate rustc_i128;
 
 pub use rustc::lint;
 pub use rustc::middle;
@@ -111,6 +112,7 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
 
     add_early_builtin!(sess,
                        UnusedParens,
+                       UnusedImportBraces,
                        );
 
     add_early_builtin_with_new!(sess,
@@ -129,7 +131,6 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
                  NonCamelCaseTypes,
                  NonSnakeCase,
                  NonUpperCaseGlobals,
-                 UnusedImportBraces,
                  NonShorthandFieldPatterns,
                  UnusedUnsafe,
                  UnsafeCode,
@@ -145,7 +146,6 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
                  );
 
     add_builtin_with_new!(sess,
-                          Deprecated,
                           TypeLimits,
                           MissingDoc,
                           MissingDebugImplementations,
@@ -165,6 +165,7 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
                     DEAD_CODE,
                     UNUSED_MUT,
                     UNREACHABLE_CODE,
+                    UNREACHABLE_PATTERNS,
                     UNUSED_MUST_USE,
                     UNUSED_UNSAFE,
                     PATH_STATEMENTS,
@@ -235,6 +236,10 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
         FutureIncompatibleInfo {
             id: LintId::of(LEGACY_DIRECTORY_OWNERSHIP),
             reference: "issue #37872 <https://github.com/rust-lang/rust/issues/37872>",
+        },
+        FutureIncompatibleInfo {
+            id: LintId::of(LEGACY_IMPORTS),
+            reference: "issue #38260 <https://github.com/rust-lang/rust/issues/38260>",
         },
         ]);
 

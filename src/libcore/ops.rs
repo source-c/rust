@@ -268,6 +268,8 @@ macro_rules! add_impl {
 }
 
 add_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
+#[cfg(not(stage0))]
+add_impl! { u128 i128 }
 
 /// The `Sub` trait is used to specify the functionality of `-`.
 ///
@@ -341,6 +343,8 @@ macro_rules! sub_impl {
 }
 
 sub_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
+#[cfg(not(stage0))]
+sub_impl! { u128 i128 }
 
 /// The `Mul` trait is used to specify the functionality of `*`.
 ///
@@ -463,6 +467,8 @@ macro_rules! mul_impl {
 }
 
 mul_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
+#[cfg(not(stage0))]
+mul_impl! { u128 i128 }
 
 /// The `Div` trait is used to specify the functionality of `/`.
 ///
@@ -592,6 +598,8 @@ macro_rules! div_impl_integer {
 }
 
 div_impl_integer! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+#[cfg(not(stage0))]
+div_impl_integer! { u128 i128 }
 
 macro_rules! div_impl_float {
     ($($t:ty)*) => ($(
@@ -671,6 +679,9 @@ macro_rules! rem_impl_integer {
 }
 
 rem_impl_integer! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+#[cfg(not(stage0))]
+rem_impl_integer! { u128 i128 }
+
 
 macro_rules! rem_impl_float {
     ($($t:ty)*) => ($(
@@ -766,6 +777,8 @@ macro_rules! neg_impl_unsigned {
 
 // neg_impl_unsigned! { usize u8 u16 u32 u64 }
 neg_impl_numeric! { isize i8 i16 i32 i64 f32 f64 }
+#[cfg(not(stage0))]
+neg_impl_numeric! { i128 }
 
 /// The `Not` trait is used to specify the functionality of unary `!`.
 ///
@@ -824,6 +837,8 @@ macro_rules! not_impl {
 }
 
 not_impl! { bool usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+#[cfg(not(stage0))]
+not_impl! { u128 i128 }
 
 /// The `BitAnd` trait is used to specify the functionality of `&`.
 ///
@@ -907,6 +922,8 @@ macro_rules! bitand_impl {
 }
 
 bitand_impl! { bool usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+#[cfg(not(stage0))]
+bitand_impl! { u128 i128 }
 
 /// The `BitOr` trait is used to specify the functionality of `|`.
 ///
@@ -990,6 +1007,8 @@ macro_rules! bitor_impl {
 }
 
 bitor_impl! { bool usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+#[cfg(not(stage0))]
+bitor_impl! { u128 i128 }
 
 /// The `BitXor` trait is used to specify the functionality of `^`.
 ///
@@ -1076,6 +1095,8 @@ macro_rules! bitxor_impl {
 }
 
 bitxor_impl! { bool usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+#[cfg(not(stage0))]
+bitxor_impl! { u128 i128 }
 
 /// The `Shl` trait is used to specify the functionality of `<<`.
 ///
@@ -1166,17 +1187,23 @@ macro_rules! shl_impl_all {
         shl_impl! { $t, u16 }
         shl_impl! { $t, u32 }
         shl_impl! { $t, u64 }
+        #[cfg(not(stage0))]
+        shl_impl! { $t, u128 }
         shl_impl! { $t, usize }
 
         shl_impl! { $t, i8 }
         shl_impl! { $t, i16 }
         shl_impl! { $t, i32 }
         shl_impl! { $t, i64 }
+        #[cfg(not(stage0))]
+        shl_impl! { $t, i128 }
         shl_impl! { $t, isize }
     )*)
 }
 
 shl_impl_all! { u8 u16 u32 u64 usize i8 i16 i32 i64 isize }
+#[cfg(not(stage0))]
+shl_impl_all! { u128 i128 }
 
 /// The `Shr` trait is used to specify the functionality of `>>`.
 ///
@@ -1267,17 +1294,23 @@ macro_rules! shr_impl_all {
         shr_impl! { $t, u16 }
         shr_impl! { $t, u32 }
         shr_impl! { $t, u64 }
+        #[cfg(not(stage0))]
+        shr_impl! { $t, u128 }
         shr_impl! { $t, usize }
 
         shr_impl! { $t, i8 }
         shr_impl! { $t, i16 }
         shr_impl! { $t, i32 }
         shr_impl! { $t, i64 }
+        #[cfg(not(stage0))]
+        shr_impl! { $t, i128 }
         shr_impl! { $t, isize }
     )*)
 }
 
 shr_impl_all! { u8 u16 u32 u64 usize i8 i16 i32 i64 isize }
+#[cfg(not(stage0))]
+shr_impl_all! { u128 i128 }
 
 /// The `AddAssign` trait is used to specify the functionality of `+=`.
 ///
@@ -1334,6 +1367,8 @@ macro_rules! add_assign_impl {
 }
 
 add_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
+#[cfg(not(stage0))]
+add_assign_impl! { u128 i128 }
 
 /// The `SubAssign` trait is used to specify the functionality of `-=`.
 ///
@@ -1390,6 +1425,8 @@ macro_rules! sub_assign_impl {
 }
 
 sub_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
+#[cfg(not(stage0))]
+sub_assign_impl! { u128 i128 }
 
 /// The `MulAssign` trait is used to specify the functionality of `*=`.
 ///
@@ -1435,6 +1472,8 @@ macro_rules! mul_assign_impl {
 }
 
 mul_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
+#[cfg(not(stage0))]
+mul_assign_impl! { u128 i128 }
 
 /// The `DivAssign` trait is used to specify the functionality of `/=`.
 ///
@@ -1479,6 +1518,8 @@ macro_rules! div_assign_impl {
 }
 
 div_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
+#[cfg(not(stage0))]
+div_assign_impl! { u128 i128 }
 
 /// The `RemAssign` trait is used to specify the functionality of `%=`.
 ///
@@ -1523,6 +1564,8 @@ macro_rules! rem_assign_impl {
 }
 
 rem_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
+#[cfg(not(stage0))]
+rem_assign_impl! { u128 i128 }
 
 /// The `BitAndAssign` trait is used to specify the functionality of `&=`.
 ///
@@ -1609,6 +1652,8 @@ macro_rules! bitand_assign_impl {
 }
 
 bitand_assign_impl! { bool usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+#[cfg(not(stage0))]
+bitand_assign_impl! { u128 i128 }
 
 /// The `BitOrAssign` trait is used to specify the functionality of `|=`.
 ///
@@ -1653,6 +1698,8 @@ macro_rules! bitor_assign_impl {
 }
 
 bitor_assign_impl! { bool usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+#[cfg(not(stage0))]
+bitor_assign_impl! { u128 i128 }
 
 /// The `BitXorAssign` trait is used to specify the functionality of `^=`.
 ///
@@ -1697,6 +1744,8 @@ macro_rules! bitxor_assign_impl {
 }
 
 bitxor_assign_impl! { bool usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+#[cfg(not(stage0))]
+bitxor_assign_impl! { u128 i128 }
 
 /// The `ShlAssign` trait is used to specify the functionality of `<<=`.
 ///
@@ -1749,17 +1798,23 @@ macro_rules! shl_assign_impl_all {
         shl_assign_impl! { $t, u16 }
         shl_assign_impl! { $t, u32 }
         shl_assign_impl! { $t, u64 }
+        #[cfg(not(stage0))]
+        shl_assign_impl! { $t, u128 }
         shl_assign_impl! { $t, usize }
 
         shl_assign_impl! { $t, i8 }
         shl_assign_impl! { $t, i16 }
         shl_assign_impl! { $t, i32 }
         shl_assign_impl! { $t, i64 }
+        #[cfg(not(stage0))]
+        shl_assign_impl! { $t, i128 }
         shl_assign_impl! { $t, isize }
     )*)
 }
 
 shl_assign_impl_all! { u8 u16 u32 u64 usize i8 i16 i32 i64 isize }
+#[cfg(not(stage0))]
+shl_assign_impl_all! { u128 i128 }
 
 /// The `ShrAssign` trait is used to specify the functionality of `>>=`.
 ///
@@ -1812,17 +1867,23 @@ macro_rules! shr_assign_impl_all {
         shr_assign_impl! { $t, u16 }
         shr_assign_impl! { $t, u32 }
         shr_assign_impl! { $t, u64 }
+        #[cfg(not(stage0))]
+        shr_assign_impl! { $t, u128 }
         shr_assign_impl! { $t, usize }
 
         shr_assign_impl! { $t, i8 }
         shr_assign_impl! { $t, i16 }
         shr_assign_impl! { $t, i32 }
         shr_assign_impl! { $t, i64 }
+        #[cfg(not(stage0))]
+        shr_assign_impl! { $t, i128 }
         shr_assign_impl! { $t, isize }
     )*)
 }
 
 shr_assign_impl_all! { u8 u16 u32 u64 usize i8 i16 i32 i64 isize }
+#[cfg(not(stage0))]
+shr_assign_impl_all! { u128 i128 }
 
 /// The `Index` trait is used to specify the functionality of indexing operations
 /// like `container[index]` when used in an immutable context.
@@ -2649,6 +2710,35 @@ mod impls {
 
 /// Trait that indicates that this is a pointer or a wrapper for one,
 /// where unsizing can be performed on the pointee.
+///
+/// See the [DST coercion RfC][dst-coerce] and [the nomicon entry on coercion][nomicon-coerce]
+/// for more details.
+///
+/// For builtin pointer types, pointers to `T` will coerce to pointers to `U` if `T: Unsize<U>`
+/// by converting from a thin pointer to a fat pointer.
+///
+/// For custom types, the coercion here works by coercing `Foo<T>` to `Foo<U>`
+/// provided an impl of `CoerceUnsized<Foo<U>> for Foo<T>` exists.
+/// Such an impl can only be written if `Foo<T>` has only a single non-phantomdata
+/// field involving `T`. If the type of that field is `Bar<T>`, an implementation
+/// of `CoerceUnsized<Bar<U>> for Bar<T>` must exist. The coercion will work by
+/// by coercing the `Bar<T>` field into `Bar<U>` and filling in the rest of the fields
+/// from `Foo<T>` to create a `Foo<U>`. This will effectively drill down to a pointer
+/// field and coerce that.
+///
+/// Generally, for smart pointers you will implement
+/// `CoerceUnsized<Ptr<U>> for Ptr<T> where T: Unsize<U>, U: ?Sized`, with an
+/// optional `?Sized` bound on `T` itself. For wrapper types that directly embed `T`
+/// like `Cell<T>` and `RefCell<T>`, you
+/// can directly implement `CoerceUnsized<Wrap<U>> for Wrap<T> where T: CoerceUnsized<U>`.
+/// This will let coercions of types like `Cell<Box<T>>` work.
+///
+/// [`Unsize`][unsize] is used to mark types which can be coerced to DSTs if behind
+/// pointers. It is implemented automatically by the compiler.
+///
+/// [dst-coerce]: https://github.com/rust-lang/rfcs/blob/master/text/0982-dst-coercion.md
+/// [unsize]: ../marker/trait.Unsize.html
+/// [nomicon-coerce]: ../../nomicon/coercions.html
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 #[lang="coerce_unsized"]
 pub trait CoerceUnsized<T> {

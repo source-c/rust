@@ -160,11 +160,6 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 self.push_krate_path(buffer, def_id.krate);
             }
 
-            DefPathData::InlinedRoot(ref root_path) => {
-                assert!(key.parent.is_none());
-                self.push_item_path(buffer, root_path.def_id);
-            }
-
             DefPathData::Impl => {
                 self.push_impl_path(buffer, def_id);
             }
@@ -316,7 +311,7 @@ pub fn characteristic_def_id_of_type(ty: Ty) -> Option<DefId> {
     match ty.sty {
         ty::TyAdt(adt_def, _) => Some(adt_def.did),
 
-        ty::TyTrait(ref data) => Some(data.principal.def_id()),
+        ty::TyDynamic(data, ..) => data.principal().map(|p| p.def_id()),
 
         ty::TyArray(subty, _) |
         ty::TySlice(subty) |

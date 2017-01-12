@@ -14,12 +14,16 @@ set -e
 if [ "$LOCAL_USER_ID" != "" ]; then
   useradd --shell /bin/bash -u $LOCAL_USER_ID -o -c "" -m user
   export HOME=/home/user
-  export LOCAL_USER_ID=
-  exec sudo -E -u user env PATH=$PATH "$0"
+  unset LOCAL_USER_ID
+  exec su --preserve-environment -c "env PATH=$PATH \"$0\"" user
 fi
 
 if [ "$NO_LLVM_ASSERTIONS" = "" ]; then
-  LLVM_ASSERTIONS=--enable-llvm-assertions
+  ENABLE_LLVM_ASSERTIONS=--enable-llvm-assertions
+fi
+
+if [ "$NO_VENDOR" = "" ]; then
+  ENABLE_VENDOR=--enable-vendor
 fi
 
 set -ex
@@ -28,9 +32,9 @@ $SRC/configure \
   --disable-manage-submodules \
   --enable-debug-assertions \
   --enable-quiet-tests \
-  --enable-ccache \
-  --enable-vendor \
-  $LLVM_ASSERTIONS \
+  --enable-sccache \
+  $ENABLE_VENDOR \
+  $ENABLE_LLVM_ASSERTIONS \
   $RUST_CONFIGURE_ARGS
 
 if [ "$TRAVIS_OS_NAME" = "osx" ]; then
@@ -39,6 +43,14 @@ else
     ncpus=$(nproc)
 fi
 
-make -j $ncpus tidy
-make -j $ncpus
-exec make $RUST_CHECK_TARGET -j $ncpus
+if [ ! -z "$XPY_RUN" ]; then
+  exec python2.7 $SRC/x.py $XPY_RUN
+else
+  make -j $ncpus tidy
+  make -j $ncpus
+  if [ ! -z "$XPY_CHECK" ]; then
+    exec python2.7 $SRC/x.py $XPY_CHECK
+  else
+    exec make $RUST_CHECK_TARGET -j $ncpus
+  fi
+fi

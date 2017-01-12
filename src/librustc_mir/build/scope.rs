@@ -253,7 +253,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                             f: F)
         where F: FnOnce(&mut Builder<'a, 'gcx, 'tcx>)
     {
-        let extent = self.extent_of_innermost_scope();
+        let extent = self.scopes.last().map(|scope| scope.extent).unwrap();
         let loop_scope = LoopScope {
             extent: extent.clone(),
             continue_block: loop_block,
@@ -409,10 +409,6 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             span: span,
             scope: self.visibility_scope
         }
-    }
-
-    pub fn extent_of_innermost_scope(&self) -> CodeExtent {
-        self.scopes.last().map(|scope| scope.extent).unwrap()
     }
 
     /// Returns the extent of the scope which should be exited by a
@@ -783,8 +779,7 @@ fn build_free<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
                               data: &FreeData<'tcx>,
                               target: BasicBlock)
                               -> TerminatorKind<'tcx> {
-    let free_func = tcx.lang_items.require(lang_items::BoxFreeFnLangItem)
-                       .unwrap_or_else(|e| tcx.sess.fatal(&e));
+    let free_func = tcx.require_lang_item(lang_items::BoxFreeFnLangItem);
     let substs = tcx.intern_substs(&[Kind::from(data.item_ty)]);
     TerminatorKind::Call {
         func: Operand::Constant(Constant {

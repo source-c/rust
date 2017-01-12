@@ -21,17 +21,15 @@
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
 #![feature(box_syntax)]
-#![cfg_attr(stage0, feature(dotdot_in_tuple_patterns))]
 #![feature(libc)]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(rustc_private)]
 #![feature(set_stdio)]
 #![feature(staged_api)]
-#![cfg_attr(stage0, feature(question_mark))]
 
 extern crate arena;
 extern crate flate;
@@ -81,6 +79,8 @@ use rustc::lint;
 use rustc_metadata::locator;
 use rustc_metadata::cstore::CStore;
 use rustc::util::common::time;
+
+use serialize::json::ToJson;
 
 use std::cmp::max;
 use std::cmp::Ordering::Equal;
@@ -462,6 +462,7 @@ impl<'a> CompilerCalls<'a> for RustcDefaultCalls {
                                                      &state.expanded_crate.take().unwrap(),
                                                      state.crate_name.unwrap(),
                                                      ppm,
+                                                     state.arena.unwrap(),
                                                      state.arenas.unwrap(),
                                                      opt_uii.clone(),
                                                      state.out_file);
@@ -493,7 +494,8 @@ impl<'a> CompilerCalls<'a> for RustcDefaultCalls {
             control.after_hir_lowering.stop = Compilation::Stop;
         }
 
-        if !sess.opts.output_types.keys().any(|&i| i == OutputType::Exe) {
+        if !sess.opts.output_types.keys().any(|&i| i == OutputType::Exe ||
+                                                   i == OutputType::Metadata) {
             control.after_llvm.stop = Compilation::Stop;
         }
 
@@ -586,6 +588,7 @@ impl RustcDefaultCalls {
                     println!("{}", targets.join("\n"));
                 },
                 PrintRequest::Sysroot => println!("{}", sess.sysroot().display()),
+                PrintRequest::TargetSpec => println!("{}", sess.target.target.to_json().pretty()),
                 PrintRequest::FileNames |
                 PrintRequest::CrateName => {
                     let input = match input {

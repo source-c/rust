@@ -17,10 +17,8 @@
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
-#![cfg_attr(stage0, feature(dotdot_in_tuple_patterns))]
-#![feature(proc_macro_lib)]
 #![feature(proc_macro_internals)]
 #![feature(rustc_private)]
 #![feature(staged_api)]
@@ -51,8 +49,7 @@ pub mod deriving;
 
 use std::rc::Rc;
 use syntax::ast;
-use syntax::ext::base::{MacroExpanderFn, NormalTT, IdentTT, MultiModifier, NamedSyntaxExtension};
-use syntax::ext::tt::macro_rules::MacroRulesExpander;
+use syntax::ext::base::{MacroExpanderFn, NormalTT, MultiModifier, NamedSyntaxExtension};
 use syntax::symbol::Symbol;
 
 pub fn register_builtins(resolver: &mut syntax::ext::base::Resolver,
@@ -61,8 +58,6 @@ pub fn register_builtins(resolver: &mut syntax::ext::base::Resolver,
     let mut register = |name, ext| {
         resolver.add_ext(ast::Ident::with_empty_ctxt(name), Rc::new(ext));
     };
-
-    register(Symbol::intern("macro_rules"), IdentTT(Box::new(MacroRulesExpander), None, false));
 
     macro_rules! register {
         ($( $name:ident: $f:expr, )*) => { $(

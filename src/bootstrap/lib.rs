@@ -13,22 +13,72 @@
 //! This module, and its descendants, are the implementation of the Rust build
 //! system. Most of this build system is backed by Cargo but the outer layer
 //! here serves as the ability to orchestrate calling Cargo, sequencing Cargo
-//! builds, building artifacts like LLVM, etc.
+//! builds, building artifacts like LLVM, etc. The goals of rustbuild are:
 //!
-//! More documentation can be found in each respective module below.
+//! * To be an easily understandable, easily extensible, and maintainable build
+//!   system.
+//! * Leverage standard tools in the Rust ecosystem to build the compiler, aka
+//!   crates.io and Cargo.
+//! * A standard interface to build across all platforms, including MSVC
+//!
+//! ## Architecture
+//!
+//! Although this build system defers most of the complicated logic to Cargo
+//! itself, it still needs to maintain a list of targets and dependencies which
+//! it can itself perform. Rustbuild is made up of a list of rules with
+//! dependencies amongst them (created in the `step` module) and then knows how
+//! to execute each in sequence. Each time rustbuild is invoked, it will simply
+//! iterate through this list of steps and execute each serially in turn.  For
+//! each step rustbuild relies on the step internally being incremental and
+//! parallel. Note, though, that the `-j` parameter to rustbuild gets forwarded
+//! to appropriate test harnesses and such.
+//!
+//! Most of the "meaty" steps that matter are backed by Cargo, which does indeed
+//! have its own parallelism and incremental management. Later steps, like
+//! tests, aren't incremental and simply run the entire suite currently.
+//!
+//! When you execute `x.py build`, the steps which are executed are:
+//!
+//! * First, the python script is run. This will automatically download the
+//!   stage0 rustc and cargo according to `src/stage0.txt`, or using the cached
+//!   versions if they're available. These are then used to compile rustbuild
+//!   itself (using Cargo). Finally, control is then transferred to rustbuild.
+//!
+//! * Rustbuild takes over, performs sanity checks, probes the environment,
+//!   reads configuration, builds up a list of steps, and then starts executing
+//!   them.
+//!
+//! * The stage0 libstd is compiled
+//! * The stage0 libtest is compiled
+//! * The stage0 librustc is compiled
+//! * The stage1 compiler is assembled
+//! * The stage1 libstd, libtest, librustc are compiled
+//! * The stage2 compiler is assembled
+//! * The stage2 libstd, libtest, librustc are compiled
+//!
+//! Each step is driven by a separate Cargo project and rustbuild orchestrates
+//! copying files between steps and otherwise preparing for Cargo to run.
+//!
+//! ## Further information
+//!
+//! More documentation can be found in each respective module below, and you can
+//! also check out the `src/bootstrap/README.md` file for more information.
+
+#![deny(warnings)]
 
 extern crate build_helper;
 extern crate cmake;
 extern crate filetime;
 extern crate gcc;
 extern crate getopts;
-extern crate md5;
 extern crate num_cpus;
 extern crate rustc_serialize;
 extern crate toml;
 
 use std::collections::HashMap;
+use std::cmp;
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::path::{Component, PathBuf, Path};
 use std::process::Command;
@@ -120,8 +170,6 @@ pub struct Build {
     version: String,
     package_vers: String,
     local_rebuild: bool,
-    bootstrap_key: String,
-    bootstrap_key_stage0: String,
 
     // Probed tools at runtime
     lldb_version: Option<String>,
@@ -131,6 +179,7 @@ pub struct Build {
     cc: HashMap<String, (gcc::Tool, Option<PathBuf>)>,
     cxx: HashMap<String, gcc::Tool>,
     crates: HashMap<String, Crate>,
+    is_sudo: bool,
 }
 
 #[derive(Debug)]
@@ -141,6 +190,7 @@ struct Crate {
     doc_step: String,
     build_step: String,
     test_step: String,
+    bench_step: String,
 }
 
 /// The various "modes" of invoking Cargo.
@@ -189,6 +239,16 @@ impl Build {
         };
         let local_rebuild = config.local_rebuild;
 
+        let is_sudo = match env::var_os("SUDO_USER") {
+            Some(sudo_user) => {
+                match env::var_os("USER") {
+                    Some(user) => user != sudo_user,
+                    None => false,
+                }
+            }
+            None => false,
+        };
+
         Build {
             flags: flags,
             config: config,
@@ -204,14 +264,13 @@ impl Build {
             ver_date: None,
             version: String::new(),
             local_rebuild: local_rebuild,
-            bootstrap_key: String::new(),
-            bootstrap_key_stage0: String::new(),
             package_vers: String::new(),
             cc: HashMap::new(),
             cxx: HashMap::new(),
             crates: HashMap::new(),
             lldb_version: None,
             lldb_python_dir: None,
+            is_sudo: is_sudo,
         }
     }
 
@@ -418,7 +477,7 @@ impl Build {
         // how the actual compiler itself is called.
         //
         // These variables are primarily all read by
-        // src/bootstrap/{rustc,rustdoc.rs}
+        // src/bootstrap/bin/{rustc.rs,rustdoc.rs}
         cargo.env("RUSTC", self.out.join("bootstrap/debug/rustc"))
              .env("RUSTC_REAL", self.compiler_path(compiler))
              .env("RUSTC_STAGE", stage.to_string())
@@ -437,7 +496,20 @@ impl Build {
              .env("RUSTDOC_REAL", self.rustdoc(compiler))
              .env("RUSTC_FLAGS", self.rustc_flags(target).join(" "));
 
-        self.add_bootstrap_key(&mut cargo);
+        // Enable usage of unstable features
+        cargo.env("RUSTC_BOOTSTRAP", "1");
+        self.add_rust_test_threads(&mut cargo);
+
+        // Ignore incremental modes except for stage0, since we're
+        // not guaranteeing correctness acros builds if the compiler
+        // is changing under your feet.`
+        if self.flags.incremental && compiler.stage == 0 {
+            let incr_dir = self.incremental_dir(compiler);
+            cargo.env("RUSTC_INCREMENTAL", incr_dir);
+        }
+
+        let verbose = cmp::max(self.config.verbose, self.flags.verbose);
+        cargo.env("RUSTC_VERBOSE", format!("{}", verbose));
 
         // Specify some various options for build scripts used throughout
         // the build.
@@ -449,18 +521,23 @@ impl Build {
                  .env(format!("CFLAGS_{}", target), self.cflags(target).join(" "));
         }
 
+        if self.config.channel == "nightly" && compiler.is_final_stage(self) {
+            cargo.env("RUSTC_SAVE_ANALYSIS", "api".to_string());
+        }
+
         // Environment variables *required* needed throughout the build
         //
         // FIXME: should update code to not require this env var
         cargo.env("CFG_COMPILER_HOST_TRIPLE", target);
 
-        if self.config.verbose || self.flags.verbose {
+        if self.config.verbose() || self.flags.verbose() {
             cargo.arg("-v");
         }
-        if self.config.rust_optimize {
+        // FIXME: cargo bench does not accept `--release`
+        if self.config.rust_optimize && cmd != "bench" {
             cargo.arg("--release");
         }
-        if self.config.vendor {
+        if self.config.vendor || self.is_sudo {
             cargo.arg("--frozen");
         }
         return cargo
@@ -493,21 +570,45 @@ impl Build {
     /// `host`.
     fn tool_cmd(&self, compiler: &Compiler, tool: &str) -> Command {
         let mut cmd = Command::new(self.tool(&compiler, tool));
+        self.prepare_tool_cmd(compiler, &mut cmd);
+        return cmd
+    }
+
+    /// Prepares the `cmd` provided to be able to run the `compiler` provided.
+    ///
+    /// Notably this munges the dynamic library lookup path to point to the
+    /// right location to run `compiler`.
+    fn prepare_tool_cmd(&self, compiler: &Compiler, cmd: &mut Command) {
         let host = compiler.host;
-        let paths = vec![
-            self.cargo_out(compiler, Mode::Libstd, host).join("deps"),
-            self.cargo_out(compiler, Mode::Libtest, host).join("deps"),
-            self.cargo_out(compiler, Mode::Librustc, host).join("deps"),
+        let mut paths = vec![
+            self.sysroot_libdir(compiler, compiler.host),
             self.cargo_out(compiler, Mode::Tool, host).join("deps"),
         ];
-        add_lib_path(paths, &mut cmd);
-        return cmd
+
+        // On MSVC a tool may invoke a C compiler (e.g. compiletest in run-make
+        // mode) and that C compiler may need some extra PATH modification. Do
+        // so here.
+        if compiler.host.contains("msvc") {
+            let curpaths = env::var_os("PATH").unwrap_or(OsString::new());
+            let curpaths = env::split_paths(&curpaths).collect::<Vec<_>>();
+            for &(ref k, ref v) in self.cc[compiler.host].0.env() {
+                if k != "PATH" {
+                    continue
+                }
+                for path in env::split_paths(v) {
+                    if !curpaths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+        add_lib_path(paths, cmd);
     }
 
     /// Get the space-separated set of activated features for the standard
     /// library.
     fn std_features(&self) -> String {
-        let mut features = String::new();
+        let mut features = "panic-unwind".to_string();
         if self.config.debug_jemalloc {
             features.push_str(" debug-jemalloc");
         }
@@ -547,6 +648,12 @@ impl Build {
         } else {
             self.out.join(compiler.host).join(format!("stage{}", compiler.stage))
         }
+    }
+
+    /// Get the directory for incremental by-products when using the
+    /// given compiler.
+    fn incremental_dir(&self, compiler: &Compiler) -> PathBuf {
+        self.out.join(compiler.host).join(format!("stage{}-incremental", compiler.stage))
     }
 
     /// Returns the libdir where the standard library and other artifacts are
@@ -622,7 +729,8 @@ impl Build {
     fn llvm_filecheck(&self, target: &str) -> PathBuf {
         let target_config = self.config.target_config.get(target);
         if let Some(s) = target_config.and_then(|c| c.llvm_config.as_ref()) {
-            s.parent().unwrap().join(exe("FileCheck", target))
+            let llvm_bindir = output(Command::new(s).arg("--bindir"));
+            Path::new(llvm_bindir.trim()).join(exe("FileCheck", target))
         } else {
             let base = self.llvm_out(&self.config.build).join("build");
             let exe = exe("FileCheck", target);
@@ -653,12 +761,11 @@ impl Build {
         add_lib_path(vec![self.rustc_libdir(compiler)], cmd);
     }
 
-    /// Adds the compiler's bootstrap key to the environment of `cmd`.
-    fn add_bootstrap_key(&self, cmd: &mut Command) {
-        cmd.env("RUSTC_BOOTSTRAP", "1");
-        // FIXME: Transitionary measure to bootstrap using the old bootstrap logic.
-        // Remove this once the bootstrap compiler uses the new login in Issue #36548.
-        cmd.env("RUSTC_BOOTSTRAP_KEY", "62b3e239");
+    /// Adds the `RUST_TEST_THREADS` env var if necessary
+    fn add_rust_test_threads(&self, cmd: &mut Command) {
+        if env::var_os("RUST_TEST_THREADS").is_none() {
+            cmd.env("RUST_TEST_THREADS", self.jobs().to_string());
+        }
     }
 
     /// Returns the compiler's libdir where it stores the dynamic libraries that
@@ -688,7 +795,7 @@ impl Build {
 
     /// Prints a message if this build is configured in verbose mode.
     fn verbose(&self, msg: &str) {
-        if self.flags.verbose || self.config.verbose {
+        if self.flags.verbose() || self.config.verbose() {
             println!("{}", msg);
         }
     }
@@ -779,6 +886,30 @@ impl Build {
     fn python(&self) -> &Path {
         self.config.python.as_ref().unwrap()
     }
+
+    /// Tests whether the `compiler` compiling for `target` should be forced to
+    /// use a stage1 compiler instead.
+    ///
+    /// Currently, by default, the build system does not perform a "full
+    /// bootstrap" by default where we compile the compiler three times.
+    /// Instead, we compile the compiler two times. The final stage (stage2)
+    /// just copies the libraries from the previous stage, which is what this
+    /// method detects.
+    ///
+    /// Here we return `true` if:
+    ///
+    /// * The build isn't performing a full bootstrap
+    /// * The `compiler` is in the final stage, 2
+    /// * We're not cross-compiling, so the artifacts are already available in
+    ///   stage1
+    ///
+    /// When all of these conditions are met the build will lift artifacts from
+    /// the previous stage forward.
+    fn force_use_stage1(&self, compiler: &Compiler, target: &str) -> bool {
+        !self.config.full_bootstrap &&
+            compiler.stage >= 2 &&
+            self.config.host.iter().any(|h| h == target)
+    }
 }
 
 impl<'a> Compiler<'a> {
@@ -790,5 +921,14 @@ impl<'a> Compiler<'a> {
     /// Returns whether this is a snapshot compiler for `build`'s configuration
     fn is_snapshot(&self, build: &Build) -> bool {
         self.stage == 0 && self.host == build.config.build
+    }
+
+    /// Returns if this compiler should be treated as a final stage one in the
+    /// current build session.
+    /// This takes into account whether we're performing a full bootstrap or
+    /// not; don't directly compare the stage with `2`!
+    fn is_final_stage(&self, build: &Build) -> bool {
+        let final_stage = if build.config.full_bootstrap { 2 } else { 1 };
+        self.stage >= final_stage
     }
 }

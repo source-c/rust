@@ -38,14 +38,15 @@ use util::push_exe_path;
 /// `src/bootstrap/config.toml.example`.
 #[derive(Default)]
 pub struct Config {
-    pub ccache: bool,
+    pub ccache: Option<String>,
     pub ninja: bool,
-    pub verbose: bool,
+    pub verbose: usize,
     pub submodules: bool,
     pub compiler_docs: bool,
     pub docs: bool,
     pub vendor: bool,
     pub target_config: HashMap<String, Target>,
+    pub full_bootstrap: bool,
 
     // llvm codegen options
     pub llvm_assertions: bool,
@@ -54,6 +55,7 @@ pub struct Config {
     pub llvm_version_check: bool,
     pub llvm_static_stdcpp: bool,
     pub llvm_link_shared: bool,
+    pub llvm_targets: Option<String>,
 
     // rust codegen options
     pub rust_optimize: bool,
@@ -61,6 +63,7 @@ pub struct Config {
     pub rust_debug_assertions: bool,
     pub rust_debuginfo: bool,
     pub rust_debuginfo_lines: bool,
+    pub rust_debuginfo_only_std: bool,
     pub rust_rpath: bool,
     pub rustc_default_linker: Option<String>,
     pub rustc_default_ar: Option<String>,
@@ -84,14 +87,15 @@ pub struct Config {
     pub quiet_tests: bool,
     // Fallback musl-root for all targets
     pub musl_root: Option<PathBuf>,
-    pub prefix: Option<String>,
-    pub docdir: Option<String>,
-    pub libdir: Option<String>,
-    pub mandir: Option<String>,
+    pub prefix: Option<PathBuf>,
+    pub docdir: Option<PathBuf>,
+    pub libdir: Option<PathBuf>,
+    pub mandir: Option<PathBuf>,
     pub codegen_tests: bool,
     pub nodejs: Option<PathBuf>,
     pub gdb: Option<PathBuf>,
     pub python: Option<PathBuf>,
+    pub configure_args: Vec<String>,
 }
 
 /// Per-target configuration stored in the global configuration structure.
@@ -113,6 +117,7 @@ pub struct Target {
 #[derive(RustcDecodable, Default)]
 struct TomlConfig {
     build: Option<Build>,
+    install: Option<Install>,
     llvm: Option<Llvm>,
     rust: Option<Rust>,
     target: Option<HashMap<String, TomlTarget>>,
@@ -133,18 +138,41 @@ struct Build {
     vendor: Option<bool>,
     nodejs: Option<String>,
     python: Option<String>,
+    full_bootstrap: Option<bool>,
+}
+
+/// TOML representation of various global install decisions.
+#[derive(RustcDecodable, Default, Clone)]
+struct Install {
+    prefix: Option<String>,
+    mandir: Option<String>,
+    docdir: Option<String>,
+    libdir: Option<String>,
 }
 
 /// TOML representation of how the LLVM build is configured.
 #[derive(RustcDecodable, Default)]
 struct Llvm {
-    ccache: Option<bool>,
+    ccache: Option<StringOrBool>,
     ninja: Option<bool>,
     assertions: Option<bool>,
     optimize: Option<bool>,
     release_debuginfo: Option<bool>,
     version_check: Option<bool>,
     static_libstdcpp: Option<bool>,
+    targets: Option<String>,
+}
+
+#[derive(RustcDecodable)]
+enum StringOrBool {
+    String(String),
+    Bool(bool),
+}
+
+impl Default for StringOrBool {
+    fn default() -> StringOrBool {
+        StringOrBool::Bool(false)
+    }
 }
 
 /// TOML representation of how the Rust build is configured.
@@ -155,6 +183,7 @@ struct Rust {
     debug_assertions: Option<bool>,
     debuginfo: Option<bool>,
     debuginfo_lines: Option<bool>,
+    debuginfo_only_std: Option<bool>,
     debug_jemalloc: Option<bool>,
     use_jemalloc: Option<bool>,
     backtrace: Option<bool>,
@@ -245,20 +274,39 @@ impl Config {
         set(&mut config.docs, build.docs);
         set(&mut config.submodules, build.submodules);
         set(&mut config.vendor, build.vendor);
+        set(&mut config.full_bootstrap, build.full_bootstrap);
+
+        if let Some(ref install) = toml.install {
+            config.prefix = install.prefix.clone().map(PathBuf::from);
+            config.mandir = install.mandir.clone().map(PathBuf::from);
+            config.docdir = install.docdir.clone().map(PathBuf::from);
+            config.libdir = install.libdir.clone().map(PathBuf::from);
+        }
 
         if let Some(ref llvm) = toml.llvm {
-            set(&mut config.ccache, llvm.ccache);
+            match llvm.ccache {
+                Some(StringOrBool::String(ref s)) => {
+                    config.ccache = Some(s.to_string())
+                }
+                Some(StringOrBool::Bool(true)) => {
+                    config.ccache = Some("ccache".to_string());
+                }
+                Some(StringOrBool::Bool(false)) | None => {}
+            }
             set(&mut config.ninja, llvm.ninja);
             set(&mut config.llvm_assertions, llvm.assertions);
             set(&mut config.llvm_optimize, llvm.optimize);
             set(&mut config.llvm_release_debuginfo, llvm.release_debuginfo);
             set(&mut config.llvm_version_check, llvm.version_check);
             set(&mut config.llvm_static_stdcpp, llvm.static_libstdcpp);
+            config.llvm_targets = llvm.targets.clone();
         }
+
         if let Some(ref rust) = toml.rust {
             set(&mut config.rust_debug_assertions, rust.debug_assertions);
             set(&mut config.rust_debuginfo, rust.debuginfo);
             set(&mut config.rust_debuginfo_lines, rust.debuginfo_lines);
+            set(&mut config.rust_debuginfo_only_std, rust.debuginfo_only_std);
             set(&mut config.rust_optimize, rust.optimize);
             set(&mut config.rust_optimize_tests, rust.optimize_tests);
             set(&mut config.rust_debuginfo_tests, rust.debuginfo_tests);
@@ -338,7 +386,6 @@ impl Config {
             }
 
             check! {
-                ("CCACHE", self.ccache),
                 ("MANAGE_SUBMODULES", self.submodules),
                 ("COMPILER_DOCS", self.compiler_docs),
                 ("DOCS", self.docs),
@@ -352,6 +399,7 @@ impl Config {
                 ("DEBUG_ASSERTIONS", self.rust_debug_assertions),
                 ("DEBUGINFO", self.rust_debuginfo),
                 ("DEBUGINFO_LINES", self.rust_debuginfo_lines),
+                ("DEBUGINFO_ONLY_STD", self.rust_debuginfo_only_std),
                 ("JEMALLOC", self.use_jemalloc),
                 ("DEBUG_JEMALLOC", self.debug_jemalloc),
                 ("RPATH", self.rust_rpath),
@@ -362,6 +410,7 @@ impl Config {
                 ("NINJA", self.ninja),
                 ("CODEGEN_TESTS", self.codegen_tests),
                 ("VENDOR", self.vendor),
+                ("FULL_BOOTSTRAP", self.full_bootstrap),
             }
 
             match key {
@@ -420,16 +469,16 @@ impl Config {
                     self.channel = value.to_string();
                 }
                 "CFG_PREFIX" => {
-                    self.prefix = Some(value.to_string());
+                    self.prefix = Some(PathBuf::from(value));
                 }
                 "CFG_DOCDIR" => {
-                    self.docdir = Some(value.to_string());
+                    self.docdir = Some(PathBuf::from(value));
                 }
                 "CFG_LIBDIR" => {
-                    self.libdir = Some(value.to_string());
+                    self.libdir = Some(PathBuf::from(value));
                 }
                 "CFG_MANDIR" => {
-                    self.mandir = Some(value.to_string());
+                    self.mandir = Some(PathBuf::from(value));
                 }
                 "CFG_LLVM_ROOT" if value.len() > 0 => {
                     let target = self.target_config.entry(self.build.clone())
@@ -475,9 +524,28 @@ impl Config {
                     let path = parse_configure_path(value);
                     self.python = Some(path);
                 }
+                "CFG_ENABLE_CCACHE" if value == "1" => {
+                    self.ccache = Some("ccache".to_string());
+                }
+                "CFG_ENABLE_SCCACHE" if value == "1" => {
+                    self.ccache = Some("sccache".to_string());
+                }
+                "CFG_CONFIGURE_ARGS" if value.len() > 0 => {
+                    self.configure_args = value.split_whitespace()
+                                               .map(|s| s.to_string())
+                                               .collect();
+                }
                 _ => {}
             }
         }
+    }
+
+    pub fn verbose(&self) -> bool {
+        self.verbose > 0
+    }
+
+    pub fn very_verbose(&self) -> bool {
+        self.verbose > 1
     }
 }
 

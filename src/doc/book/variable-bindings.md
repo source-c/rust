@@ -47,7 +47,7 @@ let x: i32 = 5;
 ```
 
 If I asked you to read this out loud to the rest of the class, you’d say “`x`
-is a binding with the type `i32` and the value `five`.”
+is a binding with the type `i32` and the value `5`.”
 
 In this case we chose to represent `x` as a 32-bit signed integer. Rust has
 many different primitive integer types. They begin with `i` for signed integers
@@ -102,7 +102,7 @@ mutation, then the solution is quite easy: add `mut`.
 There are other good reasons to avoid mutable state when possible, but they’re
 out of the scope of this guide. In general, you can often avoid explicit
 mutation, and so it is preferable in Rust. That said, sometimes, mutation is
-what you need, so it’s not verboten.
+what you need, so it’s not forbidden.
 
 # Initializing bindings
 

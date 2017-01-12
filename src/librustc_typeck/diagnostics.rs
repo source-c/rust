@@ -1377,8 +1377,9 @@ let x = |_| {}; // error: cannot determine a type for this expression
 ```
 
 You have two possibilities to solve this situation:
- * Give an explicit definition of the expression
- * Infer the expression
+
+* Give an explicit definition of the expression
+* Infer the expression
 
 Examples:
 
@@ -2299,6 +2300,7 @@ This fails because `&mut T` is not `Copy`, even when `T` is `Copy` (this
 differs from the behavior for `&T`, which is always `Copy`).
 "##,
 
+/*
 E0205: r##"
 An attempt to implement the `Copy` trait for an enum failed because one of the
 variants does not implement `Copy`. To fix this, you must implement `Copy` for
@@ -2328,6 +2330,7 @@ enum Foo<'a> {
 This fails because `&mut T` is not `Copy`, even when `T` is `Copy` (this
 differs from the behavior for `&T`, which is always `Copy`).
 "##,
+*/
 
 E0206: r##"
 You can only implement `Copy` for a struct or enum. Both of the following
@@ -2777,8 +2780,8 @@ fn main() {
 }
 ```
 
-Builtin traits are an exception to this rule: it's possible to have bounds of
-one non-builtin type, plus any number of builtin types. For example, the
+Send and Sync are an exception to this rule: it's possible to have bounds of
+one non-builtin trait, plus either or both of Send and Sync. For example, the
 following compiles correctly:
 
 ```
@@ -2858,25 +2861,6 @@ struct Foo { x: bool }
 
 struct Bar<S, T> { x: Foo<S, T> }
 ```
-"##,
-
-E0248: r##"
-This error indicates an attempt to use a value where a type is expected. For
-example:
-
-```compile_fail,E0248
-enum Foo {
-    Bar(u32)
-}
-
-fn do_something(x: Foo::Bar) { }
-```
-
-In this example, we're attempting to take a type of `Foo::Bar` in the
-do_something function. This is not legal: `Foo::Bar` is a value of type `Foo`,
-not a distinct static type. Likewise, it's not legal to attempt to
-`impl Foo::Bar`: instead, you must `impl Foo` and then pattern match to specify
-behavior for specific enum variants.
 "##,
 
 E0569: r##"
@@ -3884,45 +3868,6 @@ extern "platform-intrinsic" {
 ```
 "##,
 
-E0513: r##"
-The type of the variable couldn't be found out.
-
-Erroneous code example:
-
-```compile_fail,E0513
-use std::mem;
-
-unsafe {
-    let size = mem::size_of::<u32>();
-    mem::transmute_copy::<u32, [u8; size]>(&8_8);
-    // error: no type for local variable
-}
-```
-
-To fix this error, please use a constant size instead of `size`. To make
-this error more obvious, you could run:
-
-```compile_fail,E0080
-use std::mem;
-
-unsafe {
-    mem::transmute_copy::<u32, [u8; mem::size_of::<u32>()]>(&8_8);
-    // error: constant evaluation error
-}
-```
-
-So now, you can fix your code by setting the size directly:
-
-```
-use std::mem;
-
-unsafe {
-    mem::transmute_copy::<u32, [u8; 4]>(&8_8);
-    // `u32` is 4 bytes so we replace the `mem::size_of` call with its size
-}
-```
-"##,
-
 E0516: r##"
 The `typeof` keyword is currently reserved but unimplemented.
 Erroneous code example:
@@ -4163,6 +4108,33 @@ target / ABI combination is currently unsupported by llvm.
 If necessary, you can circumvent this check using custom target specifications.
 "##,
 
+E0572: r##"
+A return statement was found outside of a function body.
+
+Erroneous code example:
+
+```compile_fail,E0572
+const FOO: u32 = return 0; // error: return statement outside of function body
+
+fn main() {}
+```
+
+To fix this issue, just remove the return keyword or move the expression into a
+function. Example:
+
+```
+const FOO: u32 = 0;
+
+fn some_fn() -> u32 {
+    return FOO;
+}
+
+fn main() {
+    some_fn();
+}
+```
+"##,
+
 }
 
 register_diagnostics! {
@@ -4219,6 +4191,7 @@ register_diagnostics! {
     E0245, // not a trait
 //  E0246, // invalid recursive type
 //  E0247,
+//  E0248, // value used as a type, now reported earlier during resolution as E0412
 //  E0249,
 //  E0319, // trait impls for defaulted traits allowed just for structs/enums
     E0320, // recursive overflow during dropck

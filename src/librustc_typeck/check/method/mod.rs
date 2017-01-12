@@ -30,8 +30,10 @@ pub use self::CandidateSource::*;
 pub use self::suggest::AllTraitsVec;
 
 mod confirm;
-mod probe;
+pub mod probe;
 mod suggest;
+
+use self::probe::IsSuggestion;
 
 pub enum MethodError<'tcx> {
     // Did not find an applicable method, but we did find various near-misses that may work.
@@ -91,7 +93,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                          allow_private: bool)
                          -> bool {
         let mode = probe::Mode::MethodCall;
-        match self.probe_method(span, mode, method_name, self_ty, call_expr_id) {
+        match self.probe_for_name(span, mode, method_name, IsSuggestion(false),
+                                  self_ty, call_expr_id) {
             Ok(..) => true,
             Err(NoMatch(..)) => false,
             Err(Ambiguity(..)) => true,
@@ -130,11 +133,14 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
         let mode = probe::Mode::MethodCall;
         let self_ty = self.resolve_type_vars_if_possible(&self_ty);
-        let pick = self.probe_method(span, mode, method_name, self_ty, call_expr.id)?;
+        let pick = self.probe_for_name(span, mode, method_name, IsSuggestion(false),
+                                       self_ty, call_expr.id)?;
 
         if let Some(import_id) = pick.import_id {
             self.tcx.used_trait_imports.borrow_mut().insert(import_id);
         }
+
+        self.tcx.check_stability(pick.item.def_id, call_expr.id, span);
 
         Ok(self.confirm_method(span,
                                self_expr,
@@ -190,13 +196,6 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                m_name,
                trait_def_id);
 
-        let trait_def = self.tcx.lookup_trait_def(trait_def_id);
-
-        if let Some(ref input_types) = opt_input_types {
-            assert_eq!(trait_def.generics.types.len() - 1, input_types.len());
-        }
-        assert!(trait_def.generics.regions.is_empty());
-
         // Construct a trait-reference `self_ty : Trait<input_tys>`
         let substs = Substs::for_item(self.tcx,
                                       trait_def_id,
@@ -251,7 +250,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                                                     infer::FnCall,
                                                                     &fty.sig).0;
         let fn_sig = self.instantiate_type_scheme(span, trait_ref.substs, &fn_sig);
-        let transformed_self_ty = fn_sig.inputs[0];
+        let transformed_self_ty = fn_sig.inputs()[0];
         let method_ty = tcx.mk_fn_def(def_id, trait_ref.substs,
                                       tcx.mk_bare_fn(ty::BareFnTy {
             sig: ty::Binder(fn_sig),
@@ -333,15 +332,19 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         expr_id: ast::NodeId)
                         -> Result<Def, MethodError<'tcx>> {
         let mode = probe::Mode::Path;
-        let pick = self.probe_method(span, mode, method_name, self_ty, expr_id)?;
+        let pick = self.probe_for_name(span, mode, method_name, IsSuggestion(false),
+                                       self_ty, expr_id)?;
 
         if let Some(import_id) = pick.import_id {
             self.tcx.used_trait_imports.borrow_mut().insert(import_id);
         }
 
         let def = pick.item.def();
+
+        self.tcx.check_stability(def.def_id(), expr_id, span);
+
         if let probe::InherentImplPick = pick.kind {
-            if !pick.item.vis.is_accessible_from(self.body_id, &self.tcx.map) {
+            if !self.tcx.vis_is_accessible_from(pick.item.vis, self.body_id) {
                 let msg = format!("{} `{}` is private", def.kind_name(), method_name);
                 self.tcx.sess.span_err(span, &msg);
             }

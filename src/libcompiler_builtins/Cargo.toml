@@ -8,6 +8,8 @@ version = "0.0.0"
 name = "compiler_builtins"
 path = "lib.rs"
 test = false
+bench = false
+doc = false
 
 [dependencies]
 core = { path = "../libcore" }

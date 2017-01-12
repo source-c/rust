@@ -90,31 +90,6 @@ impl LanguageItems {
         self.require(OwnedBoxLangItem)
     }
 
-    pub fn from_builtin_kind(&self, bound: ty::BuiltinBound)
-                             -> Result<DefId, String>
-    {
-        match bound {
-            ty::BoundSend => self.require(SendTraitLangItem),
-            ty::BoundSized => self.require(SizedTraitLangItem),
-            ty::BoundCopy => self.require(CopyTraitLangItem),
-            ty::BoundSync => self.require(SyncTraitLangItem),
-        }
-    }
-
-    pub fn to_builtin_kind(&self, id: DefId) -> Option<ty::BuiltinBound> {
-        if Some(id) == self.send_trait() {
-            Some(ty::BoundSend)
-        } else if Some(id) == self.sized_trait() {
-            Some(ty::BoundSized)
-        } else if Some(id) == self.copy_trait() {
-            Some(ty::BoundCopy)
-        } else if Some(id) == self.sync_trait() {
-            Some(ty::BoundSync)
-        } else {
-            None
-        }
-    }
-
     pub fn fn_trait_kind(&self, id: DefId) -> Option<ty::ClosureKind> {
         let def_id_kinds = [
             (self.fn_trait(), ty::ClosureKind::Fn),
@@ -163,6 +138,10 @@ impl<'a, 'v, 'tcx> ItemLikeVisitor<'v> for LanguageItemCollector<'a, 'tcx> {
                           value);
             }
         }
+    }
+
+    fn visit_trait_item(&mut self, _trait_item: &hir::TraitItem) {
+        // at present, lang items are always items, not trait items
     }
 
     fn visit_impl_item(&mut self, _impl_item: &hir::ImplItem) {
@@ -281,11 +260,13 @@ language_item_table! {
     I16ImplItem,                     "i16",                     i16_impl;
     I32ImplItem,                     "i32",                     i32_impl;
     I64ImplItem,                     "i64",                     i64_impl;
+    I128ImplItem,                     "i128",                   i128_impl;
     IsizeImplItem,                   "isize",                   isize_impl;
     U8ImplItem,                      "u8",                      u8_impl;
     U16ImplItem,                     "u16",                     u16_impl;
     U32ImplItem,                     "u32",                     u32_impl;
     U64ImplItem,                     "u64",                     u64_impl;
+    U128ImplItem,                    "u128",                    u128_impl;
     UsizeImplItem,                   "usize",                   usize_impl;
     F32ImplItem,                     "f32",                     f32_impl;
     F64ImplItem,                     "f64",                     f64_impl;
@@ -353,7 +334,6 @@ language_item_table! {
     PanicFmtLangItem,                "panic_fmt",               panic_fmt;
 
     ExchangeMallocFnLangItem,        "exchange_malloc",         exchange_malloc_fn;
-    ExchangeFreeFnLangItem,          "exchange_free",           exchange_free_fn;
     BoxFreeFnLangItem,               "box_free",                box_free_fn;
     StrDupUniqFnLangItem,            "strdup_uniq",             strdup_uniq_fn;
 
@@ -380,4 +360,12 @@ language_item_table! {
     NonZeroItem,                     "non_zero",                non_zero;
 
     DebugTraitLangItem,              "debug_trait",             debug_trait;
+}
+
+impl<'a, 'tcx, 'gcx> ty::TyCtxt<'a, 'tcx, 'gcx> {
+    pub fn require_lang_item(&self, lang_item: LangItem) -> DefId {
+        self.lang_items.require(lang_item).unwrap_or_else(|msg| {
+            self.sess.fatal(&msg)
+        })
+    }
 }

@@ -133,7 +133,14 @@ unsafe impl<T: ?Sized + Send> Sync for Mutex<T> { }
 /// dropped (falls out of scope), the lock will be unlocked.
 ///
 /// The data protected by the mutex can be access through this guard via its
-/// `Deref` and `DerefMut` implementations
+/// `Deref` and `DerefMut` implementations.
+///
+/// This structure is created by the [`lock()`] and [`try_lock()`] methods on
+/// [`Mutex`].
+///
+/// [`lock()`]: struct.Mutex.html#method.lock
+/// [`try_lock()`]: struct.Mutex.html#method.try_lock
+/// [`Mutex`]: struct.Mutex.html
 #[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct MutexGuard<'a, T: ?Sized + 'a> {
@@ -273,8 +280,7 @@ impl<T: ?Sized> Mutex<T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: ?Sized> Drop for Mutex<T> {
-    #[unsafe_destructor_blind_to_params]
+unsafe impl<#[may_dangle] T: ?Sized> Drop for Mutex<T> {
     fn drop(&mut self) {
         // This is actually safe b/c we know that there is no further usage of
         // this mutex (it's up to the user to arrange for a mutex to get
@@ -341,6 +347,15 @@ impl<'a, T: ?Sized> Drop for MutexGuard<'a, T> {
             self.__lock.poison.done(&self.__poison);
             self.__lock.inner.unlock();
         }
+    }
+}
+
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl<'a, T: ?Sized + fmt::Debug> fmt::Debug for MutexGuard<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("MutexGuard")
+            .field("lock", &self.__lock)
+            .finish()
     }
 }
 

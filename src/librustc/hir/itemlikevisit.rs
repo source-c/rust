@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use super::{Item, ImplItem};
+use super::{Item, ImplItem, TraitItem};
 use super::intravisit::Visitor;
 
 /// The "item-like visitor" visitor defines only the top-level methods
@@ -41,8 +41,10 @@ use super::intravisit::Visitor;
 ///    item-like things.
 ///    - Example: Lifetime resolution, which wants to bring lifetimes declared on the
 ///      impl into scope while visiting the impl-items, and then back out again.
-///    - How: Implement `intravisit::Visitor` and override the `visit_nested_foo()` foo methods
-///      as needed. Walk your crate with `intravisit::walk_crate()` invoked on `tcx.map.krate()`.
+///    - How: Implement `intravisit::Visitor` and override the
+///      `visit_nested_map()` methods to return
+///      `NestedVisitorMap::All`. Walk your crate with
+///      `intravisit::walk_crate()` invoked on `tcx.map.krate()`.
 ///    - Pro: Visitor methods for any kind of HIR node, not just item-like things.
 ///    - Pro: Preserves nesting information
 ///    - Con: Does not integrate well into dependency tracking.
@@ -56,6 +58,7 @@ use super::intravisit::Visitor;
 /// needed.
 pub trait ItemLikeVisitor<'hir> {
     fn visit_item(&mut self, item: &'hir Item);
+    fn visit_trait_item(&mut self, trait_item: &'hir TraitItem);
     fn visit_impl_item(&mut self, impl_item: &'hir ImplItem);
 }
 
@@ -76,6 +79,10 @@ impl<'v, 'hir, V> ItemLikeVisitor<'hir> for DeepVisitor<'v, V>
 {
     fn visit_item(&mut self, item: &'hir Item) {
         self.visitor.visit_item(item);
+    }
+
+    fn visit_trait_item(&mut self, trait_item: &'hir TraitItem) {
+        self.visitor.visit_trait_item(trait_item);
     }
 
     fn visit_impl_item(&mut self, impl_item: &'hir ImplItem) {

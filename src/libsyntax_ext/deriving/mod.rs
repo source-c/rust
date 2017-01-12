@@ -15,7 +15,7 @@ use syntax::attr::HasAttrs;
 use syntax::codemap;
 use syntax::ext::base::{Annotatable, ExtCtxt, SyntaxExtension};
 use syntax::ext::build::AstBuilder;
-use syntax::feature_gate::{self, emit_feature_err};
+use syntax::feature_gate;
 use syntax::ptr::P;
 use syntax::symbol::Symbol;
 use syntax_pos::Span;
@@ -90,10 +90,10 @@ fn allow_unstable(cx: &mut ExtCtxt, span: Span, attr_name: &str) -> Span {
 }
 
 pub fn expand_derive(cx: &mut ExtCtxt,
-                 span: Span,
-                 mitem: &MetaItem,
-                 annotatable: Annotatable)
-                 -> Vec<Annotatable> {
+                     span: Span,
+                     mitem: &MetaItem,
+                     annotatable: Annotatable)
+                     -> Vec<Annotatable> {
     debug!("expand_derive: span = {:?}", span);
     debug!("expand_derive: mitem = {:?}", mitem);
     debug!("expand_derive: annotatable input  = {:?}", annotatable);
@@ -175,8 +175,10 @@ pub fn expand_derive(cx: &mut ExtCtxt,
                                            feature_gate::GateIssue::Language,
                                            feature_gate::EXPLAIN_CUSTOM_DERIVE);
         } else {
-            cx.span_warn(titem.span, feature_gate::EXPLAIN_DEPR_CUSTOM_DERIVE);
             let name = Symbol::intern(&format!("derive_{}", tname));
+            if !cx.resolver.is_whitelisted_legacy_custom_derive(name) {
+                cx.span_warn(titem.span, feature_gate::EXPLAIN_DEPR_CUSTOM_DERIVE);
+            }
             let mitem = cx.meta_word(titem.span, name);
             new_attributes.push(cx.attribute(mitem.span, mitem));
         }
@@ -218,12 +220,6 @@ pub fn expand_derive(cx: &mut ExtCtxt,
                                  .filter(|&(_, ref name)| !is_builtin_trait(name.name().unwrap()))
                                  .next();
     if let Some((i, titem)) = macros_11_derive {
-        if !cx.ecfg.features.unwrap().proc_macro {
-            let issue = feature_gate::GateIssue::Language;
-            let msg = "custom derive macros are experimentally supported";
-            emit_feature_err(cx.parse_sess, "proc_macro", titem.span, issue, msg);
-        }
-
         let tname = ast::Ident::with_empty_ctxt(titem.name().unwrap());
         let path = ast::Path::from_ident(titem.span, tname);
         let ext = cx.resolver.resolve_macro(cx.current_expansion.mark, &path, false).unwrap();
@@ -239,8 +235,21 @@ pub fn expand_derive(cx: &mut ExtCtxt,
         let titem = cx.meta_list_item_word(titem.span, titem.name().unwrap());
         let mitem = cx.meta_list(titem.span, derive, vec![titem]);
         let item = Annotatable::Item(item);
+
+        let span = Span {
+            expn_id: cx.codemap().record_expansion(codemap::ExpnInfo {
+                call_site: mitem.span,
+                callee: codemap::NameAndSpan {
+                    format: codemap::MacroAttribute(Symbol::intern(&format!("derive({})", tname))),
+                    span: None,
+                    allow_internal_unstable: false,
+                },
+            }),
+            ..mitem.span
+        };
+
         if let SyntaxExtension::CustomDerive(ref ext) = *ext {
-            return ext.expand(cx, mitem.span, &mitem, item);
+            return ext.expand(cx, span, &mitem, item);
         } else {
             unreachable!()
         }
@@ -289,8 +298,8 @@ pub fn expand_derive(cx: &mut ExtCtxt,
             expn_id: cx.codemap().record_expansion(codemap::ExpnInfo {
                 call_site: titem.span,
                 callee: codemap::NameAndSpan {
-                    format: codemap::MacroAttribute(Symbol::intern(&format!("derive({})", tname))),
-                    span: Some(titem.span),
+                    format: codemap::MacroAttribute(name),
+                    span: None,
                     allow_internal_unstable: true,
                 },
             }),

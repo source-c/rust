@@ -195,7 +195,7 @@ impl<'a, 'tcx> ty::TyS<'tcx> {
                     tc_ty(tcx, typ, cache).owned_pointer()
                 }
 
-                ty::TyTrait(_) => {
+                ty::TyDynamic(..) => {
                     TC::All - TC::InteriorParam
                 }
 
@@ -234,6 +234,11 @@ impl<'a, 'tcx> ty::TyS<'tcx> {
                                 tc_ty(tcx, f.ty(tcx, substs), cache)
                             })
                         });
+
+                    if def.is_union() {
+                        // unions don't have destructors regardless of the child types
+                        res = res - TC::NeedsDrop;
+                    }
 
                     if def.has_dtor() {
                         res = res | TC::OwnsDtor;

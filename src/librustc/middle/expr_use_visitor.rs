@@ -19,7 +19,6 @@ pub use self::MatchMode::*;
 use self::TrackMatchMode::*;
 use self::OverloadedCallType::*;
 
-use hir::pat_util;
 use hir::def::Def;
 use hir::def_id::{DefId};
 use infer::InferCtxt;
@@ -288,20 +287,11 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
         }
     }
 
-    pub fn walk_fn(&mut self,
-                   decl: &hir::FnDecl,
-                   body: &hir::Expr) {
-        self.walk_arg_patterns(decl, body);
-        self.consume_expr(body);
-    }
-
-    fn walk_arg_patterns(&mut self,
-                         decl: &hir::FnDecl,
-                         body: &hir::Expr) {
-        for arg in &decl.inputs {
+    pub fn consume_body(&mut self, body: &hir::Body) {
+        for arg in &body.arguments {
             let arg_ty = return_if_err!(self.mc.infcx.node_ty(arg.pat.id));
 
-            let fn_body_scope_r = self.tcx().node_scope_region(body.id);
+            let fn_body_scope_r = self.tcx().node_scope_region(body.value.id);
             let arg_cmt = self.mc.cat_rvalue(
                 arg.id,
                 arg.pat.span,
@@ -310,6 +300,8 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
 
             self.walk_irrefutable_pat(arg_cmt, &arg.pat);
         }
+
+        self.consume_expr(&body.value);
     }
 
     fn tcx(&self) -> TyCtxt<'a, 'gcx, 'tcx> {
@@ -374,7 +366,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
         self.walk_adjustment(expr);
 
         match expr.node {
-            hir::ExprPath(..) => { }
+            hir::ExprPath(_) => { }
 
             hir::ExprType(ref subexpr, _) => {
                 self.walk_expr(&subexpr)
@@ -538,9 +530,8 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
                 }
             }
 
-            hir::ExprRepeat(ref base, ref count) => {
+            hir::ExprRepeat(ref base, _) => {
                 self.consume_expr(&base);
-                self.consume_expr(&count);
             }
 
             hir::ExprClosure(.., fn_decl_span) => {
@@ -622,7 +613,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
         match local.init {
             None => {
                 let delegate = &mut self.delegate;
-                pat_util::pat_bindings(&local.pat, |_, id, span, _| {
+                local.pat.each_binding(|_, id, span, _| {
                     delegate.decl_without_init(id, span);
                 })
             }
@@ -702,7 +693,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
         // are properly handled.
         self.walk_expr(with_expr);
 
-        fn contains_field_named(field: ty::FieldDef,
+        fn contains_field_named(field: &ty::FieldDef,
                                 fields: &[hir::Field])
                                 -> bool
         {
@@ -717,7 +708,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
     fn walk_adjustment(&mut self, expr: &hir::Expr) {
         let infcx = self.mc.infcx;
         //NOTE(@jroesch): mixed RefCell borrow causes crash
-        let adj = infcx.adjustments().get(&expr.id).map(|x| x.clone());
+        let adj = infcx.tables.borrow().adjustments.get(&expr.id).map(|x| x.clone());
         if let Some(adjustment) = adj {
             match adjustment.kind {
                 adjustment::Adjust::NeverToAny |
@@ -957,7 +948,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
         let infcx = self.mc.infcx;
         let delegate = &mut self.delegate;
         return_if_err!(mc.cat_pattern(cmt_discr.clone(), pat, |mc, cmt_pat, pat| {
-            if let PatKind::Binding(bmode, ..) = pat.node {
+            if let PatKind::Binding(bmode, def_id, ..) = pat.node {
                 debug!("binding cmt_pat={:?} pat={:?} match_mode={:?}", cmt_pat, pat, match_mode);
 
                 // pat_ty: the type of the binding being produced.
@@ -965,8 +956,8 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
 
                 // Each match binding is effectively an assignment to the
                 // binding being produced.
-                if let Ok(binding_cmt) = mc.cat_def(pat.id, pat.span, pat_ty,
-                                                    tcx.expect_def(pat.id)) {
+                let def = Def::Local(def_id);
+                if let Ok(binding_cmt) = mc.cat_def(pat.id, pat.span, pat_ty, def) {
                     delegate.mutate(pat.id, pat.span, binding_cmt, MutateMode::Init);
                 }
 
@@ -992,9 +983,16 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
         // to the above loop's visit of than the bindings that form
         // the leaves of the pattern tree structure.
         return_if_err!(mc.cat_pattern(cmt_discr, pat, |mc, cmt_pat, pat| {
-            match tcx.expect_def_or_none(pat.id) {
-                Some(Def::Variant(variant_did)) |
-                Some(Def::VariantCtor(variant_did, ..)) => {
+            let qpath = match pat.node {
+                PatKind::Path(ref qpath) |
+                PatKind::TupleStruct(ref qpath, ..) |
+                PatKind::Struct(ref qpath, ..) => qpath,
+                _ => return
+            };
+            let def = infcx.tables.borrow().qpath_def(qpath, pat.id);
+            match def {
+                Def::Variant(variant_did) |
+                Def::VariantCtor(variant_did, ..) => {
                     let enum_did = tcx.parent_def_id(variant_did).unwrap();
                     let downcast_cmt = if tcx.lookup_adt_def(enum_did).is_univariant() {
                         cmt_pat
@@ -1006,14 +1004,12 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
                     debug!("variant downcast_cmt={:?} pat={:?}", downcast_cmt, pat);
                     delegate.matched_pat(pat, downcast_cmt, match_mode);
                 }
-                Some(Def::Struct(..)) | Some(Def::StructCtor(..)) | Some(Def::Union(..)) |
-                Some(Def::TyAlias(..)) | Some(Def::AssociatedTy(..)) | Some(Def::SelfTy(..)) => {
+                Def::Struct(..) | Def::StructCtor(..) | Def::Union(..) |
+                Def::TyAlias(..) | Def::AssociatedTy(..) | Def::SelfTy(..) => {
                     debug!("struct cmt_pat={:?} pat={:?}", cmt_pat, pat);
                     delegate.matched_pat(pat, cmt_pat, match_mode);
                 }
-                None | Some(Def::Local(..)) |
-                Some(Def::Const(..)) | Some(Def::AssociatedConst(..)) => {}
-                def => bug!("unexpected definition: {:?}", def)
+                _ => {}
             }
         }));
     }

@@ -361,17 +361,14 @@ fn find_type_parameters(ty: &ast::Ty,
         types: Vec<P<ast::Ty>>,
     }
 
-    impl<'a, 'b> visit::Visitor for Visitor<'a, 'b> {
-        fn visit_ty(&mut self, ty: &ast::Ty) {
-            match ty.node {
-                ast::TyKind::Path(_, ref path) if !path.global => {
-                    if let Some(segment) = path.segments.first() {
-                        if self.ty_param_names.contains(&segment.identifier.name) {
-                            self.types.push(P(ty.clone()));
-                        }
+    impl<'a, 'b> visit::Visitor<'a> for Visitor<'a, 'b> {
+        fn visit_ty(&mut self, ty: &'a ast::Ty) {
+            if let ast::TyKind::Path(_, ref path) = ty.node {
+                if let Some(segment) = path.segments.first() {
+                    if self.ty_param_names.contains(&segment.identifier.name) {
+                        self.types.push(P(ty.clone()));
                     }
                 }
-                _ => {}
             }
 
             visit::walk_ty(self, ty)
@@ -785,12 +782,14 @@ fn find_repr_type_name(diagnostic: &Handler, type_attrs: &[ast::Attribute]) -> &
                 attr::ReprInt(attr::SignedInt(ast::IntTy::I16)) => "i16",
                 attr::ReprInt(attr::SignedInt(ast::IntTy::I32)) => "i32",
                 attr::ReprInt(attr::SignedInt(ast::IntTy::I64)) => "i64",
+                attr::ReprInt(attr::SignedInt(ast::IntTy::I128)) => "i128",
 
                 attr::ReprInt(attr::UnsignedInt(ast::UintTy::Us)) => "usize",
                 attr::ReprInt(attr::UnsignedInt(ast::UintTy::U8)) => "u8",
                 attr::ReprInt(attr::UnsignedInt(ast::UintTy::U16)) => "u16",
                 attr::ReprInt(attr::UnsignedInt(ast::UintTy::U32)) => "u32",
                 attr::ReprInt(attr::UnsignedInt(ast::UintTy::U64)) => "u64",
+                attr::ReprInt(attr::UnsignedInt(ast::UintTy::U128)) => "u128",
             }
         }
     }

@@ -16,11 +16,10 @@
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
        html_playground_url = "https://play.rust-lang.org/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![cfg_attr(stage0, feature(dotdot_in_tuple_patterns))]
 #![feature(libc)]
 #![feature(rustc_private)]
 #![feature(set_stdio)]
@@ -28,14 +27,12 @@
 #![feature(staged_api)]
 #![feature(test)]
 #![feature(unicode)]
-#![cfg_attr(stage0, feature(question_mark))]
 
 extern crate arena;
 extern crate getopts;
 extern crate libc;
 extern crate rustc;
 extern crate rustc_const_eval;
-extern crate rustc_const_math;
 extern crate rustc_data_structures;
 extern crate rustc_trans;
 extern crate rustc_driver;
@@ -47,7 +44,7 @@ extern crate serialize;
 #[macro_use] extern crate syntax;
 extern crate syntax_pos;
 extern crate test as testing;
-extern crate rustc_unicode;
+extern crate std_unicode;
 #[macro_use] extern crate log;
 extern crate rustc_errors as errors;
 
@@ -56,6 +53,9 @@ extern crate serialize as rustc_serialize; // used by deriving
 use std::collections::{BTreeMap, BTreeSet};
 use std::default::Default;
 use std::env;
+use std::fmt::Display;
+use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process;
 use std::sync::mpsc::channel;
@@ -162,10 +162,10 @@ pub fn opts() -> Vec<RustcOptGroup> {
         unstable(optmulti("Z", "",
                           "internal and debugging options (only on nightly build)", "FLAG")),
         stable(optopt("", "sysroot", "Override the system root", "PATH")),
-        stable(optopt("", "playground-url",
-                      "URL to send code snippets to, may be reset by --markdown-playground-url \
-                       or `#![doc(html_playground_url=...)]`",
-                      "URL")),
+        unstable(optopt("", "playground-url",
+                        "URL to send code snippets to, may be reset by --markdown-playground-url \
+                         or `#![doc(html_playground_url=...)]`",
+                        "URL")),
     ]
 }
 
@@ -185,7 +185,7 @@ pub fn main_args(args: &[String]) -> isize {
     let matches = match getopts::getopts(&args[1..], &all_groups) {
         Ok(m) => m,
         Err(err) => {
-            println!("{}", err);
+            print_error(err);
             return 1;
         }
     };
@@ -213,11 +213,11 @@ pub fn main_args(args: &[String]) -> isize {
     }
 
     if matches.free.is_empty() {
-        println!("expected an input file to act on");
+        print_error("missing file operand");
         return 1;
     }
     if matches.free.len() > 1 {
-        println!("only one input file may be specified");
+        print_error("too many file operands");
         return 1;
     }
     let input = &matches.free[0];
@@ -229,14 +229,10 @@ pub fn main_args(args: &[String]) -> isize {
     let externs = match parse_externs(&matches) {
         Ok(ex) => ex,
         Err(err) => {
-            println!("{}", err);
+            print_error(err);
             return 1;
         }
     };
-
-    if let Some(playground) = matches.opt_str("playground-url") {
-        html::markdown::PLAYGROUND.with(|s| { *s.borrow_mut() = Some((None, playground)); });
-    }
 
     let test_args = matches.opt_strs("test-args");
     let test_args: Vec<String> = test_args.iter()
@@ -253,7 +249,10 @@ pub fn main_args(args: &[String]) -> isize {
 
     if let Some(ref p) = css_file_extension {
         if !p.is_file() {
-            println!("{}", "--extend-css option must take a css file as input");
+            writeln!(
+                &mut io::stderr(),
+                "rustdoc: option --extend-css argument must be a file."
+            ).unwrap();
             return 1;
         }
     }
@@ -263,16 +262,18 @@ pub fn main_args(args: &[String]) -> isize {
             &matches.opt_strs("html-before-content"),
             &matches.opt_strs("html-after-content")) {
         Some(eh) => eh,
-        None => return 3
+        None => return 3,
     };
     let crate_name = matches.opt_str("crate-name");
+    let playground_url = matches.opt_str("playground-url");
+    let maybe_sysroot = matches.opt_str("sysroot").map(PathBuf::from);
 
     match (should_test, markdown_input) {
         (true, true) => {
-            return markdown::test(input, cfgs, libs, externs, test_args)
+            return markdown::test(input, cfgs, libs, externs, test_args, maybe_sysroot)
         }
         (true, false) => {
-            return test::run(input, cfgs, libs, externs, test_args, crate_name)
+            return test::run(input, cfgs, libs, externs, test_args, crate_name, maybe_sysroot)
         }
         (false, true) => return markdown::render(input,
                                                  output.unwrap_or(PathBuf::from("doc")),
@@ -287,7 +288,7 @@ pub fn main_args(args: &[String]) -> isize {
         info!("going to format");
         match output_format.as_ref().map(|s| &**s) {
             Some("html") | None => {
-                html::render::run(krate, &external_html,
+                html::render::run(krate, &external_html, playground_url,
                                   output.unwrap_or(PathBuf::from("doc")),
                                   passes.into_iter().collect(),
                                   css_file_extension,
@@ -296,15 +297,24 @@ pub fn main_args(args: &[String]) -> isize {
                 0
             }
             Some(s) => {
-                println!("unknown output format: {}", s);
+                print_error(format!("unknown output format: {}", s));
                 1
             }
         }
     });
     res.unwrap_or_else(|s| {
-        println!("input error: {}", s);
+        print_error(format!("input error: {}", s));
         1
     })
+}
+
+/// Prints an uniformised error message on the standard error output
+fn print_error<T>(error_message: T) where T: Display {
+    writeln!(
+        &mut io::stderr(),
+        "rustdoc: {}\nTry 'rustdoc --help' for more information.",
+        error_message
+    ).unwrap();
 }
 
 /// Looks inside the command line arguments to extract the relevant input format

@@ -214,6 +214,7 @@
 #![no_std]
 
 #![deny(missing_docs)]
+#![deny(missing_debug_implementations)]
 
 // Tell the compiler to link to either panic_abort or panic_unwind
 #![needs_panic_runtime]
@@ -224,7 +225,7 @@
 
 // Turn warnings into errors, but only after stage0, where it can be useful for
 // code to emit warnings during language transitions
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
 // std may use features in a platform-specific way
 #![allow(unused_features)]
@@ -249,13 +250,14 @@
 #![feature(const_fn)]
 #![feature(core_float)]
 #![feature(core_intrinsics)]
-#![cfg_attr(stage0, feature(dotdot_in_tuple_patterns))]
-#![feature(dropck_parametricity)]
+#![feature(dropck_eyepatch)]
+#![feature(exact_size_is_empty)]
 #![feature(float_extras)]
 #![feature(float_from_str_radix)]
 #![feature(fn_traits)]
 #![feature(fnbox)]
 #![feature(fused)]
+#![feature(generic_param_attrs)]
 #![feature(hashmap_hasher)]
 #![feature(heap_api)]
 #![feature(inclusive_range)]
@@ -276,7 +278,7 @@
 #![feature(panic_unwind)]
 #![feature(placement_in_syntax)]
 #![feature(prelude_import)]
-#![cfg_attr(stage0, feature(question_mark))]
+#![feature(pub_restricted)]
 #![feature(rand)]
 #![feature(raw)]
 #![feature(repr_simd)]
@@ -300,6 +302,7 @@
 #![feature(unwind_attributes)]
 #![feature(vec_push_all)]
 #![feature(zero_one)]
+#![feature(i128)]
 #![cfg_attr(test, feature(update_panic_count))]
 
 // Explicitly import the prelude. The compiler uses this same unstable attribute
@@ -324,7 +327,7 @@ extern crate collections as core_collections;
 
 #[allow(deprecated)] extern crate rand as core_rand;
 extern crate alloc;
-extern crate rustc_unicode;
+extern crate std_unicode;
 extern crate libc;
 
 // We always need an unwinder currently for backtraces
@@ -394,6 +397,9 @@ pub use core::i16;
 pub use core::i32;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::i64;
+#[unstable(feature = "i128", issue = "35118")]
+#[cfg(not(stage0))]
+pub use core::i128;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::usize;
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -421,7 +427,10 @@ pub use core_collections::string;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core_collections::vec;
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use rustc_unicode::char;
+pub use std_unicode::char;
+#[unstable(feature = "i128", issue = "35118")]
+#[cfg(not(stage0))]
+pub use core::u128;
 
 pub mod f32;
 pub mod f64;

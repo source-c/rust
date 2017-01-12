@@ -22,7 +22,7 @@ Note that if you're on Unix you should be able to execute the script directly:
 ./x.py build
 ```
 
-The script accepts commands, flags, and filters to determine what to do:
+The script accepts commands, flags, and arguments to determine what to do:
 
 * `build` - a general purpose command for compiling code. Alone `build` will
   bootstrap the entire compiler, and otherwise arguments passed indicate what to
@@ -32,7 +32,7 @@ The script accepts commands, flags, and filters to determine what to do:
   # build the whole compiler
   ./x.py build
 
-  # build the stage1 compier
+  # build the stage1 compiler
   ./x.py build --stage 1
 
   # build stage0 libstd
@@ -40,6 +40,15 @@ The script accepts commands, flags, and filters to determine what to do:
 
   # build a particular crate in stage0
   ./x.py build --stage 0 src/libtest
+  ```
+
+  If files are dirty that would normally be rebuilt from stage 0, that can be
+  overidden using `--keep-stage 0`. Using `--keep-stage n` will skip all steps
+  that belong to stage n or earlier:
+
+  ```
+  # keep old build products for stage 0 and build stage 1
+  ./x.py build --keep-stage 0 --stage 1
   ```
 
 * `test` - a command for executing unit tests. Like the `build` command this
@@ -54,7 +63,7 @@ The script accepts commands, flags, and filters to determine what to do:
   ./x.py test src/test/run-pass
 
   # execute only some tests in the run-pass test suite
-  ./x.py test src/test/run-pass --filter my-filter
+  ./x.py test src/test/run-pass --test-args substring-of-test-name
 
   # execute tests in the standard library in stage0
   ./x.py test --stage 0 src/libstd
@@ -65,17 +74,6 @@ The script accepts commands, flags, and filters to determine what to do:
 
 * `doc` - a command for building documentation. Like above can take arguments
   for what to document.
-
-If you're more used to `./configure` and `make`, however, then you can also
-configure the build system to use rustbuild instead of the old makefiles:
-
-```
-./configure --enable-rustbuild
-make
-```
-
-Afterwards the `Makefile` which is generated will have a few commands like
-`make check`, `make tidy`, etc.
 
 ## Configuring rustbuild
 
@@ -89,6 +87,13 @@ file in the same location as `config.mk`. An example of this configuration can
 be found at `src/bootstrap/config.toml.example`, and the configuration file
 can also be passed as `--config path/to/config.toml` if the build system is
 being invoked manually (via the python script).
+
+Finally, rustbuild makes use of the [gcc-rs crate] which has [its own
+method][env-vars] of configuring C compilers and C flags via environment
+variables.
+
+[gcc-rs crate]: https://github.com/alexcrichton/gcc-rs
+[env-vars]: https://github.com/alexcrichton/gcc-rs#external-configuration-via-environment-variables
 
 ## Build stages
 
@@ -110,6 +115,42 @@ compiler. What actually happens when you invoke rustbuild is:
 
 The goal of each stage is to (a) leverage Cargo as much as possible and failing
 that (b) leverage Rust as much as possible!
+
+## Incremental builds
+
+You can configure rustbuild to use incremental compilation. Because
+incremental is new and evolving rapidly, if you want to use it, it is
+recommended that you replace the snapshot with a locally installed
+nightly build of rustc. You will want to keep this up to date.
+
+To follow this course of action, first thing you will want to do is to
+install a nightly, presumably using `rustup`. You will then want to
+configure your directory to use this build, like so:
+
+```
+# configure to use local rust instead of downloding a beta.
+# `--local-rust-root` is optional here. If elided, we will
+# use whatever rustc we find on your PATH.
+> configure --enable-rustbuild --local-rust-root=~/.cargo/ --enable-local-rebuild
+```
+
+After that, you can use the `--incremental` flag to actually do
+incremental builds:
+
+```
+> ../x.py build --incremental
+```
+
+The `--incremental` flag will store incremental compilation artifacts
+in `build/<host>/stage0-incremental`. Note that we only use incremental
+compilation for the stage0 -> stage1 compilation -- this is because
+the stage1 compiler is changing, and we don't try to cache and reuse
+incremental artifacts across different versions of the compiler. For
+this reason, `--incremental` defaults to `--stage 1` (though you can
+manually select a higher stage, if you prefer).
+
+You can always drop the `--incremental` to build as normal (but you
+will still be using the local nightly as your bootstrap).
 
 ## Directory Layout
 
@@ -273,16 +314,17 @@ After that, each module in rustbuild should have enough documentation to keep
 you up and running. Some general areas that you may be interested in modifying
 are:
 
-* Adding a new build tool? Take a look at `build/step.rs` for examples of other
-  tools, as well as `build/mod.rs`.
+* Adding a new build tool? Take a look at `bootstrap/step.rs` for examples of
+  other tools.
 * Adding a new compiler crate? Look no further! Adding crates can be done by
   adding a new directory with `Cargo.toml` followed by configuring all
   `Cargo.toml` files accordingly.
 * Adding a new dependency from crates.io? We're still working on that, so hold
   off on that for now.
-* Adding a new configuration option? Take a look at `build/config.rs` or perhaps
-  `build/flags.rs` and then modify the build elsewhere to read that option.
-* Adding a sanity check? Take a look at `build/sanity.rs`.
+* Adding a new configuration option? Take a look at `bootstrap/config.rs` or
+  perhaps `bootstrap/flags.rs` and then modify the build elsewhere to read that
+  option.
+* Adding a sanity check? Take a look at `bootstrap/sanity.rs`.
 
 If you have any questions feel free to reach out on `#rust-internals` on IRC or
 open an issue in the bug tracker!

@@ -33,6 +33,8 @@ use std::u32;
 
 use serialize::{self, Encodable, Decodable, Encoder, Decoder};
 
+use rustc_i128::{u128, i128};
+
 /// An identifier contains a Name (index into the interner
 /// table) and a SyntaxContext to track renaming and
 /// macro expansion per Flatt et al., "Macros That Work Together"
@@ -47,10 +49,14 @@ impl Ident {
         Ident { name: name, ctxt: SyntaxContext::empty() }
     }
 
-   /// Maps a string to an identifier with an empty syntax context.
-   pub fn from_str(s: &str) -> Ident {
-       Ident::with_empty_ctxt(Symbol::intern(s))
-   }
+    /// Maps a string to an identifier with an empty syntax context.
+    pub fn from_str(s: &str) -> Ident {
+        Ident::with_empty_ctxt(Symbol::intern(s))
+    }
+
+    pub fn unhygienize(&self) -> Ident {
+        Ident { name: self.name, ctxt: SyntaxContext::empty() }
+    }
 }
 
 impl fmt::Debug for Ident {
@@ -107,10 +113,8 @@ pub struct LifetimeDef {
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash)]
 pub struct Path {
     pub span: Span,
-    /// A `::foo` path, is relative to the crate root rather than current
-    /// module (like paths in an import).
-    pub global: bool,
     /// The segments in the path: the things separated by `::`.
+    /// Global paths begin with `keywords::CrateRoot`.
     pub segments: Vec<PathSegment>,
 }
 
@@ -132,14 +136,21 @@ impl Path {
     pub fn from_ident(s: Span, identifier: Ident) -> Path {
         Path {
             span: s,
-            global: false,
-            segments: vec![
-                PathSegment {
-                    identifier: identifier,
-                    parameters: PathParameters::none()
-                }
-            ],
+            segments: vec![identifier.into()],
         }
+    }
+
+    pub fn default_to_global(mut self) -> Path {
+        let name = self.segments[0].identifier.name;
+        if !self.is_global() && name != "$crate" &&
+           name != keywords::SelfValue.name() && name != keywords::Super.name() {
+            self.segments.insert(0, PathSegment::crate_root());
+        }
+        self
+    }
+
+    pub fn is_global(&self) -> bool {
+        !self.segments.is_empty() && self.segments[0].identifier.name == keywords::CrateRoot.name()
     }
 }
 
@@ -156,7 +167,24 @@ pub struct PathSegment {
     /// this is more than just simple syntactic sugar; the use of
     /// parens affects the region binding rules, so we preserve the
     /// distinction.
-    pub parameters: PathParameters,
+    /// The `Option<P<..>>` wrapper is purely a size optimization;
+    /// `None` is used to represent both `Path` and `Path<>`.
+    pub parameters: Option<P<PathParameters>>,
+}
+
+impl From<Ident> for PathSegment {
+    fn from(id: Ident) -> Self {
+        PathSegment { identifier: id, parameters: None }
+    }
+}
+
+impl PathSegment {
+    pub fn crate_root() -> Self {
+        PathSegment {
+            identifier: keywords::CrateRoot.ident(),
+            parameters: None,
+        }
+    }
 }
 
 /// Parameters of a path segment.
@@ -170,79 +198,8 @@ pub enum PathParameters {
     Parenthesized(ParenthesizedParameterData),
 }
 
-impl PathParameters {
-    pub fn none() -> PathParameters {
-        PathParameters::AngleBracketed(AngleBracketedParameterData {
-            lifetimes: Vec::new(),
-            types: P::new(),
-            bindings: P::new(),
-        })
-    }
-
-    pub fn is_empty(&self) -> bool {
-        match *self {
-            PathParameters::AngleBracketed(ref data) => data.is_empty(),
-
-            // Even if the user supplied no types, something like
-            // `X()` is equivalent to `X<(),()>`.
-            PathParameters::Parenthesized(..) => false,
-        }
-    }
-
-    pub fn has_lifetimes(&self) -> bool {
-        match *self {
-            PathParameters::AngleBracketed(ref data) => !data.lifetimes.is_empty(),
-            PathParameters::Parenthesized(_) => false,
-        }
-    }
-
-    pub fn has_types(&self) -> bool {
-        match *self {
-            PathParameters::AngleBracketed(ref data) => !data.types.is_empty(),
-            PathParameters::Parenthesized(..) => true,
-        }
-    }
-
-    /// Returns the types that the user wrote. Note that these do not necessarily map to the type
-    /// parameters in the parenthesized case.
-    pub fn types(&self) -> Vec<&P<Ty>> {
-        match *self {
-            PathParameters::AngleBracketed(ref data) => {
-                data.types.iter().collect()
-            }
-            PathParameters::Parenthesized(ref data) => {
-                data.inputs.iter()
-                    .chain(data.output.iter())
-                    .collect()
-            }
-        }
-    }
-
-    pub fn lifetimes(&self) -> Vec<&Lifetime> {
-        match *self {
-            PathParameters::AngleBracketed(ref data) => {
-                data.lifetimes.iter().collect()
-            }
-            PathParameters::Parenthesized(_) => {
-                Vec::new()
-            }
-        }
-    }
-
-    pub fn bindings(&self) -> Vec<&TypeBinding> {
-        match *self {
-            PathParameters::AngleBracketed(ref data) => {
-                data.bindings.iter().collect()
-            }
-            PathParameters::Parenthesized(_) => {
-                Vec::new()
-            }
-        }
-    }
-}
-
 /// A path like `Foo<'a, T>`
-#[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug, Default)]
 pub struct AngleBracketedParameterData {
     /// The lifetime parameters for this path segment.
     pub lifetimes: Vec<Lifetime>,
@@ -254,9 +211,10 @@ pub struct AngleBracketedParameterData {
     pub bindings: P<[TypeBinding]>,
 }
 
-impl AngleBracketedParameterData {
-    fn is_empty(&self) -> bool {
-        self.lifetimes.is_empty() && self.types.is_empty() && self.bindings.is_empty()
+impl Into<Option<P<PathParameters>>> for AngleBracketedParameterData {
+    fn into(self) -> Option<P<PathParameters>> {
+        let empty = self.lifetimes.is_empty() && self.types.is_empty() && self.bindings.is_empty();
+        if empty { None } else { Some(P(PathParameters::AngleBracketed(self))) }
     }
 }
 
@@ -1106,7 +1064,7 @@ pub enum LitKind {
     /// A character literal (`'a'`)
     Char(char),
     /// An integer literal (`1`)
-    Int(u64, LitIntType),
+    Int(u128, LitIntType),
     /// A float literal (`1f64` or `1E10f64`)
     Float(Symbol, FloatTy),
     /// A float literal without a suffix (`1.0 or 1.0E10`)
@@ -1215,6 +1173,7 @@ pub enum IntTy {
     I16,
     I32,
     I64,
+    I128,
 }
 
 impl fmt::Debug for IntTy {
@@ -1236,24 +1195,16 @@ impl IntTy {
             IntTy::I8 => "i8",
             IntTy::I16 => "i16",
             IntTy::I32 => "i32",
-            IntTy::I64 => "i64"
+            IntTy::I64 => "i64",
+            IntTy::I128 => "i128",
         }
     }
 
-    pub fn val_to_string(&self, val: i64) -> String {
-        // cast to a u64 so we can correctly print INT64_MIN. All integral types
-        // are parsed as u64, so we wouldn't want to print an extra negative
+    pub fn val_to_string(&self, val: i128) -> String {
+        // cast to a u128 so we can correctly print INT128_MIN. All integral types
+        // are parsed as u128, so we wouldn't want to print an extra negative
         // sign.
-        format!("{}{}", val as u64, self.ty_to_string())
-    }
-
-    pub fn ty_max(&self) -> u64 {
-        match *self {
-            IntTy::I8 => 0x80,
-            IntTy::I16 => 0x8000,
-            IntTy::Is | IntTy::I32 => 0x80000000, // FIXME: actually ni about Is
-            IntTy::I64 => 0x8000000000000000
-        }
+        format!("{}{}", val as u128, self.ty_to_string())
     }
 
     pub fn bit_width(&self) -> Option<usize> {
@@ -1263,6 +1214,7 @@ impl IntTy {
             IntTy::I16 => 16,
             IntTy::I32 => 32,
             IntTy::I64 => 64,
+            IntTy::I128 => 128,
         })
     }
 }
@@ -1274,6 +1226,7 @@ pub enum UintTy {
     U16,
     U32,
     U64,
+    U128,
 }
 
 impl UintTy {
@@ -1283,21 +1236,13 @@ impl UintTy {
             UintTy::U8 => "u8",
             UintTy::U16 => "u16",
             UintTy::U32 => "u32",
-            UintTy::U64 => "u64"
+            UintTy::U64 => "u64",
+            UintTy::U128 => "u128",
         }
     }
 
-    pub fn val_to_string(&self, val: u64) -> String {
+    pub fn val_to_string(&self, val: u128) -> String {
         format!("{}{}", val, self.ty_to_string())
-    }
-
-    pub fn ty_max(&self) -> u64 {
-        match *self {
-            UintTy::U8 => 0xff,
-            UintTy::U16 => 0xffff,
-            UintTy::Us | UintTy::U32 => 0xffffffff, // FIXME: actually ni about Us
-            UintTy::U64 => 0xffffffffffffffff
-        }
     }
 
     pub fn bit_width(&self) -> Option<usize> {
@@ -1307,6 +1252,7 @@ impl UintTy {
             UintTy::U16 => 16,
             UintTy::U32 => 32,
             UintTy::U64 => 64,
+            UintTy::U128 => 128,
         })
     }
 }
@@ -1515,12 +1461,13 @@ impl Arg {
     }
 
     pub fn from_self(eself: ExplicitSelf, eself_ident: SpannedIdent) -> Arg {
+        let span = mk_sp(eself.span.lo, eself_ident.span.hi);
         let infer_ty = P(Ty {
             id: DUMMY_NODE_ID,
             node: TyKind::ImplicitSelf,
-            span: DUMMY_SP,
+            span: span,
         });
-        let arg = |mutbl, ty, span| Arg {
+        let arg = |mutbl, ty| Arg {
             pat: P(Pat {
                 id: DUMMY_NODE_ID,
                 node: PatKind::Ident(BindingMode::ByValue(mutbl), eself_ident, None),
@@ -1530,15 +1477,13 @@ impl Arg {
             id: DUMMY_NODE_ID,
         };
         match eself.node {
-            SelfKind::Explicit(ty, mutbl) => {
-                arg(mutbl, ty, mk_sp(eself.span.lo, eself_ident.span.hi))
-            }
-            SelfKind::Value(mutbl) => arg(mutbl, infer_ty, eself.span),
+            SelfKind::Explicit(ty, mutbl) => arg(mutbl, ty),
+            SelfKind::Value(mutbl) => arg(mutbl, infer_ty),
             SelfKind::Region(lt, mutbl) => arg(Mutability::Immutable, P(Ty {
                 id: DUMMY_NODE_ID,
                 node: TyKind::Rptr(lt, MutTy { ty: infer_ty, mutbl: mutbl }),
-                span: DUMMY_SP,
-            }), eself.span),
+                span: span,
+            })),
         }
     }
 }
@@ -1822,10 +1767,6 @@ impl VariantData {
     }
 }
 
-/*
-  FIXME (#3300): Should allow items to be anonymous. Right now
-  we just use dummy names for anon items.
- */
 /// An item
 ///
 /// The name might be a dummy name in case of anonymous items
@@ -1968,8 +1909,6 @@ pub struct MacroDef {
     pub attrs: Vec<Attribute>,
     pub id: NodeId,
     pub span: Span,
-    pub imported_from: Option<Ident>,
-    pub allow_internal_unstable: bool,
     pub body: Vec<TokenTree>,
 }
 

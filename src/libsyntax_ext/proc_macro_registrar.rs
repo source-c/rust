@@ -17,7 +17,6 @@ use syntax::ext::base::ExtCtxt;
 use syntax::ext::build::AstBuilder;
 use syntax::ext::expand::ExpansionConfig;
 use syntax::parse::ParseSess;
-use syntax::feature_gate::Features;
 use syntax::fold::Folder;
 use syntax::ptr::P;
 use syntax::symbol::Symbol;
@@ -47,35 +46,35 @@ pub fn modify(sess: &ParseSess,
               is_proc_macro_crate: bool,
               is_test_crate: bool,
               num_crate_types: usize,
-              handler: &errors::Handler,
-              features: &Features) -> ast::Crate {
+              handler: &errors::Handler) -> ast::Crate {
     let ecfg = ExpansionConfig::default("proc_macro".to_string());
     let mut cx = ExtCtxt::new(sess, ecfg, resolver);
 
-    let mut collect = CollectCustomDerives {
-        derives: Vec::new(),
-        in_root: true,
-        handler: handler,
-        is_proc_macro_crate: is_proc_macro_crate,
-        is_test_crate: is_test_crate,
+    let derives = {
+        let mut collect = CollectCustomDerives {
+            derives: Vec::new(),
+            in_root: true,
+            handler: handler,
+            is_proc_macro_crate: is_proc_macro_crate,
+            is_test_crate: is_test_crate,
+        };
+        visit::walk_crate(&mut collect, &krate);
+        collect.derives
     };
-    visit::walk_crate(&mut collect, &krate);
 
     if !is_proc_macro_crate {
         return krate
-    } else if !features.proc_macro {
-        let mut err = handler.struct_err("the `proc-macro` crate type is \
-                                          experimental");
-        err.help("add #![feature(proc_macro)] to the crate attributes to \
-                  enable");
-        err.emit();
     }
 
     if num_crate_types > 1 {
         handler.err("cannot mix `proc-macro` crate type with others");
     }
 
-    krate.module.items.push(mk_registrar(&mut cx, &collect.derives));
+    if is_test_crate {
+        return krate;
+    }
+
+    krate.module.items.push(mk_registrar(&mut cx, &derives));
 
     if krate.exported_macros.len() > 0 {
         handler.err("cannot export macro_rules! macros from a `proc-macro` \
@@ -99,8 +98,10 @@ impl<'a> CollectCustomDerives<'a> {
     }
 }
 
-impl<'a> Visitor for CollectCustomDerives<'a> {
-    fn visit_item(&mut self, item: &ast::Item) {
+impl<'a> Visitor<'a> for CollectCustomDerives<'a> {
+    fn visit_item(&mut self, item: &'a ast::Item) {
+        let mut attrs = item.attrs.iter().filter(|a| a.check_name("proc_macro_derive"));
+
         // First up, make sure we're checking a bare function. If we're not then
         // we're just not interested in this item.
         //
@@ -110,10 +111,7 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
             ast::ItemKind::Fn(..) => {}
             _ => {
                 // Check for invalid use of proc_macro_derive
-                let attr = item.attrs.iter()
-                    .filter(|a| a.check_name("proc_macro_derive"))
-                    .next();
-                if let Some(attr) = attr {
+                if let Some(attr) = attrs.next() {
                     self.handler.span_err(attr.span(),
                                           "the `#[proc_macro_derive]` \
                                           attribute may only be used \
@@ -125,8 +123,6 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
             }
         }
 
-        let mut attrs = item.attrs.iter()
-                            .filter(|a| a.check_name("proc_macro_derive"));
         let attr = match attrs.next() {
             Some(attr) => attr,
             None => {
@@ -141,8 +137,6 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
         }
 
         if self.is_test_crate {
-            self.handler.span_err(attr.span(),
-                                  "`--test` cannot be used with proc-macro crates");
             return;
         }
 
@@ -222,7 +216,7 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
             Vec::new()
         };
 
-        if self.in_root {
+        if self.in_root && item.vis == ast::Visibility::Public {
             self.derives.push(CustomDerive {
                 span: item.span,
                 trait_name: trait_name,
@@ -230,15 +224,19 @@ impl<'a> Visitor for CollectCustomDerives<'a> {
                 attrs: proc_attrs,
             });
         } else {
-            let msg = "functions tagged with `#[proc_macro_derive]` must \
-                       currently reside in the root of the crate";
+            let msg = if !self.in_root {
+                "functions tagged with `#[proc_macro_derive]` must \
+                 currently reside in the root of the crate"
+            } else {
+                "functions tagged with `#[proc_macro_derive]` must be `pub`"
+            };
             self.handler.span_err(item.span, msg);
         }
 
         visit::walk_item(self, item);
     }
 
-    fn visit_mod(&mut self, m: &ast::Mod, _s: Span, id: NodeId) {
+    fn visit_mod(&mut self, m: &'a ast::Mod, _s: Span, id: NodeId) {
         let mut prev_in_root = self.in_root;
         if id != ast::CRATE_NODE_ID {
             prev_in_root = mem::replace(&mut self.in_root, false);

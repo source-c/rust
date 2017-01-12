@@ -12,7 +12,7 @@ use std::panic;
 
 use errors::FatalError;
 use proc_macro::{TokenStream, __internal};
-use syntax::ast::{self, ItemKind, Attribute};
+use syntax::ast::{self, ItemKind, Attribute, Mac};
 use syntax::attr::{mark_used, mark_known};
 use syntax::codemap::Span;
 use syntax::ext::base::*;
@@ -21,13 +21,15 @@ use syntax::visit::Visitor;
 
 struct MarkAttrs<'a>(&'a [ast::Name]);
 
-impl<'a> Visitor for MarkAttrs<'a> {
+impl<'a> Visitor<'a> for MarkAttrs<'a> {
     fn visit_attribute(&mut self, attr: &Attribute) {
         if self.0.contains(&attr.name()) {
             mark_used(attr);
             mark_known(attr);
         }
     }
+
+    fn visit_mac(&mut self, _mac: &Mac) {}
 }
 
 pub struct CustomDerive {
@@ -101,4 +103,3 @@ impl MultiItemModifier for CustomDerive {
         res
     }
 }
-

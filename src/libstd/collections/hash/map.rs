@@ -371,9 +371,9 @@ fn search_hashed<K, V, M, F>(table: M, hash: SafeHash, mut is_match: F) -> Inter
         return InternalEntry::TableIsEmpty;
     }
 
-    let size = table.size() as isize;
+    let size = table.size();
     let mut probe = Bucket::new(table, hash);
-    let ib = probe.index() as isize;
+    let mut displacement = 0;
 
     loop {
         let full = match probe.peek() {
@@ -387,15 +387,15 @@ fn search_hashed<K, V, M, F>(table: M, hash: SafeHash, mut is_match: F) -> Inter
             Full(bucket) => bucket,
         };
 
-        let robin_ib = full.index() as isize - full.displacement() as isize;
+        let probe_displacement = full.displacement();
 
-        if ib < robin_ib {
+        if probe_displacement < displacement {
             // Found a luckier bucket than me.
             // We can finish the search early if we hit any bucket
             // with a lower distance to initial bucket than we've probed.
             return InternalEntry::Vacant {
                 hash: hash,
-                elem: NeqElem(full, robin_ib as usize),
+                elem: NeqElem(full, probe_displacement),
             };
         }
 
@@ -406,9 +406,9 @@ fn search_hashed<K, V, M, F>(table: M, hash: SafeHash, mut is_match: F) -> Inter
                 return InternalEntry::Occupied { elem: full };
             }
         }
-
+        displacement += 1;
         probe = full.next();
-        debug_assert!(probe.index() as isize != ib + size + 1);
+        debug_assert!(displacement <= size);
     }
 }
 
@@ -431,12 +431,11 @@ fn pop_internal<K, V>(starting_bucket: FullBucketMut<K, V>) -> (K, V) {
 }
 
 /// Perform robin hood bucket stealing at the given `bucket`. You must
-/// also pass the position of that bucket's initial bucket so we don't have
-/// to recalculate it.
+/// also pass that bucket's displacement so we don't have to recalculate it.
 ///
 /// `hash`, `k`, and `v` are the elements to "robin hood" into the hashtable.
 fn robin_hood<'a, K: 'a, V: 'a>(bucket: FullBucketMut<'a, K, V>,
-                                mut ib: usize,
+                                mut displacement: usize,
                                 mut hash: SafeHash,
                                 mut key: K,
                                 mut val: V)
@@ -457,6 +456,7 @@ fn robin_hood<'a, K: 'a, V: 'a>(bucket: FullBucketMut<'a, K, V>,
         val = old_val;
 
         loop {
+            displacement += 1;
             let probe = bucket.next();
             debug_assert!(probe.index() != idx_end);
 
@@ -476,13 +476,13 @@ fn robin_hood<'a, K: 'a, V: 'a>(bucket: FullBucketMut<'a, K, V>,
                 Full(bucket) => bucket,
             };
 
-            let probe_ib = full_bucket.index() - full_bucket.displacement();
+            let probe_displacement = full_bucket.displacement();
 
             bucket = full_bucket;
 
             // Robin hood! Steal the spot.
-            if ib < probe_ib {
-                ib = probe_ib;
+            if probe_displacement < displacement {
+                displacement = probe_displacement;
                 break;
             }
         }
@@ -520,13 +520,16 @@ impl<K, V, S> HashMap<K, V, S>
         search_hashed(&mut self.table, hash, |k| q.eq(k.borrow()))
     }
 
-    // The caller should ensure that invariants by Robin Hood Hashing hold.
+    // The caller should ensure that invariants by Robin Hood Hashing hold
+    // and that there's space in the underlying table.
     fn insert_hashed_ordered(&mut self, hash: SafeHash, k: K, v: V) {
         let raw_cap = self.raw_capacity();
         let mut buckets = Bucket::new(&mut self.table, hash);
-        let ib = buckets.index();
+        // note that buckets.index() keeps increasing
+        // even if the pointer wraps back to the first bucket.
+        let limit_bucket = buckets.index() + raw_cap;
 
-        while buckets.index() != ib + raw_cap {
+        loop {
             // We don't need to compare hashes for value swap.
             // Not even DIBs for Robin Hood.
             buckets = match buckets.peek() {
@@ -537,8 +540,8 @@ impl<K, V, S> HashMap<K, V, S>
                 Full(b) => b.into_bucket(),
             };
             buckets.next();
+            debug_assert!(buckets.index() < limit_bucket);
         }
-        panic!("Internal HashMap error: Out of space.");
     }
 }
 
@@ -1273,6 +1276,15 @@ impl<'a, K, V> Clone for Iter<'a, K, V> {
     }
 }
 
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl<'a, K: Debug, V: Debug> fmt::Debug for Iter<'a, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list()
+            .entries(self.clone())
+            .finish()
+    }
+}
+
 /// HashMap mutable values iterator.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct IterMut<'a, K: 'a, V: 'a> {
@@ -1282,7 +1294,7 @@ pub struct IterMut<'a, K: 'a, V: 'a> {
 /// HashMap move iterator.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct IntoIter<K, V> {
-    inner: table::IntoIter<K, V>,
+    pub(super) inner: table::IntoIter<K, V>,
 }
 
 /// HashMap keys iterator.
@@ -1296,6 +1308,15 @@ pub struct Keys<'a, K: 'a, V: 'a> {
 impl<'a, K, V> Clone for Keys<'a, K, V> {
     fn clone(&self) -> Keys<'a, K, V> {
         Keys { inner: self.inner.clone() }
+    }
+}
+
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl<'a, K: Debug, V: Debug> fmt::Debug for Keys<'a, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list()
+            .entries(self.clone())
+            .finish()
     }
 }
 
@@ -1313,10 +1334,19 @@ impl<'a, K, V> Clone for Values<'a, K, V> {
     }
 }
 
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl<'a, K: Debug, V: Debug> fmt::Debug for Values<'a, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list()
+            .entries(self.clone())
+            .finish()
+    }
+}
+
 /// HashMap drain iterator.
 #[stable(feature = "drain", since = "1.6.0")]
 pub struct Drain<'a, K: 'a, V: 'a> {
-    inner: table::Drain<'a, K, V>,
+    pub(super) inner: table::Drain<'a, K, V>,
 }
 
 /// Mutable HashMap values iterator.
@@ -1554,6 +1584,18 @@ impl<'a, K, V> ExactSizeIterator for IterMut<'a, K, V> {
 #[unstable(feature = "fused", issue = "35602")]
 impl<'a, K, V> FusedIterator for IterMut<'a, K, V> {}
 
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl<'a, K, V> fmt::Debug for IterMut<'a, K, V>
+    where K: fmt::Debug,
+          V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list()
+            .entries(self.inner.iter())
+            .finish()
+    }
+}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<K, V> Iterator for IntoIter<K, V> {
     type Item = (K, V);
@@ -1576,6 +1618,15 @@ impl<K, V> ExactSizeIterator for IntoIter<K, V> {
 }
 #[unstable(feature = "fused", issue = "35602")]
 impl<K, V> FusedIterator for IntoIter<K, V> {}
+
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl<K: Debug, V: Debug> fmt::Debug for IntoIter<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list()
+            .entries(self.inner.iter())
+            .finish()
+    }
+}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, K, V> Iterator for Keys<'a, K, V> {
@@ -1646,6 +1697,18 @@ impl<'a, K, V> ExactSizeIterator for ValuesMut<'a, K, V> {
 #[unstable(feature = "fused", issue = "35602")]
 impl<'a, K, V> FusedIterator for ValuesMut<'a, K, V> {}
 
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl<'a, K, V> fmt::Debug for ValuesMut<'a, K, V>
+    where K: fmt::Debug,
+          V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list()
+            .entries(self.inner.inner.iter())
+            .finish()
+    }
+}
+
 #[stable(feature = "drain", since = "1.6.0")]
 impl<'a, K, V> Iterator for Drain<'a, K, V> {
     type Item = (K, V);
@@ -1668,6 +1731,18 @@ impl<'a, K, V> ExactSizeIterator for Drain<'a, K, V> {
 }
 #[unstable(feature = "fused", issue = "35602")]
 impl<'a, K, V> FusedIterator for Drain<'a, K, V> {}
+
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl<'a, K, V> fmt::Debug for Drain<'a, K, V>
+    where K: fmt::Debug,
+          V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list()
+            .entries(self.inner.iter())
+            .finish()
+    }
+}
 
 impl<'a, K, V> Entry<'a, K, V> {
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -1959,7 +2034,7 @@ impl<'a, K: 'a, V: 'a> VacantEntry<'a, K, V> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn insert(self, value: V) -> &'a mut V {
         match self.elem {
-            NeqElem(bucket, ib) => robin_hood(bucket, ib, self.hash, self.key, value),
+            NeqElem(bucket, disp) => robin_hood(bucket, disp, self.hash, self.key, value),
             NoElem(bucket) => bucket.put(self.hash, self.key, value).into_mut_refs().1,
         }
     }
@@ -1971,10 +2046,8 @@ impl<K, V, S> FromIterator<(K, V)> for HashMap<K, V, S>
           S: BuildHasher + Default
 {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> HashMap<K, V, S> {
-        let iterator = iter.into_iter();
-        let lower = iterator.size_hint().0;
-        let mut map = HashMap::with_capacity_and_hasher(lower, Default::default());
-        map.extend(iterator);
+        let mut map = HashMap::with_hasher(Default::default());
+        map.extend(iter);
         map
     }
 }
@@ -1985,6 +2058,17 @@ impl<K, V, S> Extend<(K, V)> for HashMap<K, V, S>
           S: BuildHasher
 {
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        // Keys may be already present or show multiple times in the iterator.
+        // Reserve the entire hint lower bound if the map is empty.
+        // Otherwise reserve half the hint (rounded up), so the map
+        // will only resize twice in the worst case.
+        let iter = iter.into_iter();
+        let reserve = if self.is_empty() {
+            iter.size_hint().0
+        } else {
+            (iter.size_hint().0 + 1) / 2
+        };
+        self.reserve(reserve);
         for (k, v) in iter {
             self.insert(k, v);
         }
@@ -2105,6 +2189,10 @@ impl DefaultHasher {
 
 #[stable(feature = "hashmap_default_hasher", since = "1.13.0")]
 impl Default for DefaultHasher {
+    /// Creates a new `DefaultHasher` using [`DefaultHasher::new`]. See
+    /// [`DefaultHasher::new`] documentation for more information.
+    ///
+    /// [`DefaultHasher::new`]: #method.new
     fn default() -> DefaultHasher {
         DefaultHasher::new()
     }
@@ -2129,6 +2217,13 @@ impl Default for RandomState {
     #[inline]
     fn default() -> RandomState {
         RandomState::new()
+    }
+}
+
+#[stable(feature = "std_debug", since = "1.15.0")]
+impl fmt::Debug for RandomState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("RandomState { .. }")
     }
 }
 

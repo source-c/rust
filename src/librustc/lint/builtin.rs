@@ -71,6 +71,12 @@ declare_lint! {
 }
 
 declare_lint! {
+    pub UNREACHABLE_PATTERNS,
+    Warn,
+    "detects unreachable patterns"
+}
+
+declare_lint! {
     pub WARNINGS,
     Warn,
     "mass-change the level for lints which produce warnings"
@@ -211,6 +217,18 @@ declare_lint! {
      not named `mod.rs`"
 }
 
+declare_lint! {
+    pub LEGACY_IMPORTS,
+    Warn,
+    "detects names that resolve to ambiguous glob imports with RFC 1560"
+}
+
+declare_lint! {
+    pub DEPRECATED,
+    Warn,
+    "detects use of deprecated items"
+}
+
 /// Does nothing as a lint pass, but registers some `Lint`s
 /// which are used by other parts of the compiler.
 #[derive(Copy, Clone)]
@@ -227,6 +245,7 @@ impl LintPass for HardwiredLints {
             UNUSED_ASSIGNMENTS,
             DEAD_CODE,
             UNREACHABLE_CODE,
+            UNREACHABLE_PATTERNS,
             WARNINGS,
             UNUSED_FEATURES,
             STABLE_FEATURES,
@@ -250,9 +269,11 @@ impl LintPass for HardwiredLints {
             SAFE_EXTERN_STATICS,
             PATTERNS_IN_FNS_WITHOUT_BODY,
             EXTRA_REQUIREMENT_IN_IMPL,
-            LEGACY_DIRECTORY_OWNERSHIP
+            LEGACY_DIRECTORY_OWNERSHIP,
+            LEGACY_IMPORTS,
+            DEPRECATED
         )
     }
 }
 
-impl LateLintPass for HardwiredLints {}
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for HardwiredLints {}

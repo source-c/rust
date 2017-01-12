@@ -21,7 +21,7 @@ use self::ScopeChain::*;
 use dep_graph::DepNode;
 use hir::map::Map;
 use session::Session;
-use hir::def::{Def, DefMap};
+use hir::def::Def;
 use hir::def_id::DefId;
 use middle::region;
 use ty;
@@ -33,8 +33,7 @@ use util::nodemap::NodeMap;
 
 use rustc_data_structures::fx::FxHashSet;
 use hir;
-use hir::print::lifetime_to_string;
-use hir::intravisit::{self, Visitor, FnKind};
+use hir::intravisit::{self, Visitor, FnKind, NestedVisitorMap};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable, Debug)]
 pub enum DefRegion {
@@ -65,7 +64,6 @@ struct LifetimeContext<'a, 'tcx: 'a> {
     hir_map: &'a Map<'tcx>,
     map: &'a mut NamedRegionMap,
     scope: Scope<'a>,
-    def_map: &'a DefMap,
     // Deep breath. Our representation for poly trait refs contains a single
     // binder and thus we only allow a single level of quantification. However,
     // the syntax of Rust permits quantification in two places, e.g., `T: for <'a> Foo<'a>`
@@ -109,8 +107,7 @@ type Scope<'a> = &'a ScopeChain<'a>;
 static ROOT_SCOPE: ScopeChain<'static> = RootScope;
 
 pub fn krate(sess: &Session,
-             hir_map: &Map,
-             def_map: &DefMap)
+             hir_map: &Map)
              -> Result<NamedRegionMap, usize> {
     let _task = hir_map.dep_graph.in_task(DepNode::ResolveLifetimes);
     let krate = hir_map.krate();
@@ -124,7 +121,6 @@ pub fn krate(sess: &Session,
             hir_map: hir_map,
             map: &mut map,
             scope: &ROOT_SCOPE,
-            def_map: def_map,
             trait_ref_hack: false,
             labels_in_fn: vec![],
         }, krate);
@@ -135,8 +131,8 @@ pub fn krate(sess: &Session,
 impl<'a, 'tcx> Visitor<'tcx> for LifetimeContext<'a, 'tcx> {
     // Override the nested functions -- lifetimes follow lexical scope,
     // so it's convenient to walk the tree in lexical order.
-    fn nested_visit_map(&mut self) -> Option<&hir::map::Map<'tcx>> {
-        Some(&self.hir_map)
+    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'tcx> {
+        NestedVisitorMap::All(&self.hir_map)
     }
 
     fn visit_item(&mut self, item: &'tcx hir::Item) {
@@ -151,7 +147,7 @@ impl<'a, 'tcx> Visitor<'tcx> for LifetimeContext<'a, 'tcx> {
                     intravisit::walk_item(this, item);
                 }
                 hir::ItemExternCrate(_) |
-                hir::ItemUse(_) |
+                hir::ItemUse(..) |
                 hir::ItemMod(..) |
                 hir::ItemDefaultImpl(..) |
                 hir::ItemForeignMod(..) |
@@ -193,7 +189,7 @@ impl<'a, 'tcx> Visitor<'tcx> for LifetimeContext<'a, 'tcx> {
         // Items always introduce a new root scope
         self.with(RootScope, |_, this| {
             match item.node {
-                hir::ForeignItemFn(ref decl, ref generics) => {
+                hir::ForeignItemFn(ref decl, _, ref generics) => {
                     this.visit_early_late(item.id, decl, generics, |this| {
                         intravisit::walk_foreign_item(this, item);
                     })
@@ -209,7 +205,7 @@ impl<'a, 'tcx> Visitor<'tcx> for LifetimeContext<'a, 'tcx> {
     }
 
     fn visit_fn(&mut self, fk: FnKind<'tcx>, decl: &'tcx hir::FnDecl,
-                b: &'tcx hir::Expr, s: Span, fn_id: ast::NodeId) {
+                b: hir::BodyId, s: Span, fn_id: ast::NodeId) {
         match fk {
             FnKind::ItemFn(_, generics, ..) => {
                 self.visit_early_late(fn_id,decl, generics, |this| {
@@ -244,11 +240,11 @@ impl<'a, 'tcx> Visitor<'tcx> for LifetimeContext<'a, 'tcx> {
                     intravisit::walk_ty(this, ty);
                 });
             }
-            hir::TyPath(None, ref path) => {
+            hir::TyPath(hir::QPath::Resolved(None, ref path)) => {
                 // if this path references a trait, then this will resolve to
                 // a trait ref, which introduces a binding scope.
-                match self.def_map.get(&ty.id).map(|d| (d.base_def, d.depth)) {
-                    Some((Def::Trait(..), 0)) => {
+                match path.def {
+                    Def::Trait(..) => {
                         self.with(LateScope(&[], self.scope), |_, this| {
                             this.visit_path(path, ty.id);
                         });
@@ -269,7 +265,8 @@ impl<'a, 'tcx> Visitor<'tcx> for LifetimeContext<'a, 'tcx> {
         // methods in an impl can reuse label names.
         let saved = replace(&mut self.labels_in_fn, vec![]);
 
-        if let hir::MethodTraitItem(ref sig, None) = trait_item.node {
+        if let hir::TraitItemKind::Method(ref sig, hir::TraitMethod::Required(_)) =
+                trait_item.node {
             self.visit_early_late(
                 trait_item.id,
                 &sig.decl, &sig.generics,
@@ -410,7 +407,7 @@ fn signal_shadowing_problem(sess: &Session, name: ast::Name, orig: Original, sha
 
 // Adds all labels in `b` to `ctxt.labels_in_fn`, signalling a warning
 // if one of the label shadows a lifetime or another label.
-fn extract_labels(ctxt: &mut LifetimeContext, b: &hir::Expr) {
+fn extract_labels(ctxt: &mut LifetimeContext, b: hir::BodyId) {
     struct GatherLabels<'a> {
         sess: &'a Session,
         scope: Scope<'a>,
@@ -422,10 +419,14 @@ fn extract_labels(ctxt: &mut LifetimeContext, b: &hir::Expr) {
         scope: ctxt.scope,
         labels_in_fn: &mut ctxt.labels_in_fn,
     };
-    gather.visit_expr(b);
+    gather.visit_body(ctxt.hir_map.body(b));
     return;
 
     impl<'v, 'a> Visitor<'v> for GatherLabels<'a> {
+        fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
+            NestedVisitorMap::None
+        }
+
         fn visit_expr(&mut self, ex: &'v hir::Expr) {
             // do not recurse into closures defined in the block
             // since they are treated as separate fns from the POV of
@@ -500,7 +501,7 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
     fn add_scope_and_walk_fn(&mut self,
                              fk: FnKind<'tcx>,
                              fd: &'tcx hir::FnDecl,
-                             fb: &'tcx hir::Expr,
+                             fb: hir::BodyId,
                              _span: Span,
                              fn_id: ast::NodeId) {
         match fk {
@@ -521,8 +522,8 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
         // `self.labels_in_fn`.
         extract_labels(self, fb);
 
-        self.with(FnScope { fn_id: fn_id, body_id: fb.id, s: self.scope },
-                  |_old_scope, this| this.visit_expr(fb))
+        self.with(FnScope { fn_id: fn_id, body_id: fb.node_id, s: self.scope },
+                  |_old_scope, this| this.visit_nested_body(fb))
     }
 
     // FIXME(#37666) this works around a limitation in the region inferencer
@@ -541,7 +542,6 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
             hir_map: hir_map,
             map: *map,
             scope: &wrap_scope,
-            def_map: self.def_map,
             trait_ref_hack: self.trait_ref_hack,
             labels_in_fn: self.labels_in_fn.clone(),
         };
@@ -821,9 +821,8 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
                        probably a bug in syntax::fold");
         }
 
-        debug!("lifetime_ref={:?} id={:?} resolved to {:?} span={:?}",
-               lifetime_to_string(lifetime_ref),
-               lifetime_ref.id,
+        debug!("{} resolved to {:?} span={:?}",
+               self.hir_map.node_to_string(lifetime_ref.id),
                def,
                self.sess.codemap().span_to_string(lifetime_ref.span));
         self.map.defs.insert(lifetime_ref.id, def);
@@ -860,8 +859,8 @@ fn insert_late_bound_lifetimes(map: &mut NamedRegionMap,
     debug!("insert_late_bound_lifetimes(decl={:?}, generics={:?})", decl, generics);
 
     let mut constrained_by_input = ConstrainedCollector { regions: FxHashSet() };
-    for arg in &decl.inputs {
-        constrained_by_input.visit_ty(&arg.ty);
+    for arg_ty in &decl.inputs {
+        constrained_by_input.visit_ty(arg_ty);
     }
 
     let mut appears_in_output = AllCollector {
@@ -942,15 +941,20 @@ fn insert_late_bound_lifetimes(map: &mut NamedRegionMap,
     }
 
     impl<'v> Visitor<'v> for ConstrainedCollector {
+        fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
+            NestedVisitorMap::None
+        }
+
         fn visit_ty(&mut self, ty: &'v hir::Ty) {
             match ty.node {
-                hir::TyPath(Some(_), _) => {
+                hir::TyPath(hir::QPath::Resolved(Some(_), _)) |
+                hir::TyPath(hir::QPath::TypeRelative(..)) => {
                     // ignore lifetimes appearing in associated type
                     // projections, as they are not *constrained*
                     // (defined above)
                 }
 
-                hir::TyPath(None, ref path) => {
+                hir::TyPath(hir::QPath::Resolved(None, ref path)) => {
                     // consider only the lifetimes on the final
                     // segment; I am not sure it's even currently
                     // valid to have them elsewhere, but even if it
@@ -978,6 +982,10 @@ fn insert_late_bound_lifetimes(map: &mut NamedRegionMap,
     }
 
     impl<'v> Visitor<'v> for AllCollector {
+        fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
+            NestedVisitorMap::None
+        }
+
         fn visit_lifetime(&mut self, lifetime_ref: &'v hir::Lifetime) {
             self.regions.insert(lifetime_ref.name);
         }

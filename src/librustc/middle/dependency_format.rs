@@ -103,6 +103,10 @@ pub fn calculate(sess: &session::Session) {
 
 fn calculate_type(sess: &session::Session,
                   ty: config::CrateType) -> DependencyList {
+    if !sess.opts.output_types.should_trans() {
+        return Vec::new();
+    }
+
     match ty {
         // If the global prefer_dynamic switch is turned off, first attempt
         // static linkage (this can fail).
@@ -114,7 +118,7 @@ fn calculate_type(sess: &session::Session,
 
         // No linkage happens with rlibs, we just needed the metadata (which we
         // got long ago), so don't bother with anything.
-        config::CrateTypeRlib | config::CrateTypeMetadata => return Vec::new(),
+        config::CrateTypeRlib => return Vec::new(),
 
         // Staticlibs and cdylibs must have all static dependencies. If any fail
         // to be found, we generate some nice pretty errors.
@@ -124,7 +128,7 @@ fn calculate_type(sess: &session::Session,
                 return v;
             }
             for cnum in sess.cstore.crates() {
-                if sess.cstore.dep_kind(cnum) == DepKind::MacrosOnly { continue }
+                if sess.cstore.dep_kind(cnum).macros_only() { continue }
                 let src = sess.cstore.used_crate_source(cnum);
                 if src.rlib.is_some() { continue }
                 sess.err(&format!("dependency `{}` not found in rlib format",
@@ -157,7 +161,7 @@ fn calculate_type(sess: &session::Session,
     // dependencies, ensuring there are no conflicts. The only valid case for a
     // dependency to be relied upon twice is for both cases to rely on a dylib.
     for cnum in sess.cstore.crates() {
-        if sess.cstore.dep_kind(cnum) == DepKind::MacrosOnly { continue }
+        if sess.cstore.dep_kind(cnum).macros_only() { continue }
         let name = sess.cstore.crate_name(cnum);
         let src = sess.cstore.used_crate_source(cnum);
         if src.dylib.is_some() {

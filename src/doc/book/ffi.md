@@ -574,6 +574,31 @@ The [`libc` crate on crates.io][libc] includes type aliases and function
 definitions for the C standard library in the `libc` module, and Rust links
 against `libc` and `libm` by default.
 
+# Variadic functions
+
+In C, functions can be 'variadic', meaning they accept a variable number of arguments. This can
+be achieved in Rust by specifying `...` within the argument list of a foreign function declaration:
+
+```no_run
+extern {
+    fn foo(x: i32, ...);
+}
+
+fn main() {
+    unsafe {
+        foo(10, 20, 30, 40, 50);
+    }
+}
+```
+
+Normal Rust functions can *not* be variadic:
+
+```ignore
+// This will not compile
+
+fn foo(x: i32, ...) { }
+```
+
 # The "nullable pointer optimization"
 
 Certain Rust types are defined to never be `null`. This includes references (`&T`,
@@ -662,25 +687,30 @@ attribute turns off Rust's name mangling, so that it is easier to link to.
 
 It’s important to be mindful of `panic!`s when working with FFI. A `panic!`
 across an FFI boundary is undefined behavior. If you’re writing code that may
-panic, you should run it in another thread, so that the panic doesn’t bubble up
-to C:
+panic, you should run it in a closure with [`catch_unwind()`]:
 
 ```rust
-use std::thread;
+use std::panic::catch_unwind;
 
 #[no_mangle]
 pub extern fn oh_no() -> i32 {
-    let h = thread::spawn(|| {
+    let result = catch_unwind(|| {
         panic!("Oops!");
     });
-
-    match h.join() {
-        Ok(_) => 1,
-        Err(_) => 0,
+    match result {
+        Ok(_) => 0,
+        Err(_) => 1,
     }
 }
-# fn main() {}
+
+fn main() {}
 ```
+
+Please note that [`catch_unwind()`] will only catch unwinding panics, not
+those who abort the process. See the documentation of [`catch_unwind()`]
+for more information.
+
+[`catch_unwind()`]: https://doc.rust-lang.org/std/panic/fn.catch_unwind.html
 
 # Representing opaque structs
 

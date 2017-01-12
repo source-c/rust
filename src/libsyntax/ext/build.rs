@@ -11,11 +11,12 @@
 use abi::Abi;
 use ast::{self, Ident, Generics, Expr, BlockCheckMode, UnOp, PatKind};
 use attr;
-use syntax_pos::{Span, DUMMY_SP, Pos};
+use syntax_pos::{Span, DUMMY_SP};
 use codemap::{dummy_spanned, respan, Spanned};
 use ext::base::ExtCtxt;
 use ptr::P;
 use symbol::{Symbol, keywords};
+use rustc_i128::u128;
 
 // Transitional reexports so qquote can find the paths it is looking for
 mod syntax {
@@ -322,24 +323,24 @@ impl<'a> AstBuilder for ExtCtxt<'a> {
                 bindings: Vec<ast::TypeBinding> )
                 -> ast::Path {
         let last_identifier = idents.pop().unwrap();
-        let mut segments: Vec<ast::PathSegment> = idents.into_iter()
-                                                      .map(|ident| {
-            ast::PathSegment {
-                identifier: ident,
-                parameters: ast::PathParameters::none(),
-            }
-        }).collect();
-        segments.push(ast::PathSegment {
-            identifier: last_identifier,
-            parameters: ast::PathParameters::AngleBracketed(ast::AngleBracketedParameterData {
+        let mut segments: Vec<ast::PathSegment> = Vec::new();
+        if global {
+            segments.push(ast::PathSegment::crate_root());
+        }
+
+        segments.extend(idents.into_iter().map(Into::into));
+        let parameters = if lifetimes.is_empty() && types.is_empty() && bindings.is_empty() {
+            None
+        } else {
+            Some(P(ast::PathParameters::AngleBracketed(ast::AngleBracketedParameterData {
                 lifetimes: lifetimes,
                 types: P::from_vec(types),
                 bindings: P::from_vec(bindings),
-            })
-        });
+            })))
+        };
+        segments.push(ast::PathSegment { identifier: last_identifier, parameters: parameters });
         ast::Path {
             span: sp,
-            global: global,
             segments: segments,
         }
     }
@@ -367,13 +368,14 @@ impl<'a> AstBuilder for ExtCtxt<'a> {
                  bindings: Vec<ast::TypeBinding>)
                  -> (ast::QSelf, ast::Path) {
         let mut path = trait_path;
+        let parameters = ast::AngleBracketedParameterData {
+            lifetimes: lifetimes,
+            types: P::from_vec(types),
+            bindings: P::from_vec(bindings),
+        };
         path.segments.push(ast::PathSegment {
             identifier: ident,
-            parameters: ast::PathParameters::AngleBracketed(ast::AngleBracketedParameterData {
-                lifetimes: lifetimes,
-                types: P::from_vec(types),
-                bindings: P::from_vec(bindings),
-            })
+            parameters: Some(P(ast::PathParameters::AngleBracketed(parameters))),
         });
 
         (ast::QSelf {
@@ -659,23 +661,11 @@ impl<'a> AstBuilder for ExtCtxt<'a> {
     }
 
     fn expr_field_access(&self, sp: Span, expr: P<ast::Expr>, ident: ast::Ident) -> P<ast::Expr> {
-        let field_span = Span {
-            lo: sp.lo - Pos::from_usize(ident.name.as_str().len()),
-            hi: sp.hi,
-            expn_id: sp.expn_id,
-        };
-
-        let id = Spanned { node: ident, span: field_span };
+        let id = Spanned { node: ident, span: sp };
         self.expr(sp, ast::ExprKind::Field(expr, id))
     }
     fn expr_tup_field_access(&self, sp: Span, expr: P<ast::Expr>, idx: usize) -> P<ast::Expr> {
-        let field_span = Span {
-            lo: sp.lo - Pos::from_usize(idx.to_string().len()),
-            hi: sp.hi,
-            expn_id: sp.expn_id,
-        };
-
-        let id = Spanned { node: idx, span: field_span };
+        let id = Spanned { node: idx, span: sp };
         self.expr(sp, ast::ExprKind::TupField(expr, id))
     }
     fn expr_addr_of(&self, sp: Span, e: P<ast::Expr>) -> P<ast::Expr> {
@@ -723,23 +713,26 @@ impl<'a> AstBuilder for ExtCtxt<'a> {
         self.expr(sp, ast::ExprKind::Lit(P(respan(sp, lit))))
     }
     fn expr_usize(&self, span: Span, i: usize) -> P<ast::Expr> {
-        self.expr_lit(span, ast::LitKind::Int(i as u64, ast::LitIntType::Unsigned(ast::UintTy::Us)))
+        self.expr_lit(span, ast::LitKind::Int(i as u128,
+                                              ast::LitIntType::Unsigned(ast::UintTy::Us)))
     }
     fn expr_isize(&self, sp: Span, i: isize) -> P<ast::Expr> {
         if i < 0 {
-            let i = (-i) as u64;
+            let i = (-i) as u128;
             let lit_ty = ast::LitIntType::Signed(ast::IntTy::Is);
             let lit = self.expr_lit(sp, ast::LitKind::Int(i, lit_ty));
             self.expr_unary(sp, ast::UnOp::Neg, lit)
         } else {
-            self.expr_lit(sp, ast::LitKind::Int(i as u64, ast::LitIntType::Signed(ast::IntTy::Is)))
+            self.expr_lit(sp, ast::LitKind::Int(i as u128,
+                                                ast::LitIntType::Signed(ast::IntTy::Is)))
         }
     }
     fn expr_u32(&self, sp: Span, u: u32) -> P<ast::Expr> {
-        self.expr_lit(sp, ast::LitKind::Int(u as u64, ast::LitIntType::Unsigned(ast::UintTy::U32)))
+        self.expr_lit(sp, ast::LitKind::Int(u as u128,
+                                            ast::LitIntType::Unsigned(ast::UintTy::U32)))
     }
     fn expr_u8(&self, sp: Span, u: u8) -> P<ast::Expr> {
-        self.expr_lit(sp, ast::LitKind::Int(u as u64, ast::LitIntType::Unsigned(ast::UintTy::U8)))
+        self.expr_lit(sp, ast::LitKind::Int(u as u128, ast::LitIntType::Unsigned(ast::UintTy::U8)))
     }
     fn expr_bool(&self, sp: Span, value: bool) -> P<ast::Expr> {
         self.expr_lit(sp, ast::LitKind::Bool(value))

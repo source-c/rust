@@ -50,19 +50,19 @@ use rustc::infer::UpvarRegion;
 use syntax::ast;
 use syntax_pos::Span;
 use rustc::hir;
-use rustc::hir::intravisit::{self, Visitor};
+use rustc::hir::intravisit::{self, Visitor, NestedVisitorMap};
 use rustc::util::nodemap::NodeMap;
 
 ///////////////////////////////////////////////////////////////////////////
 // PUBLIC ENTRY POINTS
 
 impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
-    pub fn closure_analyze(&self, body: &hir::Expr) {
+    pub fn closure_analyze(&self, body: &'gcx hir::Body) {
         let mut seed = SeedBorrowKind::new(self);
-        seed.visit_expr(body);
+        seed.visit_body(body);
 
         let mut adjust = AdjustBorrowKind::new(self, seed.temp_closure_kinds);
-        adjust.visit_expr(body);
+        adjust.visit_body(body);
 
         // it's our job to process these.
         assert!(self.deferred_call_resolutions.borrow().is_empty());
@@ -77,11 +77,17 @@ struct SeedBorrowKind<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     temp_closure_kinds: NodeMap<ty::ClosureKind>,
 }
 
-impl<'a, 'gcx, 'tcx, 'v> Visitor<'v> for SeedBorrowKind<'a, 'gcx, 'tcx> {
-    fn visit_expr(&mut self, expr: &hir::Expr) {
+impl<'a, 'gcx, 'tcx> Visitor<'gcx> for SeedBorrowKind<'a, 'gcx, 'tcx> {
+    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'gcx> {
+        NestedVisitorMap::None
+    }
+
+    fn visit_expr(&mut self, expr: &'gcx hir::Expr) {
         match expr.node {
-            hir::ExprClosure(cc, _, ref body, _) => {
-                self.check_closure(expr, cc, &body);
+            hir::ExprClosure(cc, _, body_id, _) => {
+                let body = self.fcx.tcx.map.body(body_id);
+                self.visit_body(body);
+                self.check_closure(expr, cc);
             }
 
             _ => { }
@@ -98,11 +104,9 @@ impl<'a, 'gcx, 'tcx> SeedBorrowKind<'a, 'gcx, 'tcx> {
 
     fn check_closure(&mut self,
                      expr: &hir::Expr,
-                     capture_clause: hir::CaptureClause,
-                     _body: &hir::Expr)
+                     capture_clause: hir::CaptureClause)
     {
-        let closure_def_id = self.fcx.tcx.map.local_def_id(expr.id);
-        if !self.fcx.tables.borrow().closure_kinds.contains_key(&closure_def_id) {
+        if !self.fcx.tables.borrow().closure_kinds.contains_key(&expr.id) {
             self.temp_closure_kinds.insert(expr.id, ty::ClosureKind::Fn);
             debug!("check_closure: adding closure {:?} as Fn", expr.id);
         }
@@ -152,13 +156,12 @@ impl<'a, 'gcx, 'tcx> AdjustBorrowKind<'a, 'gcx, 'tcx> {
     fn analyze_closure(&mut self,
                        id: ast::NodeId,
                        span: Span,
-                       decl: &hir::FnDecl,
-                       body: &hir::Expr) {
+                       body: &hir::Body) {
         /*!
          * Analysis starting point.
          */
 
-        debug!("analyze_closure(id={:?}, body.id={:?})", id, body.id);
+        debug!("analyze_closure(id={:?}, body.id={:?})", id, body.id());
 
         {
             let mut euv =
@@ -167,7 +170,7 @@ impl<'a, 'gcx, 'tcx> AdjustBorrowKind<'a, 'gcx, 'tcx> {
                                                   mc::MemCategorizationOptions {
                                                       during_closure_kind_inference: true
                                                   });
-            euv.walk_fn(decl, body);
+            euv.consume_body(body);
         }
 
         // Now that we've analyzed the closure, we know how each
@@ -207,8 +210,7 @@ impl<'a, 'gcx, 'tcx> AdjustBorrowKind<'a, 'gcx, 'tcx> {
         // main table and process any deferred resolutions.
         let closure_def_id = self.fcx.tcx.map.local_def_id(id);
         if let Some(&kind) = self.temp_closure_kinds.get(&id) {
-            self.fcx.tables.borrow_mut().closure_kinds
-                                        .insert(closure_def_id, kind);
+            self.fcx.tables.borrow_mut().closure_kinds.insert(id, kind);
             debug!("closure_kind({:?}) = {:?}", closure_def_id, kind);
 
             let mut deferred_call_resolutions =
@@ -484,16 +486,23 @@ impl<'a, 'gcx, 'tcx> AdjustBorrowKind<'a, 'gcx, 'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx, 'v> Visitor<'v> for AdjustBorrowKind<'a, 'gcx, 'tcx> {
+impl<'a, 'gcx, 'tcx> Visitor<'gcx> for AdjustBorrowKind<'a, 'gcx, 'tcx> {
+    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'gcx> {
+        NestedVisitorMap::None
+    }
+
     fn visit_fn(&mut self,
-                fn_kind: intravisit::FnKind<'v>,
-                decl: &'v hir::FnDecl,
-                body: &'v hir::Expr,
+                fn_kind: intravisit::FnKind<'gcx>,
+                decl: &'gcx hir::FnDecl,
+                body: hir::BodyId,
                 span: Span,
                 id: ast::NodeId)
     {
         intravisit::walk_fn(self, fn_kind, decl, body, span, id);
-        self.analyze_closure(id, span, decl, body);
+
+        let body = self.fcx.tcx.map.body(body);
+        self.visit_body(body);
+        self.analyze_closure(id, span, body);
     }
 }
 

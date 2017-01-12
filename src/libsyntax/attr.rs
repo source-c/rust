@@ -29,7 +29,6 @@ use symbol::Symbol;
 use util::ThinVec;
 
 use std::cell::{RefCell, Cell};
-use std::collections::HashSet;
 
 thread_local! {
     static USED_ATTRS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
@@ -372,16 +371,6 @@ pub fn mk_spanned_attr_outer(sp: Span, id: AttrId, item: MetaItem) -> Attribute 
     }
 }
 
-pub fn mk_doc_attr_outer(id: AttrId, item: MetaItem, is_sugared_doc: bool) -> Attribute {
-    Attribute {
-        id: id,
-        style: ast::AttrStyle::Outer,
-        value: item,
-        is_sugared_doc: is_sugared_doc,
-        span: DUMMY_SP,
-    }
-}
-
 pub fn mk_sugared_doc_attr(id: AttrId, text: Symbol, lo: BytePos, hi: BytePos)
                            -> Attribute {
     let style = doc_comment_style(&text.as_str());
@@ -419,13 +408,6 @@ pub fn first_attr_value_str_by_name(attrs: &[Attribute], name: &str) -> Option<S
     attrs.iter()
         .find(|at| at.check_name(name))
         .and_then(|at| at.value_str())
-}
-
-pub fn last_meta_item_value_str_by_name(items: &[MetaItem], name: &str) -> Option<Symbol> {
-    items.iter()
-         .rev()
-         .find(|mi| mi.check_name(name))
-         .and_then(|i| i.value_str())
 }
 
 /* Higher-level applications */
@@ -856,18 +838,6 @@ pub fn find_deprecation(diagnostic: &Handler, attrs: &[Attribute],
     find_deprecation_generic(diagnostic, attrs.iter(), item_sp)
 }
 
-pub fn require_unique_names(diagnostic: &Handler, metas: &[MetaItem]) {
-    let mut set = HashSet::new();
-    for meta in metas {
-        let name = meta.name();
-
-        if !set.insert(name.clone()) {
-            panic!(diagnostic.span_fatal(meta.span,
-                                         &format!("duplicate meta item `{}`", name)));
-        }
-    }
-}
-
 
 /// Parse #[repr(...)] forms.
 ///
@@ -929,6 +899,8 @@ fn int_type_of_word(s: &str) -> Option<IntType> {
         "u32" => Some(UnsignedInt(ast::UintTy::U32)),
         "i64" => Some(SignedInt(ast::IntTy::I64)),
         "u64" => Some(UnsignedInt(ast::UintTy::U64)),
+        "i128" => Some(SignedInt(ast::IntTy::I128)),
+        "u128" => Some(UnsignedInt(ast::UintTy::U128)),
         "isize" => Some(SignedInt(ast::IntTy::Is)),
         "usize" => Some(UnsignedInt(ast::UintTy::Us)),
         _ => None
@@ -975,7 +947,8 @@ impl IntType {
             SignedInt(ast::IntTy::I8) | UnsignedInt(ast::UintTy::U8) |
             SignedInt(ast::IntTy::I16) | UnsignedInt(ast::UintTy::U16) |
             SignedInt(ast::IntTy::I32) | UnsignedInt(ast::UintTy::U32) |
-            SignedInt(ast::IntTy::I64) | UnsignedInt(ast::UintTy::U64) => true,
+            SignedInt(ast::IntTy::I64) | UnsignedInt(ast::UintTy::U64) |
+            SignedInt(ast::IntTy::I128) | UnsignedInt(ast::UintTy::U128) => true,
             SignedInt(ast::IntTy::Is) | UnsignedInt(ast::UintTy::Us) => false
         }
     }

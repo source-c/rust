@@ -8,9 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use {Module, ModuleKind, NameBinding, NameBindingKind, Resolver, AmbiguityError};
+use {AmbiguityError, Resolver, ResolutionError, resolve_error};
+use {Module, ModuleKind, NameBinding, NameBindingKind, PathResult};
 use Namespace::{self, MacroNS};
-use ResolveResult::{Success, Indeterminate, Failed};
 use build_reduced_graph::BuildReducedGraphVisitor;
 use resolve_imports::ImportResolver;
 use rustc::hir::def_id::{DefId, BUILTIN_MACROS_CRATE, CRATE_DEF_INDEX, DefIndex};
@@ -19,15 +19,18 @@ use rustc::hir::map::{self, DefCollector};
 use rustc::ty;
 use std::cell::Cell;
 use std::rc::Rc;
-use syntax::ast::{self, Name};
+use syntax::ast::{self, Name, Ident};
+use syntax::attr;
 use syntax::errors::DiagnosticBuilder;
 use syntax::ext::base::{self, Determinacy, MultiModifier, MultiDecorator};
-use syntax::ext::base::{NormalTT, SyntaxExtension};
-use syntax::ext::expand::Expansion;
+use syntax::ext::base::{NormalTT, Resolver as SyntaxResolver, SyntaxExtension};
+use syntax::ext::expand::{Expansion, mark_tts};
 use syntax::ext::hygiene::Mark;
 use syntax::ext::tt::macro_rules;
-use syntax::fold::Folder;
+use syntax::feature_gate::{emit_feature_err, GateIssue};
+use syntax::fold::{self, Folder};
 use syntax::ptr::P;
+use syntax::symbol::keywords;
 use syntax::util::lev_distance::find_best_match_for_name;
 use syntax::visit::Visitor;
 use syntax_pos::{Span, DUMMY_SP};
@@ -66,21 +69,8 @@ pub enum LegacyScope<'a> {
     Binding(&'a LegacyBinding<'a>),
 }
 
-impl<'a> LegacyScope<'a> {
-    fn simplify_expansion(mut invoc: &'a InvocationData<'a>) -> Self {
-        while let LegacyScope::Invocation(_) = invoc.expansion.get() {
-            match invoc.legacy_scope.get() {
-                LegacyScope::Expansion(new_invoc) => invoc = new_invoc,
-                LegacyScope::Binding(_) => break,
-                scope @ _ => return scope,
-            }
-        }
-        LegacyScope::Expansion(invoc)
-    }
-}
-
 pub struct LegacyBinding<'a> {
-    pub parent: LegacyScope<'a>,
+    pub parent: Cell<LegacyScope<'a>>,
     pub name: ast::Name,
     ext: Rc<SyntaxExtension>,
     pub span: Span,
@@ -98,7 +88,7 @@ impl<'a> base::Resolver for Resolver<'a> {
 
     fn get_module_scope(&mut self, id: ast::NodeId) -> Mark {
         let mark = Mark::fresh();
-        let module = self.module_map[&id];
+        let module = self.module_map[&self.definitions.local_def_id(id)];
         self.invocations.insert(mark, self.arenas.alloc_invocation_data(InvocationData {
             module: Cell::new(module),
             def_index: module.def_id().unwrap().index,
@@ -116,22 +106,28 @@ impl<'a> base::Resolver for Resolver<'a> {
             fn fold_path(&mut self, mut path: ast::Path) -> ast::Path {
                 let ident = path.segments[0].identifier;
                 if ident.name == "$crate" {
-                    path.global = true;
+                    path.segments[0].identifier.name = keywords::CrateRoot.name();
                     let module = self.0.resolve_crate_var(ident.ctxt);
-                    if module.is_local() {
-                        path.segments.remove(0);
-                    } else {
-                        path.segments[0].identifier = match module.kind {
-                            ModuleKind::Def(_, name) => ast::Ident::with_empty_ctxt(name),
+                    if !module.is_local() {
+                        path.segments.insert(1, match module.kind {
+                            ModuleKind::Def(_, name) => ast::Ident::with_empty_ctxt(name).into(),
                             _ => unreachable!(),
-                        };
+                        })
                     }
                 }
                 path
             }
+
+            fn fold_mac(&mut self, mac: ast::Mac) -> ast::Mac {
+                fold::noop_fold_mac(mac, self)
+            }
         }
 
         EliminateCrateVar(self).fold_item(item).expect_one("")
+    }
+
+    fn is_whitelisted_legacy_custom_derive(&self, name: Name) -> bool {
+        self.whitelisted_legacy_custom_derives.contains(&name)
     }
 
     fn visit_expansion(&mut self, mark: Mark, expansion: &Expansion) {
@@ -150,34 +146,6 @@ impl<'a> base::Resolver for Resolver<'a> {
         invocation.expansion.set(visitor.legacy_scope);
     }
 
-    fn add_macro(&mut self, scope: Mark, mut def: ast::MacroDef, export: bool) {
-        if def.ident.name == "macro_rules" {
-            self.session.span_err(def.span, "user-defined macros may not be named `macro_rules`");
-        }
-
-        let invocation = self.invocations[&scope];
-        let binding = self.arenas.alloc_legacy_binding(LegacyBinding {
-            parent: invocation.legacy_scope.get(),
-            name: def.ident.name,
-            ext: Rc::new(macro_rules::compile(&self.session.parse_sess, &def)),
-            span: def.span,
-        });
-        invocation.legacy_scope.set(LegacyScope::Binding(binding));
-        self.macro_names.insert(def.ident.name);
-
-        if export {
-            def.id = self.next_node_id();
-            DefCollector::new(&mut self.definitions).with_parent(CRATE_DEF_INDEX, |collector| {
-                collector.visit_macro_def(&def)
-            });
-            self.macro_exports.push(Export {
-                name: def.ident.name,
-                def: Def::Macro(self.definitions.local_def_id(def.id)),
-            });
-            self.exported_macros.push(def);
-        }
-    }
-
     fn add_ext(&mut self, ident: ast::Ident, ext: Rc<SyntaxExtension>) {
         if let NormalTT(..) = *ext {
             self.macro_names.insert(ident.name);
@@ -190,7 +158,7 @@ impl<'a> base::Resolver for Resolver<'a> {
         let binding = self.arenas.alloc_name_binding(NameBinding {
             kind: NameBindingKind::Def(Def::Macro(def_id)),
             span: DUMMY_SP,
-            vis: ty::Visibility::PrivateExternal,
+            vis: ty::Visibility::Invisible,
             expansion: Mark::root(),
         });
         self.builtin_macros.insert(ident.name, binding);
@@ -207,7 +175,7 @@ impl<'a> base::Resolver for Resolver<'a> {
     fn find_attr_invoc(&mut self, attrs: &mut Vec<ast::Attribute>) -> Option<ast::Attribute> {
         for i in 0..attrs.len() {
             match self.builtin_macros.get(&attrs[i].name()).cloned() {
-                Some(binding) => match *self.get_macro(binding) {
+                Some(binding) => match *binding.get_macro(self) {
                     MultiModifier(..) | MultiDecorator(..) | SyntaxExtension::AttrProcMacro(..) => {
                         return Some(attrs.remove(i))
                     }
@@ -221,85 +189,113 @@ impl<'a> base::Resolver for Resolver<'a> {
 
     fn resolve_macro(&mut self, scope: Mark, path: &ast::Path, force: bool)
                      -> Result<Rc<SyntaxExtension>, Determinacy> {
-        if path.segments.len() > 1 || path.global || !path.segments[0].parameters.is_empty() {
-            self.session.span_err(path.span, "expected macro name without module separators");
+        let ast::Path { ref segments, span } = *path;
+        if segments.iter().any(|segment| segment.parameters.is_some()) {
+            let kind =
+                if segments.last().unwrap().parameters.is_some() { "macro" } else { "module" };
+            let msg = format!("type parameters are not allowed on {}s", kind);
+            self.session.span_err(path.span, &msg);
             return Err(Determinacy::Determined);
         }
-        let name = path.segments[0].identifier.name;
 
+        let path: Vec<_> = segments.iter().map(|seg| seg.identifier).collect();
         let invocation = self.invocations[&scope];
-        if let LegacyScope::Expansion(parent) = invocation.legacy_scope.get() {
-            invocation.legacy_scope.set(LegacyScope::simplify_expansion(parent));
+        self.current_module = invocation.module.get();
+
+        if path.len() > 1 {
+            if !self.use_extern_macros {
+                let msg = "non-ident macro paths are experimental";
+                let feature = "use_extern_macros";
+                emit_feature_err(&self.session.parse_sess, feature, span, GateIssue::Language, msg);
+                return Err(Determinacy::Determined);
+            }
+
+            let ext = match self.resolve_path(&path, Some(MacroNS), None) {
+                PathResult::NonModule(path_res) => match path_res.base_def {
+                    Def::Err => Err(Determinacy::Determined),
+                    def @ _ => Ok(self.get_macro(def)),
+                },
+                PathResult::Module(..) => unreachable!(),
+                PathResult::Indeterminate if !force => return Err(Determinacy::Undetermined),
+                _ => Err(Determinacy::Determined),
+            };
+            self.current_module.macro_resolutions.borrow_mut()
+                .push((path.into_boxed_slice(), span));
+            return ext;
         }
 
-        self.current_module = invocation.module.get();
-        let result = match self.resolve_legacy_scope(invocation.legacy_scope.get(), name, false) {
+        let name = path[0].name;
+        let result = match self.resolve_legacy_scope(&invocation.legacy_scope, name, false) {
             Some(MacroBinding::Legacy(binding)) => Ok(binding.ext.clone()),
-            Some(MacroBinding::Modern(binding)) => Ok(self.get_macro(binding)),
-            None => match self.resolve_in_item_lexical_scope(name, MacroNS, None) {
-                Some(binding) => Ok(self.get_macro(binding)),
-                None => return Err(if force {
+            Some(MacroBinding::Modern(binding)) => Ok(binding.get_macro(self)),
+            None => match self.resolve_lexical_macro_path_segment(path[0], MacroNS, None) {
+                Ok(binding) => Ok(binding.get_macro(self)),
+                Err(Determinacy::Undetermined) if !force => return Err(Determinacy::Undetermined),
+                _ => {
                     let msg = format!("macro undefined: '{}!'", name);
-                    let mut err = self.session.struct_span_err(path.span, &msg);
+                    let mut err = self.session.struct_span_err(span, &msg);
                     self.suggest_macro_name(&name.as_str(), &mut err);
                     err.emit();
-                    Determinacy::Determined
-                } else {
-                    Determinacy::Undetermined
-                }),
+                    return Err(Determinacy::Determined);
+                },
             },
         };
 
         if self.use_extern_macros {
-            self.current_module.legacy_macro_resolutions.borrow_mut()
-                .push((scope, name, path.span));
+            self.current_module.legacy_macro_resolutions.borrow_mut().push((scope, path[0], span));
         }
         result
     }
 }
 
 impl<'a> Resolver<'a> {
-    // Resolve the name in the module's lexical scope, excluding non-items.
-    fn resolve_in_item_lexical_scope(&mut self,
-                                     name: Name,
-                                     ns: Namespace,
-                                     record_used: Option<Span>)
-                                     -> Option<&'a NameBinding<'a>> {
+    // Resolve the initial segment of a non-global macro path (e.g. `foo` in `foo::bar!();`)
+    pub fn resolve_lexical_macro_path_segment(&mut self,
+                                              ident: Ident,
+                                              ns: Namespace,
+                                              record_used: Option<Span>)
+                                              -> Result<&'a NameBinding<'a>, Determinacy> {
         let mut module = self.current_module;
-        let mut potential_expanded_shadower = None;
+        let mut potential_expanded_shadower: Option<&NameBinding> = None;
         loop {
             // Since expanded macros may not shadow the lexical scope (enforced below),
             // we can ignore unresolved invocations (indicated by the penultimate argument).
-            match self.resolve_name_in_module(module, name, ns, true, record_used) {
-                Success(binding) => {
+            match self.resolve_ident_in_module(module, ident, ns, true, record_used) {
+                Ok(binding) => {
                     let span = match record_used {
                         Some(span) => span,
-                        None => return Some(binding),
+                        None => return Ok(binding),
                     };
-                    if let Some(shadower) = potential_expanded_shadower {
-                        self.ambiguity_errors.push(AmbiguityError {
-                            span: span, name: name, b1: shadower, b2: binding, lexical: true,
-                        });
-                        return Some(shadower);
-                    } else if binding.expansion == Mark::root() {
-                        return Some(binding);
-                    } else {
-                        potential_expanded_shadower = Some(binding);
+                    match potential_expanded_shadower {
+                        Some(shadower) if shadower.def() != binding.def() => {
+                            let name = ident.name;
+                            self.ambiguity_errors.push(AmbiguityError {
+                                span: span, name: name, b1: shadower, b2: binding, lexical: true,
+                                legacy: false,
+                            });
+                            return Ok(shadower);
+                        }
+                        _ if binding.expansion == Mark::root() => return Ok(binding),
+                        _ => potential_expanded_shadower = Some(binding),
                     }
                 },
-                Indeterminate => return None,
-                Failed(..) => {}
+                Err(Determinacy::Undetermined) => return Err(Determinacy::Undetermined),
+                Err(Determinacy::Determined) => {}
             }
 
             match module.kind {
                 ModuleKind::Block(..) => module = module.parent.unwrap(),
-                ModuleKind::Def(..) => return potential_expanded_shadower,
+                ModuleKind::Def(..) => return match potential_expanded_shadower {
+                    Some(binding) => Ok(binding),
+                    None if record_used.is_some() => Err(Determinacy::Determined),
+                    None => Err(Determinacy::Undetermined),
+                },
             }
         }
     }
 
     pub fn resolve_legacy_scope(&mut self,
-                                mut scope: LegacyScope<'a>,
+                                mut scope: &'a Cell<LegacyScope<'a>>,
                                 name: Name,
                                 record_used: bool)
                                 -> Option<MacroBinding<'a>> {
@@ -307,22 +303,26 @@ impl<'a> Resolver<'a> {
         let mut relative_depth: u32 = 0;
         let mut binding = None;
         loop {
-            scope = match scope {
+            match scope.get() {
                 LegacyScope::Empty => break,
                 LegacyScope::Expansion(invocation) => {
-                    if let LegacyScope::Empty = invocation.expansion.get() {
-                        if possible_time_travel.is_none() {
-                            possible_time_travel = Some(scope);
+                    match invocation.expansion.get() {
+                        LegacyScope::Invocation(_) => scope.set(invocation.legacy_scope.get()),
+                        LegacyScope::Empty => {
+                            if possible_time_travel.is_none() {
+                                possible_time_travel = Some(scope);
+                            }
+                            scope = &invocation.legacy_scope;
                         }
-                        invocation.legacy_scope.get()
-                    } else {
-                        relative_depth += 1;
-                        invocation.expansion.get()
+                        _ => {
+                            relative_depth += 1;
+                            scope = &invocation.expansion;
+                        }
                     }
                 }
                 LegacyScope::Invocation(invocation) => {
                     relative_depth = relative_depth.saturating_sub(1);
-                    invocation.legacy_scope.get()
+                    scope = &invocation.legacy_scope;
                 }
                 LegacyScope::Binding(potential_binding) => {
                     if potential_binding.name == name {
@@ -332,7 +332,7 @@ impl<'a> Resolver<'a> {
                         binding = Some(potential_binding);
                         break
                     }
-                    potential_binding.parent
+                    scope = &potential_binding.parent;
                 }
             };
         }
@@ -357,12 +357,22 @@ impl<'a> Resolver<'a> {
 
     pub fn finalize_current_module_macro_resolutions(&mut self) {
         let module = self.current_module;
-        for &(mark, name, span) in module.legacy_macro_resolutions.borrow().iter() {
-            let legacy_scope = self.invocations[&mark].legacy_scope.get();
-            let legacy_resolution = self.resolve_legacy_scope(legacy_scope, name, true);
-            let resolution = self.resolve_in_item_lexical_scope(name, MacroNS, Some(span));
+        for &(ref path, span) in module.macro_resolutions.borrow().iter() {
+            match self.resolve_path(path, Some(MacroNS), Some(span)) {
+                PathResult::NonModule(_) => {},
+                PathResult::Failed(msg, _) => {
+                    resolve_error(self, span, ResolutionError::FailedToResolve(&msg));
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        for &(mark, ident, span) in module.legacy_macro_resolutions.borrow().iter() {
+            let legacy_scope = &self.invocations[&mark].legacy_scope;
+            let legacy_resolution = self.resolve_legacy_scope(legacy_scope, ident.name, true);
+            let resolution = self.resolve_lexical_macro_path_segment(ident, MacroNS, Some(span));
             let (legacy_resolution, resolution) = match (legacy_resolution, resolution) {
-                (Some(legacy_resolution), Some(resolution)) => (legacy_resolution, resolution),
+                (Some(legacy_resolution), Ok(resolution)) => (legacy_resolution, resolution),
                 _ => continue,
             };
             let (legacy_span, participle) = match legacy_resolution {
@@ -370,9 +380,9 @@ impl<'a> Resolver<'a> {
                 MacroBinding::Modern(binding) => (binding.span, "imported"),
                 MacroBinding::Legacy(binding) => (binding.span, "defined"),
             };
-            let msg1 = format!("`{}` could resolve to the macro {} here", name, participle);
-            let msg2 = format!("`{}` could also resolve to the macro imported here", name);
-            self.session.struct_span_err(span, &format!("`{}` is ambiguous", name))
+            let msg1 = format!("`{}` could resolve to the macro {} here", ident, participle);
+            let msg2 = format!("`{}` could also resolve to the macro imported here", ident);
+            self.session.struct_span_err(span, &format!("`{}` is ambiguous", ident))
                 .span_note(legacy_span, &msg1)
                 .span_note(resolution.span, &msg2)
                 .emit();
@@ -415,5 +425,48 @@ impl<'a> Resolver<'a> {
             }
             expansion.visit_with(def_collector)
         });
+    }
+
+    pub fn define_macro(&mut self, item: &ast::Item, legacy_scope: &mut LegacyScope<'a>) {
+        let tts = match item.node {
+            ast::ItemKind::Mac(ref mac) => &mac.node.tts,
+            _ => unreachable!(),
+        };
+
+        if item.ident.name == "macro_rules" {
+            self.session.span_err(item.span, "user-defined macros may not be named `macro_rules`");
+        }
+
+        let mark = Mark::from_placeholder_id(item.id);
+        let invocation = self.invocations[&mark];
+        invocation.module.set(self.current_module);
+
+        let mut def = ast::MacroDef {
+            ident: item.ident,
+            attrs: item.attrs.clone(),
+            id: ast::DUMMY_NODE_ID,
+            span: item.span,
+            body: mark_tts(tts, mark),
+        };
+
+        *legacy_scope = LegacyScope::Binding(self.arenas.alloc_legacy_binding(LegacyBinding {
+            parent: Cell::new(*legacy_scope),
+            name: def.ident.name,
+            ext: Rc::new(macro_rules::compile(&self.session.parse_sess, &def)),
+            span: def.span,
+        }));
+        self.macro_names.insert(def.ident.name);
+
+        if attr::contains_name(&def.attrs, "macro_export") {
+            def.id = self.next_node_id();
+            DefCollector::new(&mut self.definitions).with_parent(CRATE_DEF_INDEX, |collector| {
+                collector.visit_macro_def(&def)
+            });
+            self.macro_exports.push(Export {
+                name: def.ident.name,
+                def: Def::Macro(self.definitions.local_def_id(def.id)),
+            });
+            self.exported_macros.push(def);
+        }
     }
 }

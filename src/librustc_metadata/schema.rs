@@ -27,6 +27,8 @@ use syntax_pos::{self, Span};
 
 use std::marker::PhantomData;
 
+use rustc_i128::u128;
+
 pub fn rustc_version() -> String {
     format!("rustc {}",
             option_env!("CFG_VERSION").unwrap_or("unknown version"))
@@ -179,8 +181,9 @@ pub struct CrateRoot {
     pub lang_items_missing: LazySeq<lang_items::LangItem>,
     pub native_libraries: LazySeq<NativeLibrary>,
     pub codemap: LazySeq<syntax_pos::FileMap>,
+    pub def_path_table: Lazy<hir::map::definitions::DefPathTable>,
     pub impls: LazySeq<TraitImpls>,
-    pub reachable_ids: LazySeq<DefIndex>,
+    pub exported_symbols: LazySeq<DefIndex>,
     pub index: LazySeq<index::Index>,
 }
 
@@ -198,18 +201,10 @@ pub struct TraitImpls {
 }
 
 #[derive(RustcEncodable, RustcDecodable)]
-pub struct MacroDef {
-    pub name: ast::Name,
-    pub attrs: Vec<ast::Attribute>,
-    pub span: Span,
-    pub body: String,
-}
-
-#[derive(RustcEncodable, RustcDecodable)]
 pub struct Entry<'tcx> {
     pub kind: EntryKind<'tcx>,
-    pub visibility: ty::Visibility,
-    pub def_key: Lazy<hir::map::DefKey>,
+    pub visibility: Lazy<ty::Visibility>,
+    pub span: Lazy<Span>,
     pub attributes: LazySeq<ast::Attribute>,
     pub children: LazySeq<DefIndex>,
     pub stability: Option<Lazy<attr::Stability>>,
@@ -258,6 +253,11 @@ pub struct ModData {
 }
 
 #[derive(RustcEncodable, RustcDecodable)]
+pub struct MacroDef {
+    pub body: String,
+}
+
+#[derive(RustcEncodable, RustcDecodable)]
 pub struct FnData {
     pub constness: hir::Constness,
     pub arg_names: LazySeq<ast::Name>,
@@ -266,7 +266,7 @@ pub struct FnData {
 #[derive(RustcEncodable, RustcDecodable)]
 pub struct VariantData {
     pub ctor_kind: CtorKind,
-    pub disr: u64,
+    pub disr: u128,
 
     /// If this is a struct's only variant, this
     /// is the index of the "struct ctor" item.
@@ -278,7 +278,6 @@ pub struct TraitData<'tcx> {
     pub unsafety: hir::Unsafety,
     pub paren_sugar: bool,
     pub has_default_impl: bool,
-    pub trait_ref: Lazy<ty::TraitRef<'tcx>>,
     pub super_predicates: Lazy<ty::GenericPredicates<'tcx>>,
 }
 

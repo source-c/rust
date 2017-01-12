@@ -10,6 +10,8 @@
 
 //! Support for inlining external documentation into the current AST.
 
+use std::collections::BTreeMap;
+use std::io;
 use std::iter::once;
 
 use syntax::ast;
@@ -17,11 +19,8 @@ use rustc::hir;
 
 use rustc::hir::def::{Def, CtorKind};
 use rustc::hir::def_id::DefId;
-use rustc::hir::print as pprust;
 use rustc::ty;
 use rustc::util::nodemap::FxHashSet;
-
-use rustc_const_eval::lookup_const_by_id;
 
 use core::{DocContext, DocAccessLevels};
 use doctree;
@@ -29,24 +28,21 @@ use clean::{self, GetDefId};
 
 use super::Clean;
 
-/// Attempt to inline the definition of a local node id into this AST.
+/// Attempt to inline a definition into this AST.
 ///
-/// This function will fetch the definition of the id specified, and if it is
-/// from another crate it will attempt to inline the documentation from the
-/// other crate into this crate.
+/// This function will fetch the definition specified, and if it is
+/// from another crate it will attempt to inline the documentation
+/// from the other crate into this crate.
 ///
 /// This is primarily used for `pub use` statements which are, in general,
 /// implementation details. Inlining the documentation should help provide a
 /// better experience when reading the documentation in this use case.
 ///
-/// The returned value is `None` if the `id` could not be inlined, and `Some`
-/// of a vector of items if it was successfully expanded.
-pub fn try_inline(cx: &DocContext, id: ast::NodeId, into: Option<ast::Name>)
+/// The returned value is `None` if the definition could not be inlined,
+/// and `Some` of a vector of items if it was successfully expanded.
+pub fn try_inline(cx: &DocContext, def: Def, into: Option<ast::Name>)
                   -> Option<Vec<clean::Item>> {
-    let def = match cx.tcx.expect_def_or_none(id) {
-        Some(def) => def,
-        None => return None,
-    };
+    if def == Def::Err { return None }
     let did = def.def_id();
     if did.is_local() { return None }
     try_inline_def(cx, def).map(|vec| {
@@ -118,7 +114,7 @@ fn try_inline_def(cx: &DocContext, def: Def) -> Option<Vec<clean::Item>> {
     let did = def.def_id();
     cx.renderinfo.borrow_mut().inlined.insert(did);
     ret.push(clean::Item {
-        source: clean::Span::empty(),
+        source: tcx.def_span(did).clean(cx),
         name: Some(tcx.item_name(did).to_string()),
         attrs: load_attrs(cx, did),
         inner: inner,
@@ -154,14 +150,13 @@ pub fn record_extern_fqn(cx: &DocContext, did: DefId, kind: clean::TypeKind) {
 }
 
 pub fn build_external_trait(cx: &DocContext, did: DefId) -> clean::Trait {
-    let def = cx.tcx.lookup_trait_def(did);
     let trait_items = cx.tcx.associated_items(did).map(|item| item.clean(cx)).collect();
     let predicates = cx.tcx.item_predicates(did);
-    let generics = (def.generics, &predicates).clean(cx);
+    let generics = (cx.tcx.item_generics(did), &predicates).clean(cx);
     let generics = filter_non_trait_generics(did, generics);
     let (generics, supertrait_bounds) = separate_supertrait_bounds(generics);
     clean::Trait {
-        unsafety: def.unsafety,
+        unsafety: cx.tcx.lookup_trait_def(did).unsafety,
         generics: generics,
         items: trait_items,
         bounds: supertrait_bounds,
@@ -273,11 +268,13 @@ pub fn build_impls(cx: &DocContext, did: DefId) -> Vec<clean::Item> {
         tcx.lang_items.i16_impl(),
         tcx.lang_items.i32_impl(),
         tcx.lang_items.i64_impl(),
+        tcx.lang_items.i128_impl(),
         tcx.lang_items.usize_impl(),
         tcx.lang_items.u8_impl(),
         tcx.lang_items.u16_impl(),
         tcx.lang_items.u32_impl(),
         tcx.lang_items.u64_impl(),
+        tcx.lang_items.u128_impl(),
         tcx.lang_items.f32_impl(),
         tcx.lang_items.f64_impl(),
         tcx.lang_items.char_impl(),
@@ -324,7 +321,7 @@ pub fn build_impl(cx: &DocContext, did: DefId, ret: &mut Vec<clean::Item>) {
                     clean::RegionBound(..) => unreachable!(),
                 },
             }),
-            source: clean::Span::empty(),
+            source: tcx.def_span(did).clean(cx),
             name: None,
             attrs: attrs,
             visibility: Some(clean::Inherited),
@@ -349,8 +346,7 @@ pub fn build_impl(cx: &DocContext, did: DefId, ret: &mut Vec<clean::Item>) {
         match item.kind {
             ty::AssociatedKind::Const => {
                 let default = if item.defaultness.has_value() {
-                    Some(pprust::expr_to_string(
-                        lookup_const_by_id(tcx, item.def_id, None).unwrap().0))
+                    Some(print_inlined_const(cx, item.def_id))
                 } else {
                     None
                 };
@@ -360,7 +356,7 @@ pub fn build_impl(cx: &DocContext, did: DefId, ret: &mut Vec<clean::Item>) {
                         tcx.item_type(item.def_id).clean(cx),
                         default,
                     ),
-                    source: clean::Span::empty(),
+                    source: tcx.def_span(item.def_id).clean(cx),
                     attrs: clean::Attributes::default(),
                     visibility: None,
                     stability: tcx.lookup_stability(item.def_id).clean(cx),
@@ -407,7 +403,7 @@ pub fn build_impl(cx: &DocContext, did: DefId, ret: &mut Vec<clean::Item>) {
                 Some(clean::Item {
                     name: Some(item.name.clean(cx)),
                     inner: clean::TypedefItem(typedef, true),
-                    source: clean::Span::empty(),
+                    source: tcx.def_span(item.def_id).clean(cx),
                     attrs: clean::Attributes::default(),
                     visibility: None,
                     stability: tcx.lookup_stability(item.def_id).clean(cx),
@@ -445,7 +441,7 @@ pub fn build_impl(cx: &DocContext, did: DefId, ret: &mut Vec<clean::Item>) {
             items: trait_items,
             polarity: Some(polarity.clean(cx)),
         }),
-        source: clean::Span::empty(),
+        source: tcx.def_span(did).clean(cx),
         name: None,
         attrs: attrs,
         visibility: Some(clean::Inherited),
@@ -480,17 +476,33 @@ fn build_module(cx: &DocContext, did: DefId) -> clean::Module {
     }
 }
 
-fn build_const(cx: &DocContext, did: DefId) -> clean::Constant {
-    let (expr, ty) = lookup_const_by_id(cx.tcx, did, None).unwrap_or_else(|| {
-        panic!("expected lookup_const_by_id to succeed for {:?}", did);
-    });
-    debug!("converting constant expr {:?} to snippet", expr);
-    let sn = pprust::expr_to_string(expr);
-    debug!("got snippet {}", sn);
+struct InlinedConst {
+    nested_bodies: BTreeMap<hir::BodyId, hir::Body>
+}
 
+impl hir::print::PpAnn for InlinedConst {
+    fn nested(&self, state: &mut hir::print::State, nested: hir::print::Nested)
+              -> io::Result<()> {
+        if let hir::print::Nested::Body(body) = nested {
+            state.print_expr(&self.nested_bodies[&body].value)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn print_inlined_const(cx: &DocContext, did: DefId) -> String {
+    let body = cx.tcx.sess.cstore.maybe_get_item_body(cx.tcx, did).unwrap();
+    let inlined = InlinedConst {
+        nested_bodies: cx.tcx.sess.cstore.item_body_nested_bodies(did)
+    };
+    hir::print::to_string(&inlined, |s| s.print_expr(&body.value))
+}
+
+fn build_const(cx: &DocContext, did: DefId) -> clean::Constant {
     clean::Constant {
-        type_: ty.map(|t| t.clean(cx)).unwrap_or_else(|| cx.tcx.item_type(did).clean(cx)),
-        expr: sn
+        type_: cx.tcx.item_type(did).clean(cx),
+        expr: print_inlined_const(cx, did)
     }
 }
 

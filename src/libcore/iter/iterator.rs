@@ -247,7 +247,7 @@ pub trait Iterator {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    fn nth(&mut self, mut n: usize) -> Option<Self::Item> where Self: Sized {
+    fn nth(&mut self, mut n: usize) -> Option<Self::Item> {
         for x in self {
             if n == 0 { return Some(x) }
             n -= 1;
@@ -1696,12 +1696,11 @@ pub trait Iterator {
     /// # Examples
     ///
     /// ```
-    /// #![feature(iter_max_by)]
     /// let a = [-3_i32, 0, 1, 5, -10];
     /// assert_eq!(*a.iter().max_by(|x, y| x.cmp(y)).unwrap(), 5);
     /// ```
     #[inline]
-    #[unstable(feature = "iter_max_by", issue="36105")]
+    #[stable(feature = "iter_max_by", since = "1.15.0")]
     fn max_by<F>(self, mut compare: F) -> Option<Self::Item>
         where Self: Sized, F: FnMut(&Self::Item, &Self::Item) -> Ordering,
     {
@@ -1746,12 +1745,11 @@ pub trait Iterator {
     /// # Examples
     ///
     /// ```
-    /// #![feature(iter_min_by)]
     /// let a = [-3_i32, 0, 1, 5, -10];
     /// assert_eq!(*a.iter().min_by(|x, y| x.cmp(y)).unwrap(), -10);
     /// ```
     #[inline]
-    #[unstable(feature = "iter_min_by", issue="36105")]
+    #[stable(feature = "iter_min_by", since = "1.15.0")]
     fn min_by<F>(self, mut compare: F) -> Option<Self::Item>
         where Self: Sized, F: FnMut(&Self::Item, &Self::Item) -> Ordering,
     {
@@ -2179,4 +2177,7 @@ impl<'a, I: Iterator + ?Sized> Iterator for &'a mut I {
     type Item = I::Item;
     fn next(&mut self) -> Option<I::Item> { (**self).next() }
     fn size_hint(&self) -> (usize, Option<usize>) { (**self).size_hint() }
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        (**self).nth(n)
+    }
 }
