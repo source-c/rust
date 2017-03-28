@@ -36,9 +36,9 @@ pub struct Builder<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     /// see the `scope` module for more details
     scopes: Vec<scope::Scope<'tcx>>,
 
-    /// the current set of loops; see the `scope` module for more
+    /// the current set of breakables; see the `scope` module for more
     /// details
-    loop_scopes: Vec<scope::LoopScope<'tcx>>,
+    breakable_scopes: Vec<scope::BreakableScope<'tcx>>,
 
     /// the vector of all scopes that we have created thus far;
     /// we track this for debuginfo later
@@ -133,7 +133,7 @@ pub fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
     let arguments: Vec<_> = arguments.collect();
 
     let tcx = hir.tcx();
-    let span = tcx.map.span(fn_id);
+    let span = tcx.hir.span(fn_id);
     let mut builder = Builder::new(hir, span, arguments.len(), return_ty);
 
     let call_site_extent =
@@ -168,7 +168,7 @@ pub fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
     // Gather the upvars of a closure, if any.
     let upvar_decls: Vec<_> = tcx.with_freevars(fn_id, |freevars| {
         freevars.iter().map(|fv| {
-            let var_id = tcx.map.as_local_node_id(fv.def.def_id()).unwrap();
+            let var_id = tcx.hir.as_local_node_id(fv.def.def_id()).unwrap();
             let by_ref = hir.tables().upvar_capture(ty::UpvarId {
                 var_id: var_id,
                 closure_expr_id: fn_id
@@ -180,7 +180,7 @@ pub fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
                 debug_name: keywords::Invalid.name(),
                 by_ref: by_ref
             };
-            if let Some(hir::map::NodeLocal(pat)) = tcx.map.find(var_id) {
+            if let Some(hir::map::NodeLocal(pat)) = tcx.hir.find(var_id) {
                 if let hir::PatKind::Binding(_, _, ref ident, _) = pat.node {
                     decl.debug_name = ident.node;
                 }
@@ -198,9 +198,9 @@ pub fn construct_const<'a, 'gcx, 'tcx>(hir: Cx<'a, 'gcx, 'tcx>,
                                        body_id: hir::BodyId)
                                        -> Mir<'tcx> {
     let tcx = hir.tcx();
-    let ast_expr = &tcx.map.body(body_id).value;
+    let ast_expr = &tcx.hir.body(body_id).value;
     let ty = hir.tables().expr_ty_adjusted(ast_expr);
-    let span = tcx.map.span(tcx.map.body_owner(body_id));
+    let span = tcx.hir.span(tcx.hir.body_owner(body_id));
     let mut builder = Builder::new(hir, span, 0, ty);
 
     let extent = tcx.region_maps.temporary_scope(ast_expr.id)
@@ -223,6 +223,17 @@ pub fn construct_const<'a, 'gcx, 'tcx>(hir: Cx<'a, 'gcx, 'tcx>,
     builder.finish(vec![], ty)
 }
 
+pub fn construct_error<'a, 'gcx, 'tcx>(hir: Cx<'a, 'gcx, 'tcx>,
+                                       body_id: hir::BodyId)
+                                       -> Mir<'tcx> {
+    let span = hir.tcx().hir.span(hir.tcx().hir.body_owner(body_id));
+    let ty = hir.tcx().types.err;
+    let mut builder = Builder::new(hir, span, 0, ty);
+    let source_info = builder.source_info(span);
+    builder.cfg.terminate(START_BLOCK, source_info, TerminatorKind::Unreachable);
+    builder.finish(vec![], ty)
+}
+
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     fn new(hir: Cx<'a, 'gcx, 'tcx>,
            span: Span,
@@ -237,7 +248,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             scopes: vec![],
             visibility_scopes: IndexVec::new(),
             visibility_scope: ARGUMENT_VISIBILITY_SCOPE,
-            loop_scopes: vec![],
+            breakable_scopes: vec![],
             local_decls: IndexVec::from_elem_n(LocalDecl::new_return_pointer(return_ty), 1),
             var_indices: NodeMap(),
             unit_temp: None,

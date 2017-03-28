@@ -460,7 +460,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
             // 3. Where does old loan expire.
 
             let previous_end_span =
-                self.tcx().map.span(old_loan.kill_scope.node_id(&self.tcx().region_maps))
+                self.tcx().hir.span(old_loan.kill_scope.node_id(&self.tcx().region_maps))
                               .end_point();
 
             let mut err = match (new_loan.kind, old_loan.kind) {
@@ -704,7 +704,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                                        borrow_kind: ty::BorrowKind)
                                        -> UseError<'tcx> {
         debug!("analyze_restrictions_on_use(expr_id={}, use_path={:?})",
-               self.tcx().map.node_to_string(expr_id),
+               self.tcx().hir.node_to_string(expr_id),
                use_path);
 
         let mut ret = UseOk;
@@ -783,7 +783,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
             }
             LpExtend(ref lp_base, _, LpInterior(_, InteriorField(_))) => {
                 match lp_base.to_type().sty {
-                    ty::TyAdt(def, _) if def.has_dtor() => {
+                    ty::TyAdt(def, _) if def.has_dtor(self.tcx()) => {
                         // In the case where the owner implements drop, then
                         // the path must be initialized to prevent a case of
                         // partial reinitialization

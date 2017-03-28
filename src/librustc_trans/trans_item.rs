@@ -20,9 +20,8 @@ use consts;
 use context::{CrateContext, SharedCrateContext};
 use common;
 use declare;
-use glue::DropGlueKind;
 use llvm;
-use monomorphize::{self, Instance};
+use monomorphize::Instance;
 use rustc::dep_graph::DepNode;
 use rustc::hir;
 use rustc::hir::def_id::DefId;
@@ -32,17 +31,26 @@ use rustc_const_eval::fatal_const_eval_err;
 use syntax::ast::{self, NodeId};
 use syntax::attr;
 use type_of;
-use glue;
-use abi::{Abi, FnType};
 use back::symbol_names;
 use std::fmt::Write;
 use std::iter;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum TransItem<'tcx> {
-    DropGlue(DropGlueKind<'tcx>),
     Fn(Instance<'tcx>),
     Static(NodeId)
+}
+
+/// Describes how a translation item will be instantiated in object files.
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub enum InstantiationMode {
+    /// There will be exactly one instance of the given TransItem. It will have
+    /// external linkage so that it can be linked to from other codegen units.
+    GloballyShared,
+
+    /// Each codegen unit containing a reference to the given TransItem will
+    /// have its own private copy of the function (with internal linkage).
+    LocalCopy,
 }
 
 impl<'a, 'tcx> TransItem<'tcx> {
@@ -65,9 +73,9 @@ impl<'a, 'tcx> TransItem<'tcx> {
 
         match *self {
             TransItem::Static(node_id) => {
-                let def_id = ccx.tcx().map.local_def_id(node_id);
+                let def_id = ccx.tcx().hir.local_def_id(node_id);
                 let _task = ccx.tcx().dep_graph.in_task(DepNode::TransCrateItem(def_id)); // (*)
-                let item = ccx.tcx().map.expect_item(node_id);
+                let item = ccx.tcx().hir.expect_item(node_id);
                 if let hir::ItemStatic(_, m, _) = item.node {
                     match consts::trans_static(&ccx, m, item.id, &item.attrs) {
                         Ok(_) => { /* Cool, everything's alright. */ },
@@ -83,12 +91,9 @@ impl<'a, 'tcx> TransItem<'tcx> {
             }
             TransItem::Fn(instance) => {
                 let _task = ccx.tcx().dep_graph.in_task(
-                    DepNode::TransCrateItem(instance.def)); // (*)
+                    DepNode::TransCrateItem(instance.def_id())); // (*)
 
                 base::trans_instance(&ccx, instance);
-            }
-            TransItem::DropGlue(dg) => {
-                glue::implement_drop_glue(&ccx, dg);
             }
         }
 
@@ -118,9 +123,6 @@ impl<'a, 'tcx> TransItem<'tcx> {
             TransItem::Fn(instance) => {
                 TransItem::predefine_fn(ccx, instance, linkage, &symbol_name);
             }
-            TransItem::DropGlue(dg) => {
-                TransItem::predefine_drop_glue(ccx, dg, linkage, &symbol_name);
-            }
         }
 
         debug!("END PREDEFINING '{} ({})' in cgu {}",
@@ -133,18 +135,18 @@ impl<'a, 'tcx> TransItem<'tcx> {
                         node_id: ast::NodeId,
                         linkage: llvm::Linkage,
                         symbol_name: &str) {
-        let def_id = ccx.tcx().map.local_def_id(node_id);
-        let ty = ccx.tcx().item_type(def_id);
+        let def_id = ccx.tcx().hir.local_def_id(node_id);
+        let instance = Instance::mono(ccx.tcx(), def_id);
+        let ty = common::instance_ty(ccx.shared(), &instance);
         let llty = type_of::type_of(ccx, ty);
 
         let g = declare::define_global(ccx, symbol_name, llty).unwrap_or_else(|| {
-            ccx.sess().span_fatal(ccx.tcx().map.span(node_id),
+            ccx.sess().span_fatal(ccx.tcx().hir.span(node_id),
                 &format!("symbol `{}` is already defined", symbol_name))
         });
 
         unsafe { llvm::LLVMRustSetLinkage(g, linkage) };
 
-        let instance = Instance::mono(ccx.shared(), def_id);
         ccx.instances().borrow_mut().insert(instance, g);
         ccx.statics().borrow_mut().insert(g, def_id);
     }
@@ -156,11 +158,8 @@ impl<'a, 'tcx> TransItem<'tcx> {
         assert!(!instance.substs.needs_infer() &&
                 !instance.substs.has_param_types());
 
-        let item_ty = ccx.tcx().item_type(instance.def);
-        let item_ty = ccx.tcx().erase_regions(&item_ty);
-        let mono_ty = monomorphize::apply_param_substs(ccx.shared(), instance.substs, &item_ty);
-
-        let attrs = ccx.tcx().get_attrs(instance.def);
+        let mono_ty = common::instance_ty(ccx.shared(), &instance);
+        let attrs = instance.def.attrs(ccx.tcx());
         let lldecl = declare::declare_fn(ccx, symbol_name, mono_ty);
         unsafe { llvm::LLVMRustSetLinkage(lldecl, linkage) };
         base::set_link_section(ccx, lldecl, &attrs);
@@ -169,84 +168,40 @@ impl<'a, 'tcx> TransItem<'tcx> {
             llvm::SetUniqueComdat(ccx.llmod(), lldecl);
         }
 
-        if let ty::TyClosure(..) = mono_ty.sty {
-            // set an inline hint for all closures
+        debug!("predefine_fn: mono_ty = {:?} instance = {:?}", mono_ty, instance);
+        if common::is_inline_instance(ccx.tcx(), &instance) {
             attributes::inline(lldecl, attributes::InlineAttr::Hint);
         }
-
         attributes::from_fn_attrs(ccx, &attrs, lldecl);
 
         ccx.instances().borrow_mut().insert(instance, lldecl);
     }
 
-    fn predefine_drop_glue(ccx: &CrateContext<'a, 'tcx>,
-                           dg: glue::DropGlueKind<'tcx>,
-                           linkage: llvm::Linkage,
-                           symbol_name: &str) {
-        let tcx = ccx.tcx();
-        assert_eq!(dg.ty(), glue::get_drop_glue_type(ccx.shared(), dg.ty()));
-        let t = dg.ty();
-
-        let sig = tcx.mk_fn_sig(iter::once(tcx.mk_mut_ptr(t)), tcx.mk_nil(), false);
-
-        debug!("predefine_drop_glue: sig={}", sig);
-
-        let fn_ty = FnType::new(ccx, Abi::Rust, &sig, &[]);
-        let llfnty = fn_ty.llvm_type(ccx);
-
-        assert!(declare::get_defined_value(ccx, symbol_name).is_none());
-        let llfn = declare::declare_cfn(ccx, symbol_name, llfnty);
-        unsafe { llvm::LLVMRustSetLinkage(llfn, linkage) };
-        if linkage == llvm::Linkage::LinkOnceODRLinkage ||
-           linkage == llvm::Linkage::WeakODRLinkage {
-            llvm::SetUniqueComdat(ccx.llmod(), llfn);
-        }
-        attributes::set_frame_pointer_elimination(ccx, llfn);
-        ccx.drop_glues().borrow_mut().insert(dg, (llfn, fn_ty));
-    }
-
     pub fn compute_symbol_name(&self,
                                scx: &SharedCrateContext<'a, 'tcx>) -> String {
         match *self {
-            TransItem::Fn(instance) => instance.symbol_name(scx),
+            TransItem::Fn(instance) => symbol_names::symbol_name(instance, scx),
             TransItem::Static(node_id) => {
-                let def_id = scx.tcx().map.local_def_id(node_id);
-                Instance::mono(scx, def_id).symbol_name(scx)
-            }
-            TransItem::DropGlue(dg) => {
-                let prefix = match dg {
-                    DropGlueKind::Ty(_) => "drop",
-                    DropGlueKind::TyContents(_) => "drop_contents",
-                };
-                symbol_names::exported_name_from_type_and_prefix(scx, dg.ty(), prefix)
+                let def_id = scx.tcx().hir.local_def_id(node_id);
+                symbol_names::symbol_name(Instance::mono(scx.tcx(), def_id), scx)
             }
         }
     }
 
-    pub fn is_from_extern_crate(&self) -> bool {
-        match *self {
-            TransItem::Fn(ref instance) => !instance.def.is_local(),
-            TransItem::DropGlue(..) |
-            TransItem::Static(..)   => false,
-        }
-    }
-
-    /// True if the translation item should only be translated to LLVM IR if
-    /// it is referenced somewhere (like inline functions, for example).
-    pub fn is_instantiated_only_on_demand(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> bool {
-        if self.explicit_linkage(tcx).is_some() {
-            return false;
-        }
-
+    pub fn instantiation_mode(&self,
+                              tcx: TyCtxt<'a, 'tcx, 'tcx>)
+                              -> InstantiationMode {
         match *self {
             TransItem::Fn(ref instance) => {
-                !instance.def.is_local() ||
-                instance.substs.types().next().is_some() ||
-                common::is_closure(tcx, instance.def) ||
-                attr::requests_inline(&tcx.get_attrs(instance.def)[..])
+                if self.explicit_linkage(tcx).is_none() &&
+                    common::requests_inline(tcx, instance)
+                {
+                    InstantiationMode::LocalCopy
+                } else {
+                    InstantiationMode::GloballyShared
+                }
             }
-            TransItem::DropGlue(..) => true,
-            TransItem::Static(..)   => false,
+            TransItem::Static(..) => InstantiationMode::GloballyShared,
         }
     }
 
@@ -255,28 +210,14 @@ impl<'a, 'tcx> TransItem<'tcx> {
             TransItem::Fn(ref instance) => {
                 instance.substs.types().next().is_some()
             }
-            TransItem::DropGlue(..) |
             TransItem::Static(..)   => false,
         }
     }
 
-    /// Returns true if there has to be a local copy of this TransItem in every
-    /// codegen unit that references it (as with inlined functions, for example)
-    pub fn needs_local_copy(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> bool {
-        // Currently everything that is instantiated only on demand is done so
-        // with "internal" linkage, so we need a copy to be present in every
-        // codegen unit.
-        // This is coincidental: We could also instantiate something only if it
-        // is referenced (e.g. a regular, private function) but place it in its
-        // own codegen unit with "external" linkage.
-        self.is_instantiated_only_on_demand(tcx)
-    }
-
     pub fn explicit_linkage(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Option<llvm::Linkage> {
         let def_id = match *self {
-            TransItem::Fn(ref instance) => instance.def,
-            TransItem::Static(node_id) => tcx.map.local_def_id(node_id),
-            TransItem::DropGlue(..) => return None,
+            TransItem::Fn(ref instance) => instance.def_id(),
+            TransItem::Static(node_id) => tcx.hir.local_def_id(node_id),
         };
 
         let attributes = tcx.get_attrs(def_id);
@@ -284,7 +225,7 @@ impl<'a, 'tcx> TransItem<'tcx> {
             if let Some(linkage) = base::llvm_linkage_by_name(&name.as_str()) {
                 Some(linkage)
             } else {
-                let span = tcx.map.span_if_local(def_id);
+                let span = tcx.hir.span_if_local(def_id);
                 if let Some(span) = span {
                     tcx.sess.span_fatal(span, "invalid linkage specified")
                 } else {
@@ -297,19 +238,9 @@ impl<'a, 'tcx> TransItem<'tcx> {
     }
 
     pub fn to_string(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> String {
-        let hir_map = &tcx.map;
+        let hir_map = &tcx.hir;
 
         return match *self {
-            TransItem::DropGlue(dg) => {
-                let mut s = String::with_capacity(32);
-                match dg {
-                    DropGlueKind::Ty(_) => s.push_str("drop-glue "),
-                    DropGlueKind::TyContents(_) => s.push_str("drop-glue-contents "),
-                };
-                let printer = DefPathBasedNames::new(tcx, false, false);
-                printer.push_type_name(dg.ty(), &mut s);
-                s
-            }
             TransItem::Fn(instance) => {
                 to_string_internal(tcx, "fn ", instance)
             },
@@ -334,13 +265,6 @@ impl<'a, 'tcx> TransItem<'tcx> {
 
     pub fn to_raw_string(&self) -> String {
         match *self {
-            TransItem::DropGlue(dg) => {
-                let prefix = match dg {
-                    DropGlueKind::Ty(_) => "Ty",
-                    DropGlueKind::TyContents(_) => "TyContents",
-                };
-                format!("DropGlue({}: {})", prefix, dg.ty() as *const _ as usize)
-            }
             TransItem::Fn(instance) => {
                 format!("Fn({:?}, {})",
                          instance.def,
@@ -410,7 +334,7 @@ impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
                 self.push_def_path(adt_def.did, output);
                 self.push_type_params(substs, iter::empty(), output);
             },
-            ty::TyTuple(component_types) => {
+            ty::TyTuple(component_types, _) => {
                 output.push('(');
                 for &component_type in component_types {
                     self.push_type_name(component_type, output);
@@ -421,11 +345,6 @@ impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
                     output.pop();
                 }
                 output.push(')');
-            },
-            ty::TyBox(inner_type) => {
-                output.push_str("Box<");
-                self.push_type_name(inner_type, output);
-                output.push('>');
             },
             ty::TyRawPtr(ty::TypeAndMut { ty: inner_type, mutbl } ) => {
                 output.push('*');
@@ -463,12 +382,13 @@ impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
                         output);
                 }
             },
-            ty::TyFnDef(.., &ty::BareFnTy{ unsafety, abi, ref sig } ) |
-            ty::TyFnPtr(&ty::BareFnTy{ unsafety, abi, ref sig } ) => {
-                if unsafety == hir::Unsafety::Unsafe {
+            ty::TyFnDef(.., sig) |
+            ty::TyFnPtr(sig) => {
+                if sig.unsafety() == hir::Unsafety::Unsafe {
                     output.push_str("unsafe ");
                 }
 
+                let abi = sig.abi();
                 if abi != ::abi::Abi::Rust {
                     output.push_str("extern \"");
                     output.push_str(abi.name());
@@ -477,7 +397,7 @@ impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
 
                 output.push_str("fn(");
 
-                let sig = self.tcx.erase_late_bound_regions_and_normalize(sig);
+                let sig = self.tcx.erase_late_bound_regions_and_normalize(&sig);
 
                 if !sig.inputs().is_empty() {
                     for &parameter_type in sig.inputs() {
@@ -583,7 +503,7 @@ impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
     pub fn push_instance_as_string(&self,
                                    instance: Instance<'tcx>,
                                    output: &mut String) {
-        self.push_def_path(instance.def, output);
+        self.push_def_path(instance.def_id(), output);
         self.push_type_params(instance.substs, iter::empty(), output);
     }
 }

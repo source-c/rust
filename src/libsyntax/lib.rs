@@ -26,7 +26,6 @@
 
 #![feature(associated_consts)]
 #![feature(const_fn)]
-#![feature(libc)]
 #![feature(optin_builtin_traits)]
 #![feature(rustc_private)]
 #![feature(staged_api)]
@@ -34,19 +33,15 @@
 #![feature(unicode)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(specialization)]
+#![feature(i128_type)]
 
-extern crate core;
 extern crate serialize;
-extern crate term;
-extern crate libc;
 #[macro_use] extern crate log;
 #[macro_use] #[no_link] extern crate rustc_bitflags;
 extern crate std_unicode;
 pub extern crate rustc_errors as errors;
 extern crate syntax_pos;
 extern crate rustc_data_structures;
-
-extern crate rustc_i128;
 
 extern crate serialize as rustc_serialize; // used by deriving
 
@@ -68,6 +63,16 @@ macro_rules! panictry {
             }
         }
     })
+}
+
+#[macro_export]
+macro_rules! unwrap_or {
+    ($opt:expr, $default:expr) => {
+        match $opt {
+            Some(x) => x,
+            None => $default,
+        }
+    }
 }
 
 #[macro_use]
@@ -93,6 +98,9 @@ pub mod util {
 
     mod thin_vec;
     pub use self::thin_vec::ThinVec;
+
+    mod rc_slice;
+    pub use self::rc_slice::RcSlice;
 }
 
 pub mod json;
@@ -130,10 +138,10 @@ pub mod print {
 pub mod ext {
     pub mod base;
     pub mod build;
+    pub mod derive;
     pub mod expand;
     pub mod placeholders;
     pub mod hygiene;
-    pub mod proc_macro_shim;
     pub mod quote;
     pub mod source_util;
 
@@ -141,6 +149,7 @@ pub mod ext {
         pub mod transcribe;
         pub mod macro_parser;
         pub mod macro_rules;
+        pub mod quoted;
     }
 }
 

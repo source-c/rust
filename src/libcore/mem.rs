@@ -164,10 +164,10 @@ pub use intrinsics::transmute;
 /// [uninit]: fn.uninitialized.html
 /// [clone]: ../clone/trait.Clone.html
 /// [swap]: fn.swap.html
-/// [FFI]: ../../book/ffi.html
+/// [FFI]: ../../book/first-edition/ffi.html
 /// [box]: ../../std/boxed/struct.Box.html
 /// [into_raw]: ../../std/boxed/struct.Box.html#method.into_raw
-/// [ub]: ../../reference.html#behavior-considered-undefined
+/// [ub]: ../../reference/behavior-considered-undefined.html
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn forget<T>(t: T) {
@@ -199,7 +199,7 @@ pub fn size_of<T>() -> usize {
 /// then `size_of_val` can be used to get the dynamically-known size.
 ///
 /// [slice]: ../../std/primitive.slice.html
-/// [trait object]: ../../book/trait-objects.html
+/// [trait object]: ../../book/first-edition/trait-objects.html
 ///
 /// # Examples
 ///
@@ -317,8 +317,8 @@ pub fn align_of_val<T: ?Sized>(val: &T) -> usize {
 /// many of the same caveats.
 ///
 /// [uninit]: fn.uninitialized.html
-/// [FFI]: ../../book/ffi.html
-/// [ub]: ../../reference.html#behavior-considered-undefined
+/// [FFI]: ../../book/first-edition/ffi.html
+/// [ub]: ../../reference/behavior-considered-undefined.html
 ///
 /// # Examples
 ///
@@ -343,7 +343,7 @@ pub unsafe fn zeroed<T>() -> T {
 /// This is useful for [FFI] functions and initializing arrays sometimes,
 /// but should generally be avoided.
 ///
-/// [FFI]: ../../book/ffi.html
+/// [FFI]: ../../book/first-edition/ffi.html
 ///
 /// # Undefined behavior
 ///
@@ -417,7 +417,7 @@ pub unsafe fn zeroed<T>() -> T {
 /// [`Vec`]: ../../std/vec/struct.Vec.html
 /// [`vec!`]: ../../std/macro.vec.html
 /// [`Clone`]: ../../std/clone/trait.Clone.html
-/// [ub]: ../../reference.html#behavior-considered-undefined
+/// [ub]: ../../reference/behavior-considered-undefined.html
 /// [write]: ../ptr/fn.write.html
 /// [copy]: ../intrinsics/fn.copy.html
 /// [copy_no]: ../intrinsics/fn.copy_nonoverlapping.html
@@ -525,7 +525,7 @@ pub fn replace<T>(dest: &mut T, mut src: T) -> T {
 /// it will not release any borrows, as borrows are based on lexical scope.
 ///
 /// This effectively does nothing for
-/// [types which implement `Copy`](../../book/ownership.html#copy-types),
+/// [types which implement `Copy`](../../book/first-edition/ownership.html#copy-types),
 /// e.g. integers. Such values are copied and _then_ moved into the function,
 /// so the value persists after this function call.
 ///
@@ -617,7 +617,7 @@ pub fn drop<T>(_x: T) { }
 /// the contained value.
 ///
 /// This function will unsafely assume the pointer `src` is valid for
-/// [`size_of::<U>()`][size_of] bytes by transmuting `&T` to `&U` and then reading
+/// [`size_of::<U>`][size_of] bytes by transmuting `&T` to `&U` and then reading
 /// the `&U`. It will also unsafely create a copy of the contained value instead of
 /// moving out of `src`.
 ///
@@ -626,7 +626,7 @@ pub fn drop<T>(_x: T) { }
 /// same size. This function triggers [undefined behavior][ub] if `U` is larger than
 /// `T`.
 ///
-/// [ub]: ../../reference.html#behavior-considered-undefined
+/// [ub]: ../../reference/behavior-considered-undefined.html
 /// [size_of]: fn.size_of.html
 ///
 /// # Examples

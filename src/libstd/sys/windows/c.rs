@@ -69,6 +69,7 @@ pub type LPWCH = *mut WCHAR;
 pub type LPWIN32_FIND_DATAW = *mut WIN32_FIND_DATAW;
 pub type LPWSADATA = *mut WSADATA;
 pub type LPWSAPROTOCOL_INFO = *mut WSAPROTOCOL_INFO;
+pub type LPSTR = *mut CHAR;
 pub type LPWSTR = *mut WCHAR;
 pub type LPFILETIME = *mut FILETIME;
 
@@ -166,6 +167,7 @@ pub const SYMLINK_FLAG_RELATIVE: DWORD = 0x00000001;
 pub const FSCTL_SET_REPARSE_POINT: DWORD = 0x900a4;
 
 pub const SYMBOLIC_LINK_FLAG_DIRECTORY: DWORD = 0x1;
+pub const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: DWORD = 0x2;
 
 // Note that these are not actually HANDLEs, just values to pass to GetStdHandle
 pub const STD_INPUT_HANDLE: DWORD = -10i32 as DWORD;
@@ -244,6 +246,7 @@ pub const IP_ADD_MEMBERSHIP: c_int = 12;
 pub const IP_DROP_MEMBERSHIP: c_int = 13;
 pub const IPV6_ADD_MEMBERSHIP: c_int = 12;
 pub const IPV6_DROP_MEMBERSHIP: c_int = 13;
+pub const MSG_PEEK: c_int = 0x2;
 
 #[repr(C)]
 pub struct ip_mreq {
@@ -830,13 +833,6 @@ pub struct CONSOLE_READCONSOLE_CONTROL {
 }
 pub type PCONSOLE_READCONSOLE_CONTROL = *mut CONSOLE_READCONSOLE_CONTROL;
 
-#[link(name = "ws2_32")]
-#[link(name = "userenv")]
-#[link(name = "shell32")]
-#[link(name = "advapi32")]
-#[cfg(not(cargobuild))]
-extern {}
-
 extern "system" {
     pub fn WSAStartup(wVersionRequested: WORD,
                       lpWSAData: LPWSADATA) -> c_int;
@@ -916,7 +912,7 @@ extern "system" {
     pub fn Sleep(dwMilliseconds: DWORD);
     pub fn GetProcessId(handle: HANDLE) -> DWORD;
     pub fn GetUserProfileDirectoryW(hToken: HANDLE,
-                                    lpProfileDir: LPCWSTR,
+                                    lpProfileDir: LPWSTR,
                                     lpcchSize: *mut DWORD) -> BOOL;
     pub fn SetHandleInformation(hObject: HANDLE,
                                 dwMask: DWORD,
@@ -973,6 +969,14 @@ extern "system" {
     pub fn DeleteFileW(lpPathName: LPCWSTR) -> BOOL;
     pub fn GetCurrentDirectoryW(nBufferLength: DWORD, lpBuffer: LPWSTR) -> DWORD;
     pub fn SetCurrentDirectoryW(lpPathName: LPCWSTR) -> BOOL;
+    pub fn WideCharToMultiByte(CodePage: UINT,
+                               dwFlags: DWORD,
+                               lpWideCharStr: LPCWSTR,
+                               cchWideChar: c_int,
+                               lpMultiByteStr: LPSTR,
+                               cbMultiByte: c_int,
+                               lpDefaultChar: LPCSTR,
+                               lpUsedDefaultChar: LPBOOL) -> c_int;
 
     pub fn closesocket(socket: SOCKET) -> c_int;
     pub fn recv(socket: SOCKET, buf: *mut c_void, len: c_int,
@@ -1178,3 +1182,34 @@ compat_fn! {
         panic!("rwlocks not available")
     }
 }
+
+#[cfg(target_env = "gnu")]
+mod gnu {
+    use super::*;
+
+    pub const PROCESS_QUERY_INFORMATION: DWORD = 0x0400;
+
+    pub const CP_ACP: UINT = 0;
+
+    pub const WC_NO_BEST_FIT_CHARS: DWORD = 0x00000400;
+
+    extern "system" {
+        pub fn OpenProcess(dwDesiredAccess: DWORD,
+                           bInheritHandle: BOOL,
+                           dwProcessId: DWORD) -> HANDLE;
+    }
+
+    compat_fn! {
+        kernel32:
+
+        pub fn QueryFullProcessImageNameW(_hProcess: HANDLE,
+                                          _dwFlags: DWORD,
+                                          _lpExeName: LPWSTR,
+                                          _lpdwSize: LPDWORD) -> BOOL {
+            SetLastError(ERROR_CALL_NOT_IMPLEMENTED as DWORD); 0
+        }
+    }
+}
+
+#[cfg(target_env = "gnu")]
+pub use self::gnu::*;

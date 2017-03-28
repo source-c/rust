@@ -19,6 +19,7 @@ use std::slice;
 use std::fmt;
 use std::mem;
 use std::collections::range::RangeArgument;
+use std::collections::Bound::{Excluded, Included, Unbounded};
 
 pub unsafe trait Array {
     type Element;
@@ -50,14 +51,6 @@ impl<A> Hash for ArrayVec<A>
         (&self[..]).hash(state);
     }
 }
-
-impl<A: Array> PartialEq for ArrayVec<A> {
-    fn eq(&self, other: &Self) -> bool {
-        self == other
-    }
-}
-
-impl<A: Array> Eq for ArrayVec<A> {}
 
 impl<A> Clone for ArrayVec<A>
     where A: Array,
@@ -119,8 +112,16 @@ impl<A: Array> ArrayVec<A> {
         // the hole, and the vector length is restored to the new length.
         //
         let len = self.len();
-        let start = *range.start().unwrap_or(&0);
-        let end = *range.end().unwrap_or(&len);
+        let start = match range.start() {
+            Included(&n) => n,
+            Excluded(&n) => n + 1,
+            Unbounded    => 0,
+        };
+        let end = match range.end() {
+            Included(&n) => n + 1,
+            Excluded(&n) => n,
+            Unbounded    => len,
+        };
         assert!(start <= end);
         assert!(end <= len);
 
@@ -247,7 +248,7 @@ impl<'a, A: Array> Drop for Drain<'a, A> {
 
         if self.tail_len > 0 {
             unsafe {
-                let source_array_vec = &mut **self.array_vec;
+                let source_array_vec = &mut *self.array_vec.as_mut_ptr();
                 // memmove back untouched tail, update to new length
                 let start = source_array_vec.len();
                 let tail = self.tail_start;
@@ -316,4 +317,3 @@ impl<T> Default for ManuallyDrop<T> {
         ManuallyDrop::new()
     }
 }
-

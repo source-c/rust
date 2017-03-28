@@ -21,7 +21,7 @@ use rustc::ty;
 use rustc::lint::builtin::PRIVATE_IN_PUBLIC;
 use rustc::hir::def_id::DefId;
 use rustc::hir::def::*;
-use rustc::util::nodemap::FxHashSet;
+use rustc::util::nodemap::FxHashMap;
 
 use syntax::ast::{Ident, NodeId};
 use syntax::ext::base::Determinacy::{self, Determined, Undetermined};
@@ -49,6 +49,7 @@ pub enum ImportDirectiveSubclass<'a> {
         // n.b. `max_vis` is only used in `finalize_import` to check for reexport errors.
     },
     ExternCrate,
+    MacroUse,
 }
 
 /// One import directive.
@@ -62,6 +63,7 @@ pub struct ImportDirective<'a> {
     pub span: Span,
     pub vis: Cell<ty::Visibility>,
     pub expansion: Mark,
+    pub used: Cell<bool>,
 }
 
 impl<'a> ImportDirective<'a> {
@@ -143,7 +145,7 @@ impl<'a> Resolver<'a> {
                                    module: Module<'a>,
                                    ident: Ident,
                                    ns: Namespace,
-                                   ignore_unresolved_invocations: bool,
+                                   restricted_shadowing: bool,
                                    record_used: Option<Span>)
                                    -> Result<&'a NameBinding<'a>, Determinacy> {
         self.populate_module_if_necessary(module);
@@ -156,9 +158,8 @@ impl<'a> Resolver<'a> {
             if let Some(binding) = resolution.binding {
                 if let Some(shadowed_glob) = resolution.shadows_glob {
                     let name = ident.name;
-                    // If we ignore unresolved invocations, we must forbid
-                    // expanded shadowing to avoid time travel.
-                    if ignore_unresolved_invocations &&
+                    // Forbid expanded shadowing to avoid time travel.
+                    if restricted_shadowing &&
                        binding.expansion != Mark::root() &&
                        ns != MacroNS && // In MacroNS, `try_define` always forbids this shadowing
                        binding.def() != shadowed_glob.def() {
@@ -213,7 +214,7 @@ impl<'a> Resolver<'a> {
         }
 
         let no_unresolved_invocations =
-            ignore_unresolved_invocations || module.unresolved_invocations.borrow().is_empty();
+            restricted_shadowing || module.unresolved_invocations.borrow().is_empty();
         match resolution.binding {
             // In `MacroNS`, expanded bindings do not shadow (enforced in `try_define`).
             Some(binding) if no_unresolved_invocations || ns == MacroNS =>
@@ -223,6 +224,9 @@ impl<'a> Resolver<'a> {
         }
 
         // Check if the globs are determined
+        if restricted_shadowing && module.def().is_some() {
+            return Err(Determined);
+        }
         for directive in module.globs.borrow().iter() {
             if self.is_accessible(directive.vis.get()) {
                 if let Some(module) = directive.imported_module.get() {
@@ -257,6 +261,7 @@ impl<'a> Resolver<'a> {
             id: id,
             vis: Cell::new(vis),
             expansion: expansion,
+            used: Cell::new(false),
         });
 
         self.indeterminate_imports.push(directive);
@@ -636,7 +641,19 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                 let names = resolutions.iter().filter_map(|(&(ref i, _), resolution)| {
                     if *i == ident { return None; } // Never suggest the same name
                     match *resolution.borrow() {
-                        NameResolution { binding: Some(_), .. } => Some(&i.name),
+                        NameResolution { binding: Some(name_binding), .. } => {
+                            match name_binding.kind {
+                                NameBindingKind::Import { binding, .. } => {
+                                    match binding.kind {
+                                        // Never suggest the name that has binding error
+                                        // i.e. the name that cannot be previously resolved
+                                        NameBindingKind::Def(Def::Err) => return None,
+                                        _ => Some(&i.name),
+                                    }
+                                },
+                                _ => Some(&i.name),
+                            }
+                        },
                         NameResolution { single_imports: SingleImports::None, .. } => None,
                         _ => Some(&i.name),
                     }
@@ -748,10 +765,11 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
         *module.globs.borrow_mut() = Vec::new();
 
         let mut reexports = Vec::new();
+        let mut exported_macro_names = FxHashMap();
         if module as *const _ == self.graph_root as *const _ {
-            let mut exported_macro_names = FxHashSet();
-            for export in mem::replace(&mut self.macro_exports, Vec::new()).into_iter().rev() {
-                if exported_macro_names.insert(export.name) {
+            let macro_exports = mem::replace(&mut self.macro_exports, Vec::new());
+            for export in macro_exports.into_iter().rev() {
+                if exported_macro_names.insert(export.name, export.span).is_none() {
                     reexports.push(export);
                 }
             }
@@ -771,7 +789,17 @@ impl<'a, 'b:'a> ImportResolver<'a, 'b> {
                     if !def.def_id().is_local() {
                         self.session.cstore.export_macros(def.def_id().krate);
                     }
-                    reexports.push(Export { name: ident.name, def: def });
+                    if let Def::Macro(..) = def {
+                        if let Some(&span) = exported_macro_names.get(&ident.name) {
+                            let msg =
+                                format!("a macro named `{}` has already been exported", ident);
+                            self.session.struct_span_err(span, &msg)
+                                .span_label(span, &format!("`{}` already exported", ident))
+                                .span_note(binding.span, "previous macro export here")
+                                .emit();
+                        }
+                    }
+                    reexports.push(Export { name: ident.name, def: def, span: binding.span });
                 }
             }
 
@@ -833,5 +861,6 @@ fn import_directive_subclass_to_string(subclass: &ImportDirectiveSubclass) -> St
         SingleImport { source, .. } => source.to_string(),
         GlobImport { .. } => "*".to_string(),
         ExternCrate => "<extern crate>".to_string(),
+        MacroUse => "#[macro_use]".to_string(),
     }
 }

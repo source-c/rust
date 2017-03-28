@@ -26,51 +26,42 @@ use rustc::hir::def_id::DefId;
 use rustc::hir::map as hir_map;
 use rustc::hir::{self, ItemImpl};
 
-pub fn check<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
-    check_trait(tcx, tcx.lang_items.drop_trait(), visit_implementation_of_drop);
-    check_trait(tcx, tcx.lang_items.copy_trait(), visit_implementation_of_copy);
-    check_trait(
-        tcx,
-        tcx.lang_items.coerce_unsized_trait(),
-        visit_implementation_of_coerce_unsized);
+pub fn check_trait<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, trait_def_id: DefId) {
+    Checker { tcx, trait_def_id }
+        .check(tcx.lang_items.drop_trait(), visit_implementation_of_drop)
+        .check(tcx.lang_items.copy_trait(), visit_implementation_of_copy)
+        .check(tcx.lang_items.coerce_unsized_trait(),
+               visit_implementation_of_coerce_unsized);
 }
 
-fn check_trait<'a, 'tcx, F>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                            trait_def_id: Option<DefId>,
-                            mut f: F)
-    where F: FnMut(TyCtxt<'a, 'tcx, 'tcx>, DefId, DefId)
-{
-    if let Some(trait_def_id) = trait_def_id {
-        let mut impls = vec![];
-        tcx.lookup_trait_def(trait_def_id).for_each_impl(tcx, |did| {
-            impls.push(did);
-        });
-        impls.sort();
-        for impl_def_id in impls {
-            f(tcx, trait_def_id, impl_def_id);
+struct Checker<'a, 'tcx: 'a> {
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    trait_def_id: DefId
+}
+
+impl<'a, 'tcx> Checker<'a, 'tcx> {
+    fn check<F>(&self, trait_def_id: Option<DefId>, mut f: F) -> &Self
+        where F: FnMut(TyCtxt<'a, 'tcx, 'tcx>, DefId, DefId)
+    {
+        if Some(self.trait_def_id) == trait_def_id {
+            for &impl_id in self.tcx.hir.trait_impls(self.trait_def_id) {
+                let impl_def_id = self.tcx.hir.local_def_id(impl_id);
+                f(self.tcx, self.trait_def_id, impl_def_id);
+            }
         }
+        self
     }
 }
 
 fn visit_implementation_of_drop<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                           _drop_did: DefId,
                                           impl_did: DefId) {
-    let items = tcx.associated_item_def_ids(impl_did);
-    if items.is_empty() {
-        // We'll error out later. For now, just don't ICE.
-        return;
-    }
-    let method_def_id = items[0];
-
-    let self_type = tcx.item_type(impl_did);
-    match self_type.sty {
-        ty::TyAdt(type_def, _) => {
-            type_def.set_destructor(method_def_id);
-        }
+    match tcx.item_type(impl_did).sty {
+        ty::TyAdt(..) => {}
         _ => {
             // Destructors only work on nominal types.
-            if let Some(impl_node_id) = tcx.map.as_local_node_id(impl_did) {
-                match tcx.map.find(impl_node_id) {
+            if let Some(impl_node_id) = tcx.hir.as_local_node_id(impl_did) {
+                match tcx.hir.find(impl_node_id) {
                     Some(hir_map::NodeItem(item)) => {
                         let span = match item.node {
                             ItemImpl(.., ref ty, _) => ty.span,
@@ -101,7 +92,7 @@ fn visit_implementation_of_copy<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                           impl_did: DefId) {
     debug!("visit_implementation_of_copy: impl_did={:?}", impl_did);
 
-    let impl_node_id = if let Some(n) = tcx.map.as_local_node_id(impl_did) {
+    let impl_node_id = if let Some(n) = tcx.hir.as_local_node_id(impl_did) {
         n
     } else {
         debug!("visit_implementation_of_copy(): impl not in this \
@@ -113,7 +104,7 @@ fn visit_implementation_of_copy<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     debug!("visit_implementation_of_copy: self_type={:?} (bound)",
            self_type);
 
-    let span = tcx.map.span(impl_node_id);
+    let span = tcx.hir.span(impl_node_id);
     let param_env = ParameterEnvironment::for_item(tcx, impl_node_id);
     let self_type = self_type.subst(tcx, &param_env.free_substs);
     assert!(!self_type.has_escaping_regions());
@@ -124,7 +115,7 @@ fn visit_implementation_of_copy<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     match param_env.can_type_implement_copy(tcx, self_type, span) {
         Ok(()) => {}
         Err(CopyImplementationError::InfrigingField(field)) => {
-            let item = tcx.map.expect_item(impl_node_id);
+            let item = tcx.hir.expect_item(impl_node_id);
             let span = if let ItemImpl(.., Some(ref tr), _, _) = item.node {
                 tr.path.span
             } else {
@@ -141,7 +132,7 @@ fn visit_implementation_of_copy<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 .emit()
         }
         Err(CopyImplementationError::NotAnAdt) => {
-            let item = tcx.map.expect_item(impl_node_id);
+            let item = tcx.hir.expect_item(impl_node_id);
             let span = if let ItemImpl(.., ref ty, _) = item.node {
                 ty.span
             } else {
@@ -180,7 +171,7 @@ fn visit_implementation_of_coerce_unsized<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         }
     };
 
-    let impl_node_id = if let Some(n) = tcx.map.as_local_node_id(impl_did) {
+    let impl_node_id = if let Some(n) = tcx.hir.as_local_node_id(impl_did) {
         n
     } else {
         debug!("visit_implementation_of_coerce_unsized(): impl not \
@@ -195,7 +186,7 @@ fn visit_implementation_of_coerce_unsized<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
            source,
            target);
 
-    let span = tcx.map.span(impl_node_id);
+    let span = tcx.hir.span(impl_node_id);
     let param_env = ParameterEnvironment::for_item(tcx, impl_node_id);
     let source = source.subst(tcx, &param_env.free_substs);
     let target = target.subst(tcx, &param_env.free_substs);
@@ -205,7 +196,7 @@ fn visit_implementation_of_coerce_unsized<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
            source,
            target);
 
-    tcx.infer_ctxt(param_env, Reveal::ExactMatch).enter(|infcx| {
+    tcx.infer_ctxt(param_env, Reveal::UserFacing).enter(|infcx| {
         let cause = ObligationCause::misc(span, impl_node_id);
         let check_mutbl = |mt_a: ty::TypeAndMut<'tcx>,
                            mt_b: ty::TypeAndMut<'tcx>,
@@ -220,8 +211,6 @@ fn visit_implementation_of_coerce_unsized<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             (mt_a.ty, mt_b.ty, unsize_trait, None)
         };
         let (source, target, trait_def_id, kind) = match (&source.sty, &target.sty) {
-            (&ty::TyBox(a), &ty::TyBox(b)) => (a, b, unsize_trait, None),
-
             (&ty::TyRef(r_a, mt_a), &ty::TyRef(r_b, mt_b)) => {
                 infcx.sub_regions(infer::RelateObjectBound(span), r_b, r_a);
                 check_mutbl(mt_a, mt_b, &|ty| tcx.mk_imm_ref(r_b, ty))
@@ -281,11 +270,11 @@ fn visit_implementation_of_coerce_unsized<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                being coerced, none found");
                     return;
                 } else if diff_fields.len() > 1 {
-                    let item = tcx.map.expect_item(impl_node_id);
+                    let item = tcx.hir.expect_item(impl_node_id);
                     let span = if let ItemImpl(.., Some(ref t), _, _) = item.node {
                         t.path.span
                     } else {
-                        tcx.map.span(impl_node_id)
+                        tcx.hir.span(impl_node_id)
                     };
 
                     let mut err = struct_span_err!(tcx.sess,
@@ -343,7 +332,7 @@ fn visit_implementation_of_coerce_unsized<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         infcx.resolve_regions_and_report_errors(&free_regions, impl_node_id);
 
         if let Some(kind) = kind {
-            tcx.custom_coerce_unsized_kinds.borrow_mut().insert(impl_did, kind);
+            tcx.maps.custom_coerce_unsized_kind.borrow_mut().insert(impl_did, kind);
         }
     });
 }

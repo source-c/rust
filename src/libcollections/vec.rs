@@ -16,7 +16,7 @@
 //!
 //! # Examples
 //!
-//! You can explicitly create a [`Vec<T>`] with [`new()`]:
+//! You can explicitly create a [`Vec<T>`] with [`new`]:
 //!
 //! ```
 //! let v: Vec<i32> = Vec::new();
@@ -58,7 +58,7 @@
 //! ```
 //!
 //! [`Vec<T>`]: ../../std/vec/struct.Vec.html
-//! [`new()`]: ../../std/vec/struct.Vec.html#method.new
+//! [`new`]: ../../std/vec/struct.Vec.html#method.new
 //! [`push`]: ../../std/vec/struct.Vec.html#method.push
 //! [`Index`]: ../../std/ops/trait.Index.html
 //! [`IndexMut`]: ../../std/ops/trait.IndexMut.html
@@ -84,6 +84,7 @@ use core::ptr::Shared;
 use core::slice;
 
 use super::range::RangeArgument;
+use Bound::{Excluded, Included, Unbounded};
 
 /// A contiguous growable array type, written `Vec<T>` but pronounced 'vector'.
 ///
@@ -215,19 +216,19 @@ use super::range::RangeArgument;
 /// The pointer will never be null, so this type is null-pointer-optimized.
 ///
 /// However, the pointer may not actually point to allocated memory. In particular,
-/// if you construct a `Vec` with capacity 0 via [`Vec::new()`], [`vec![]`][`vec!`],
-/// [`Vec::with_capacity(0)`][`Vec::with_capacity`], or by calling [`shrink_to_fit()`]
+/// if you construct a `Vec` with capacity 0 via [`Vec::new`], [`vec![]`][`vec!`],
+/// [`Vec::with_capacity(0)`][`Vec::with_capacity`], or by calling [`shrink_to_fit`]
 /// on an empty Vec, it will not allocate memory. Similarly, if you store zero-sized
 /// types inside a `Vec`, it will not allocate space for them. *Note that in this case
-/// the `Vec` may not report a [`capacity()`] of 0*. `Vec` will allocate if and only
-/// if [`mem::size_of::<T>()`]` * capacity() > 0`. In general, `Vec`'s allocation
+/// the `Vec` may not report a [`capacity`] of 0*. `Vec` will allocate if and only
+/// if [`mem::size_of::<T>`]` * capacity() > 0`. In general, `Vec`'s allocation
 /// details are subtle enough that it is strongly recommended that you only
 /// free memory allocated by a `Vec` by creating a new `Vec` and dropping it.
 ///
 /// If a `Vec` *has* allocated memory, then the memory it points to is on the heap
 /// (as defined by the allocator Rust is configured to use by default), and its
-/// pointer points to [`len()`] initialized elements in order (what you would see
-/// if you coerced it to a slice), followed by [`capacity()`]` - `[`len()`]
+/// pointer points to [`len`] initialized elements in order (what you would see
+/// if you coerced it to a slice), followed by [`capacity`]` - `[`len`]
 /// logically uninitialized elements.
 ///
 /// `Vec` will never perform a "small optimization" where elements are actually
@@ -243,13 +244,13 @@ use super::range::RangeArgument;
 ///
 /// `Vec` will never automatically shrink itself, even if completely empty. This
 /// ensures no unnecessary allocations or deallocations occur. Emptying a `Vec`
-/// and then filling it back up to the same [`len()`] should incur no calls to
+/// and then filling it back up to the same [`len`] should incur no calls to
 /// the allocator. If you wish to free up unused memory, use
-/// [`shrink_to_fit`][`shrink_to_fit()`].
+/// [`shrink_to_fit`][`shrink_to_fit`].
 ///
 /// [`push`] and [`insert`] will never (re)allocate if the reported capacity is
 /// sufficient. [`push`] and [`insert`] *will* (re)allocate if
-/// [`len()`]` == `[`capacity()`]. That is, the reported capacity is completely
+/// [`len`]` == `[`capacity`]. That is, the reported capacity is completely
 /// accurate, and can be relied on. It can even be used to manually free the memory
 /// allocated by a `Vec` if desired. Bulk insertion methods *may* reallocate, even
 /// when not necessary.
@@ -261,7 +262,7 @@ use super::range::RangeArgument;
 ///
 /// `vec![x; n]`, `vec![a, b, c, d]`, and
 /// [`Vec::with_capacity(n)`][`Vec::with_capacity`], will all produce a `Vec`
-/// with exactly the requested capacity. If [`len()`]` == `[`capacity()`],
+/// with exactly the requested capacity. If [`len`]` == `[`capacity`],
 /// (as is the case for the [`vec!`] macro), then a `Vec<T>` can be converted to
 /// and from a [`Box<[T]>`][owned slice] without reallocating or moving the elements.
 ///
@@ -282,11 +283,11 @@ use super::range::RangeArgument;
 /// [`String`]: ../../std/string/struct.String.html
 /// [`&str`]: ../../std/primitive.str.html
 /// [`Vec::with_capacity`]: ../../std/vec/struct.Vec.html#method.with_capacity
-/// [`Vec::new()`]: ../../std/vec/struct.Vec.html#method.new
-/// [`shrink_to_fit()`]: ../../std/vec/struct.Vec.html#method.shrink_to_fit
-/// [`capacity()`]: ../../std/vec/struct.Vec.html#method.capacity
-/// [`mem::size_of::<T>()`]: ../../std/mem/fn.size_of.html
-/// [`len()`]: ../../std/vec/struct.Vec.html#method.len
+/// [`Vec::new`]: ../../std/vec/struct.Vec.html#method.new
+/// [`shrink_to_fit`]: ../../std/vec/struct.Vec.html#method.shrink_to_fit
+/// [`capacity`]: ../../std/vec/struct.Vec.html#method.capacity
+/// [`mem::size_of::<T>`]: ../../std/mem/fn.size_of.html
+/// [`len`]: ../../std/vec/struct.Vec.html#method.len
 /// [`push`]: ../../std/vec/struct.Vec.html#method.push
 /// [`insert`]: ../../std/vec/struct.Vec.html#method.insert
 /// [`reserve`]: ../../std/vec/struct.Vec.html#method.reserve
@@ -436,7 +437,9 @@ impl<T> Vec<T> {
 
     /// Reserves capacity for at least `additional` more elements to be inserted
     /// in the given `Vec<T>`. The collection may reserve more space to avoid
-    /// frequent reallocations.
+    /// frequent reallocations. After calling `reserve`, capacity will be
+    /// greater than or equal to `self.len() + additional`. Does nothing if
+    /// capacity is already sufficient.
     ///
     /// # Panics
     ///
@@ -455,8 +458,9 @@ impl<T> Vec<T> {
     }
 
     /// Reserves the minimum capacity for exactly `additional` more elements to
-    /// be inserted in the given `Vec<T>`. Does nothing if the capacity is already
-    /// sufficient.
+    /// be inserted in the given `Vec<T>`. After calling `reserve_exact`,
+    /// capacity will be greater than or equal to `self.len() + additional`.
+    /// Does nothing if the capacity is already sufficient.
     ///
     /// Note that the allocator may give the collection more space than it
     /// requests. Therefore capacity can not be relied upon to be precisely
@@ -500,12 +504,12 @@ impl<T> Vec<T> {
     /// Converts the vector into [`Box<[T]>`][owned slice].
     ///
     /// Note that this will drop any excess capacity. Calling this and
-    /// converting back to a vector with [`into_vec()`] is equivalent to calling
-    /// [`shrink_to_fit()`].
+    /// converting back to a vector with [`into_vec`] is equivalent to calling
+    /// [`shrink_to_fit`].
     ///
     /// [owned slice]: ../../std/boxed/struct.Box.html
-    /// [`into_vec()`]: ../../std/primitive.slice.html#method.into_vec
-    /// [`shrink_to_fit()`]: #method.shrink_to_fit
+    /// [`into_vec`]: ../../std/primitive.slice.html#method.into_vec
+    /// [`shrink_to_fit`]: #method.shrink_to_fit
     ///
     /// # Examples
     ///
@@ -543,6 +547,9 @@ impl<T> Vec<T> {
     ///
     /// The [`drain`] method can emulate `truncate`, but causes the excess
     /// elements to be returned instead of dropped.
+    ///
+    /// Note that this method has no effect on the allocated capacity
+    /// of the vector.
     ///
     /// # Examples
     ///
@@ -819,28 +826,29 @@ impl<T> Vec<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(dedup_by)]
-    ///
     /// let mut vec = vec![10, 20, 21, 30, 20];
     ///
     /// vec.dedup_by_key(|i| *i / 10);
     ///
     /// assert_eq!(vec, [10, 20, 30, 20]);
     /// ```
-    #[unstable(feature = "dedup_by", reason = "recently added", issue = "37087")]
+    #[stable(feature = "dedup_by", since = "1.16.0")]
     #[inline]
     pub fn dedup_by_key<F, K>(&mut self, mut key: F) where F: FnMut(&mut T) -> K, K: PartialEq {
         self.dedup_by(|a, b| key(a) == key(b))
     }
 
-    /// Removes consecutive elements in the vector that resolve to the same key.
+    /// Removes consecutive elements in the vector according to a predicate.
+    ///
+    /// The `same_bucket` function is passed references to two elements from the vector, and
+    /// returns `true` if the elements compare equal, or `false` if they do not. Only the first
+    /// of adjacent equal items is kept.
     ///
     /// If the vector is sorted, this removes all duplicates.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(dedup_by)]
     /// use std::ascii::AsciiExt;
     ///
     /// let mut vec = vec!["foo", "bar", "Bar", "baz", "bar"];
@@ -849,7 +857,7 @@ impl<T> Vec<T> {
     ///
     /// assert_eq!(vec, ["foo", "bar", "baz", "bar"]);
     /// ```
-    #[unstable(feature = "dedup_by", reason = "recently added", issue = "37087")]
+    #[stable(feature = "dedup_by", since = "1.16.0")]
     pub fn dedup_by<F>(&mut self, mut same_bucket: F) where F: FnMut(&mut T, &mut T) -> bool {
         unsafe {
             // Although we have a mutable reference to `self`, we cannot make
@@ -1022,8 +1030,8 @@ impl<T> Vec<T> {
     /// Create a draining iterator that removes the specified range in the vector
     /// and yields the removed items.
     ///
-    /// Note 1: The element range is removed even if the iterator is not
-    /// consumed until the end.
+    /// Note 1: The element range is removed even if the iterator is only
+    /// partially consumed or not consumed at all.
     ///
     /// Note 2: It is unspecified how many elements are removed from the vector,
     /// if the `Drain` value is leaked.
@@ -1060,8 +1068,16 @@ impl<T> Vec<T> {
         // the hole, and the vector length is restored to the new length.
         //
         let len = self.len();
-        let start = *range.start().unwrap_or(&0);
-        let end = *range.end().unwrap_or(&len);
+        let start = match range.start() {
+            Included(&n) => n,
+            Excluded(&n) => n + 1,
+            Unbounded    => 0,
+        };
+        let end = match range.end() {
+            Included(&n) => n + 1,
+            Excluded(&n) => n,
+            Unbounded    => len,
+        };
         assert!(start <= end);
         assert!(end <= len);
 
@@ -1082,6 +1098,9 @@ impl<T> Vec<T> {
     }
 
     /// Clears the vector, removing all values.
+    ///
+    /// Note that this method has no effect on the allocated capacity
+    /// of the vector.
     ///
     /// # Examples
     ///
@@ -1204,7 +1223,7 @@ impl<T: Clone> Vec<T> {
         unsafe {
             let mut ptr = self.as_mut_ptr().offset(self.len() as isize);
             // Use SetLenOnDrop to work around bug where compiler
-            // may not realize the store through `ptr` trough self.set_len()
+            // may not realize the store through `ptr` through self.set_len()
             // don't alias.
             let mut local_len = SetLenOnDrop::new(&mut self.len);
 
@@ -1319,6 +1338,27 @@ impl<T: PartialEq> Vec<T> {
     #[inline]
     pub fn dedup(&mut self) {
         self.dedup_by(|a, b| a == b)
+    }
+
+    /// Removes the first instance of `item` from the vector if the item exists.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    ///# #![feature(vec_remove_item)]
+    /// let mut vec = vec![1, 2, 3, 1];
+    ///
+    /// vec.remove_item(&1);
+    ///
+    /// assert_eq!(vec, vec![2, 3, 1]);
+    /// ```
+    #[unstable(feature = "vec_remove_item", reason = "recently added", issue = "40062")]
+    pub fn remove_item(&mut self, item: &T) -> Option<T> {
+        let pos = match self.iter().position(|x| *x == *item) {
+            Some(x) => x,
+            None => return None,
+        };
+        Some(self.remove(pos))
     }
 }
 
@@ -1767,6 +1807,7 @@ array_impls! {
     30 31 32
 }
 
+/// Implements comparison of vectors, lexicographically.
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: PartialOrd> PartialOrd for Vec<T> {
     #[inline]
@@ -1778,6 +1819,7 @@ impl<T: PartialOrd> PartialOrd for Vec<T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: Eq> Eq for Vec<T> {}
 
+/// Implements ordering of vectors, lexicographically.
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: Ord> Ord for Vec<T> {
     #[inline]
@@ -1856,6 +1898,22 @@ impl<'a, T: Clone> From<&'a [T]> for Vec<T> {
 impl<'a, T> From<Cow<'a, [T]>> for Vec<T> where [T]: ToOwned<Owned=Vec<T>> {
     fn from(s: Cow<'a, [T]>) -> Vec<T> {
         s.into_owned()
+    }
+}
+
+// note: test pulls in libstd, which causes errors here
+#[cfg(not(test))]
+#[stable(feature = "vec_from_box", since = "1.17.0")]
+impl<T> From<Box<[T]>> for Vec<T> {
+    fn from(s: Box<[T]>) -> Vec<T> {
+        s.into_vec()
+    }
+}
+
+#[stable(feature = "box_from_vec", since = "1.17.0")]
+impl<T> Into<Box<[T]>> for Vec<T> {
+    fn into(self) -> Box<[T]> {
+        self.into_boxed_slice()
     }
 }
 
@@ -1952,7 +2010,7 @@ impl<T> IntoIter<T> {
     /// assert_eq!(into_iter.next().unwrap(), 'z');
     /// ```
     #[stable(feature = "vec_into_iter_as_slice", since = "1.15.0")]
-    pub fn as_mut_slice(&self) -> &mut [T] {
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe {
             slice::from_raw_parts_mut(self.ptr as *mut T, self.len())
         }
@@ -2062,7 +2120,7 @@ unsafe impl<#[may_dangle] T> Drop for IntoIter<T> {
         for _x in self.by_ref() {}
 
         // RawVec handles deallocation
-        let _ = unsafe { RawVec::from_raw_parts(*self.buf, self.cap) };
+        let _ = unsafe { RawVec::from_raw_parts(self.buf.as_mut_ptr(), self.cap) };
     }
 }
 
@@ -2081,6 +2139,15 @@ pub struct Drain<'a, T: 'a> {
     /// Current remaining range to remove
     iter: slice::Iter<'a, T>,
     vec: Shared<Vec<T>>,
+}
+
+#[stable(feature = "collection_debug", since = "1.17.0")]
+impl<'a, T: 'a + fmt::Debug> fmt::Debug for Drain<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Drain")
+         .field(&self.iter.as_slice())
+         .finish()
+    }
 }
 
 #[stable(feature = "drain", since = "1.6.0")]
@@ -2118,7 +2185,7 @@ impl<'a, T> Drop for Drain<'a, T> {
 
         if self.tail_len > 0 {
             unsafe {
-                let source_vec = &mut **self.vec;
+                let source_vec = &mut *self.vec.as_mut_ptr();
                 // memmove back untouched tail, update to new length
                 let start = source_vec.len();
                 let tail = self.tail_start;
@@ -2149,6 +2216,7 @@ impl<'a, T> FusedIterator for Drain<'a, T> {}
 #[unstable(feature = "collection_placement",
            reason = "struct name and placement protocol are subject to change",
            issue = "30172")]
+#[derive(Debug)]
 pub struct PlaceBack<'a, T: 'a> {
     vec: &'a mut Vec<T>,
 }

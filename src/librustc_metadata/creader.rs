@@ -17,7 +17,8 @@ use schema::CrateRoot;
 use rustc::hir::def_id::{CrateNum, DefIndex};
 use rustc::hir::svh::Svh;
 use rustc::middle::cstore::DepKind;
-use rustc::session::{config, Session};
+use rustc::session::Session;
+use rustc::session::config::{Sanitizer, self};
 use rustc_back::PanicStrategy;
 use rustc::session::search_paths::PathKind;
 use rustc::middle;
@@ -98,7 +99,7 @@ fn register_native_lib(sess: &Session,
     }
     let is_osx = sess.target.target.options.is_like_osx;
     if lib.kind == cstore::NativeFramework && !is_osx {
-        let msg = "native frameworks are only available on OSX targets";
+        let msg = "native frameworks are only available on macOS targets";
         match span {
             Some(span) => span_err!(sess, span, E0455, "{}", msg),
             None => sess.err(msg),
@@ -110,6 +111,13 @@ fn register_native_lib(sess: &Session,
                                        span.unwrap(),
                                        GateIssue::Language,
                                        "is feature gated");
+    }
+    if lib.kind == cstore::NativeStaticNobundle && !sess.features.borrow().static_nobundle {
+        feature_gate::emit_feature_err(&sess.parse_sess,
+                                       "static_nobundle",
+                                       span.unwrap(),
+                                       GateIssue::Language,
+                                       "kind=\"static-nobundle\" is feature gated");
     }
     cstore.add_used_library(lib);
 }
@@ -228,7 +236,8 @@ impl<'a> CrateLoader<'a> {
             // path (this is a top-level dependency) as we don't want to
             // implicitly load anything inside the dependency lookup path.
             let prev_kind = source.dylib.as_ref().or(source.rlib.as_ref())
-                                  .unwrap().1;
+                                  .or(source.rmeta.as_ref())
+                                  .expect("No sources for crate").1;
             if ret.is_none() && (prev_kind == kind || prev_kind == PathKind::All) {
                 ret = Some(cnum);
             }
@@ -302,10 +311,13 @@ impl<'a> CrateLoader<'a> {
             crate_root.def_path_table.decode(&metadata)
         });
 
+        let exported_symbols = crate_root.exported_symbols.decode(&metadata).collect();
+
         let mut cmeta = cstore::CrateMetadata {
             name: name,
             extern_crate: Cell::new(None),
             def_path_table: def_path_table,
+            exported_symbols: exported_symbols,
             proc_macros: crate_root.macro_derive_registrar.map(|_| {
                 self.load_derive_macros(&crate_root, dylib.clone().map(|p| p.0), span)
             }),
@@ -574,7 +586,8 @@ impl<'a> CrateLoader<'a> {
         use proc_macro::TokenStream;
         use proc_macro::__internal::Registry;
         use rustc_back::dynamic_lib::DynamicLibrary;
-        use syntax_ext::deriving::custom::CustomDerive;
+        use syntax_ext::deriving::custom::ProcMacroDerive;
+        use syntax_ext::proc_macro_impl::{AttrProcMacro, BangProcMacro};
 
         let path = match dylib {
             Some(dylib) => dylib,
@@ -604,11 +617,28 @@ impl<'a> CrateLoader<'a> {
                                       trait_name: &str,
                                       expand: fn(TokenStream) -> TokenStream,
                                       attributes: &[&'static str]) {
-                let attrs = attributes.iter().cloned().map(Symbol::intern).collect();
-                let derive = SyntaxExtension::CustomDerive(
-                    Box::new(CustomDerive::new(expand, attrs))
-                );
+                let attrs = attributes.iter().cloned().map(Symbol::intern).collect::<Vec<_>>();
+                let derive = ProcMacroDerive::new(expand, attrs.clone());
+                let derive = SyntaxExtension::ProcMacroDerive(Box::new(derive), attrs);
                 self.0.push((Symbol::intern(trait_name), Rc::new(derive)));
+            }
+
+            fn register_attr_proc_macro(&mut self,
+                                        name: &str,
+                                        expand: fn(TokenStream, TokenStream) -> TokenStream) {
+                let expand = SyntaxExtension::AttrProcMacro(
+                    Box::new(AttrProcMacro { inner: expand })
+                );
+                self.0.push((Symbol::intern(name), Rc::new(expand)));
+            }
+
+            fn register_bang_proc_macro(&mut self,
+                                        name: &str,
+                                        expand: fn(TokenStream) -> TokenStream) {
+                let expand = SyntaxExtension::ProcMacro(
+                    Box::new(BangProcMacro { inner: expand })
+                );
+                self.0.push((Symbol::intern(name), Rc::new(expand)));
             }
         }
 
@@ -673,6 +703,9 @@ impl<'a> CrateLoader<'a> {
 
     fn register_statically_included_foreign_items(&mut self) {
         for id in self.get_foreign_items_of_kind(cstore::NativeStatic) {
+            self.cstore.add_statically_included_foreign_item(id);
+        }
+        for id in self.get_foreign_items_of_kind(cstore::NativeStaticNobundle) {
             self.cstore.add_statically_included_foreign_item(id);
         }
     }
@@ -761,6 +794,64 @@ impl<'a> CrateLoader<'a> {
         self.sess.injected_panic_runtime.set(Some(cnum));
         self.inject_dependency_if(cnum, "a panic runtime",
                                   &|data| data.needs_panic_runtime());
+    }
+
+    fn inject_sanitizer_runtime(&mut self) {
+        if let Some(ref sanitizer) = self.sess.opts.debugging_opts.sanitizer {
+            // Sanitizers can only be used with x86_64 Linux executables linked
+            // to `std`
+            if self.sess.target.target.llvm_target != "x86_64-unknown-linux-gnu" {
+                self.sess.err(&format!("Sanitizers only work with the \
+                                        `x86_64-unknown-linux-gnu` target."));
+                return
+            }
+
+            if !self.sess.crate_types.borrow().iter().all(|ct| {
+                match *ct {
+                    // Link the runtime
+                    config::CrateTypeExecutable => true,
+                    // This crate will be compiled with the required
+                    // instrumentation pass
+                    config::CrateTypeRlib => false,
+                    _ => {
+                        self.sess.err(&format!("Only executables and rlibs can be \
+                                                compiled with `-Z sanitizer`"));
+                        false
+                    }
+                }
+            }) {
+                return
+            }
+
+            let mut uses_std = false;
+            self.cstore.iter_crate_data(|_, data| {
+                if data.name == "std" {
+                    uses_std = true;
+                }
+            });
+
+            if uses_std {
+                let name = match *sanitizer {
+                    Sanitizer::Address => "rustc_asan",
+                    Sanitizer::Leak => "rustc_lsan",
+                    Sanitizer::Memory => "rustc_msan",
+                    Sanitizer::Thread => "rustc_tsan",
+                };
+                info!("loading sanitizer: {}", name);
+
+                let symbol = Symbol::intern(name);
+                let dep_kind = DepKind::Implicit;
+                let (_, data) =
+                    self.resolve_crate(&None, symbol, symbol, None, DUMMY_SP,
+                                       PathKind::Crate, dep_kind);
+
+                // Sanity check the loaded crate to ensure it is indeed a sanitizer runtime
+                if !data.is_sanitizer_runtime() {
+                    self.sess.err(&format!("the crate `{}` is not a sanitizer runtime",
+                                           name));
+                }
+            }
+        }
     }
 
     fn inject_allocator_crate(&mut self) {
@@ -883,9 +974,11 @@ impl<'a> CrateLoader<'a> {
 
 impl<'a> CrateLoader<'a> {
     pub fn preprocess(&mut self, krate: &ast::Crate) {
-        for attr in krate.attrs.iter().filter(|m| m.name() == "link_args") {
-            if let Some(linkarg) = attr.value_str() {
-                self.cstore.add_used_link_args(&linkarg.as_str());
+        for attr in &krate.attrs {
+            if attr.path == "link_args" {
+                if let Some(linkarg) = attr.value_str() {
+                    self.cstore.add_used_link_args(&linkarg.as_str());
+                }
             }
         }
     }
@@ -914,6 +1007,7 @@ impl<'a> CrateLoader<'a> {
             }).and_then(|a| a.value_str()).map(Symbol::as_str);
             let kind = match kind.as_ref().map(|s| &s[..]) {
                 Some("static") => cstore::NativeStatic,
+                Some("static-nobundle") => cstore::NativeStaticNobundle,
                 Some("dylib") => cstore::NativeUnknown,
                 Some("framework") => cstore::NativeFramework,
                 Some(k) => {
@@ -958,10 +1052,13 @@ impl<'a> CrateLoader<'a> {
 
 impl<'a> middle::cstore::CrateLoader for CrateLoader<'a> {
     fn postprocess(&mut self, krate: &ast::Crate) {
+        // inject the sanitizer runtime before the allocator runtime because all
+        // sanitizers force the use of the `alloc_system` allocator
+        self.inject_sanitizer_runtime();
         self.inject_allocator_crate();
         self.inject_panic_runtime(krate);
 
-        if log_enabled!(log::INFO) {
+        if log_enabled!(log::LogLevel::Info) {
             dump_crates(&self.cstore);
         }
 
@@ -992,10 +1089,20 @@ impl<'a> middle::cstore::CrateLoader for CrateLoader<'a> {
             let mut found = false;
             for lib in self.cstore.get_used_libraries().borrow_mut().iter_mut() {
                 if lib.name == name as &str {
-                    lib.kind = kind;
+                    let mut changed = false;
+                    if let Some(k) = kind {
+                        lib.kind = k;
+                        changed = true;
+                    }
                     if let &Some(ref new_name) = new_name {
                         lib.name = Symbol::intern(new_name);
+                        changed = true;
                     }
+                    if !changed {
+                        self.sess.warn(&format!("redundant linker flag specified for library `{}`",
+                                                name));
+                    }
+
                     found = true;
                 }
             }
@@ -1004,7 +1111,7 @@ impl<'a> middle::cstore::CrateLoader for CrateLoader<'a> {
                 let new_name = new_name.as_ref().map(|s| &**s); // &Option<String> -> Option<&str>
                 let lib = NativeLibrary {
                     name: Symbol::intern(new_name.unwrap_or(name)),
-                    kind: kind,
+                    kind: if let Some(k) = kind { k } else { cstore::NativeUnknown },
                     cfg: None,
                     foreign_items: Vec::new(),
                 };

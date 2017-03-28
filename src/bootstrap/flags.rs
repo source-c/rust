@@ -28,6 +28,7 @@ use step;
 /// Deserialized version of all flags for this compile.
 pub struct Flags {
     pub verbose: usize, // verbosity level: 0 == not verbose, 1 == verbose, 2 == very verbose
+    pub on_fail: Option<String>,
     pub stage: Option<u32>,
     pub keep_stage: Option<u32>,
     pub build: String,
@@ -67,6 +68,7 @@ pub enum Subcommand {
     },
     Clean,
     Dist {
+        paths: Vec<PathBuf>,
         install: bool,
     },
 }
@@ -80,6 +82,7 @@ impl Flags {
         opts.optopt("", "build", "build target of the stage0 compiler", "BUILD");
         opts.optmulti("", "host", "host targets to build", "HOST");
         opts.optmulti("", "target", "target targets to build", "TARGET");
+        opts.optopt("", "on-fail", "command to run on failure", "CMD");
         opts.optopt("", "stage", "stage to build", "N");
         opts.optopt("", "keep-stage", "stage to keep without recompiling", "N");
         opts.optopt("", "src", "path to the root of the rust checkout", "DIR");
@@ -249,6 +252,7 @@ To learn more about a subcommand, run `./x.py <command> -h`
                 opts.optflag("", "install", "run installer as well");
                 m = parse(&opts);
                 Subcommand::Dist {
+                    paths: remaining_as_path(&m),
                     install: m.opt_present("install"),
                 }
             }
@@ -281,12 +285,13 @@ To learn more about a subcommand, run `./x.py <command> -h`
         Flags {
             verbose: m.opt_count("v"),
             stage: stage,
+            on_fail: m.opt_str("on-fail"),
             keep_stage: m.opt_str("keep-stage").map(|j| j.parse().unwrap()),
             build: m.opt_str("build").unwrap_or_else(|| {
                 env::var("BUILD").unwrap()
             }),
-            host: m.opt_strs("host"),
-            target: m.opt_strs("target"),
+            host: split(m.opt_strs("host")),
+            target: split(m.opt_strs("target")),
             config: cfg_file,
             src: m.opt_str("src").map(PathBuf::from),
             jobs: m.opt_str("jobs").map(|j| j.parse().unwrap()),
@@ -306,4 +311,8 @@ impl Subcommand {
             _ => Vec::new(),
         }
     }
+}
+
+fn split(s: Vec<String>) -> Vec<String> {
+    s.iter().flat_map(|s| s.split(',')).map(|s| s.to_string()).collect()
 }

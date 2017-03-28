@@ -23,6 +23,7 @@ use hir::def_id::DefId;
 use traits;
 use ty::{self, Ty, TyCtxt, TypeFoldable};
 use ty::subst::Substs;
+use std::borrow::Cow;
 use syntax::ast;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -36,6 +37,25 @@ pub enum ObjectSafetyViolation {
 
     /// Method has something illegal
     Method(ast::Name, MethodViolationCode),
+}
+
+impl ObjectSafetyViolation {
+    pub fn error_msg(&self) -> Cow<'static, str> {
+        match *self {
+            ObjectSafetyViolation::SizedSelf =>
+                "the trait cannot require that `Self : Sized`".into(),
+            ObjectSafetyViolation::SupertraitSelf =>
+                "the trait cannot use `Self` as a type parameter \
+                 in the supertraits or where-clauses".into(),
+            ObjectSafetyViolation::Method(name, MethodViolationCode::StaticMethod) =>
+                format!("method `{}` has no receiver", name).into(),
+            ObjectSafetyViolation::Method(name, MethodViolationCode::ReferencesSelf) =>
+                format!("method `{}` references the `Self` type \
+                         in its arguments or return type", name).into(),
+            ObjectSafetyViolation::Method(name, MethodViolationCode::Generic) =>
+                format!("method `{}` has generic type parameters", name).into(),
+        }
+    }
 }
 
 /// Reasons a method might not be object-safe.
@@ -81,8 +101,10 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     {
         let mut violations = vec![];
 
-        if self.supertraits_reference_self(trait_def_id) {
-            violations.push(ObjectSafetyViolation::SupertraitSelf);
+        for def_id in traits::supertrait_def_ids(self, trait_def_id) {
+            if self.predicates_reference_self(def_id, true) {
+                violations.push(ObjectSafetyViolation::SupertraitSelf);
+            }
         }
 
         debug!("astconv_object_safety_violations(trait_def_id={:?}) = {:?}",
@@ -115,7 +137,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         if self.trait_has_sized_self(trait_def_id) {
             violations.push(ObjectSafetyViolation::SizedSelf);
         }
-        if self.supertraits_reference_self(trait_def_id) {
+        if self.predicates_reference_self(trait_def_id, false) {
             violations.push(ObjectSafetyViolation::SupertraitSelf);
         }
 
@@ -126,12 +148,20 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         violations
     }
 
-    fn supertraits_reference_self(self, trait_def_id: DefId) -> bool {
+    fn predicates_reference_self(
+        self,
+        trait_def_id: DefId,
+        supertraits_only: bool) -> bool
+    {
         let trait_ref = ty::Binder(ty::TraitRef {
             def_id: trait_def_id,
             substs: Substs::identity_for_item(self, trait_def_id)
         });
-        let predicates = self.item_super_predicates(trait_def_id);
+        let predicates = if supertraits_only {
+            self.item_super_predicates(trait_def_id)
+        } else {
+            self.item_predicates(trait_def_id)
+        };
         predicates
             .predicates
             .into_iter()

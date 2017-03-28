@@ -47,8 +47,6 @@ fn detect_llvm_link(llvm_config: &Path) -> (&'static str, Option<&'static str>) 
 }
 
 fn main() {
-    println!("cargo:rustc-cfg=cargobuild");
-
     let target = env::var("TARGET").expect("TARGET was not set");
     let llvm_config = env::var_os("LLVM_CONFIG")
         .map(PathBuf::from)
@@ -133,6 +131,12 @@ fn main() {
         if is_crossed && flag.starts_with("-m") {
             continue;
         }
+
+        // -Wdate-time is not supported by the netbsd cross compiler
+        if is_crossed && target.contains("netbsd") && flag.contains("date-time") {
+            continue;
+        }
+
         cfg.flag(flag);
     }
 
@@ -146,9 +150,7 @@ fn main() {
         cfg.flag("-DLLVM_RUSTLLVM");
     }
 
-    println!("cargo:rerun-if-changed=../rustllvm/PassWrapper.cpp");
-    println!("cargo:rerun-if-changed=../rustllvm/RustWrapper.cpp");
-    println!("cargo:rerun-if-changed=../rustllvm/ArchiveWrapper.cpp");
+    build_helper::rerun_if_changed_anything_in_dir(Path::new("../rustllvm"));
     cfg.file("../rustllvm/PassWrapper.cpp")
        .file("../rustllvm/RustWrapper.cpp")
        .file("../rustllvm/ArchiveWrapper.cpp")
@@ -231,16 +233,21 @@ fn main() {
         }
     }
 
-    // OpenBSD has a particular C++ runtime library name
+    let llvm_static_stdcpp = env::var_os("LLVM_STATIC_STDCPP");
+
     let stdcppname = if target.contains("openbsd") {
+        // OpenBSD has a particular C++ runtime library name
         "estdc++"
+    } else if target.contains("netbsd") && llvm_static_stdcpp.is_some() {
+        // NetBSD uses a separate library when relocation is required
+        "stdc++_pic"
     } else {
         "stdc++"
     };
 
     // C++ runtime library
     if !target.contains("msvc") {
-        if let Some(s) = env::var_os("LLVM_STATIC_STDCPP") {
+        if let Some(s) = llvm_static_stdcpp {
             assert!(!cxxflags.contains("stdlib=libc++"));
             let path = PathBuf::from(s);
             println!("cargo:rustc-link-search=native={}",

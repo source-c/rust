@@ -28,6 +28,7 @@
 
 #![cfg_attr(test, allow(deprecated))] // rand
 #![deny(warnings)]
+#![deny(missing_debug_implementations)]
 
 #![feature(alloc)]
 #![feature(allow_internal_unstable)]
@@ -51,8 +52,10 @@
 #![feature(shared)]
 #![feature(slice_get_slice)]
 #![feature(slice_patterns)]
+#![cfg_attr(not(test), feature(sort_unstable))]
 #![feature(specialization)]
 #![feature(staged_api)]
+#![feature(str_internals)]
 #![feature(trusted_len)]
 #![feature(unicode)]
 #![feature(unique)]
@@ -79,6 +82,7 @@ pub use btree_set::BTreeSet;
 #[doc(no_inline)]
 pub use linked_list::LinkedList;
 #[doc(no_inline)]
+#[allow(deprecated)]
 pub use enum_set::EnumSet;
 #[doc(no_inline)]
 pub use vec_deque::VecDeque;
@@ -126,14 +130,17 @@ mod std {
 }
 
 /// An endpoint of a range of keys.
-#[unstable(feature = "collections_bound", issue = "27787")]
+#[stable(feature = "collections_bound", since = "1.17.0")]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Bound<T> {
     /// An inclusive bound.
+    #[stable(feature = "collections_bound", since = "1.17.0")]
     Included(T),
     /// An exclusive bound.
+    #[stable(feature = "collections_bound", since = "1.17.0")]
     Excluded(T),
     /// An infinite endpoint. Indicates that there is no bound in this direction.
+    #[stable(feature = "collections_bound", since = "1.17.0")]
     Unbounded,
 }
 

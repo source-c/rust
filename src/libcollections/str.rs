@@ -19,6 +19,7 @@
 // It's cleaner to just turn off the unused_imports warning than to fix them.
 #![allow(unused_imports)]
 
+use core::fmt;
 use core::str as core_str;
 use core::str::pattern::Pattern;
 use core::str::pattern::{Searcher, ReverseSearcher, DoubleEndedSearcher};
@@ -122,6 +123,13 @@ pub struct EncodeUtf16<'a> {
     encoder: Utf16Encoder<Chars<'a>>,
 }
 
+#[stable(feature = "collection_debug", since = "1.17.0")]
+impl<'a> fmt::Debug for EncodeUtf16<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("EncodeUtf16 { .. }")
+    }
+}
+
 #[stable(feature = "encode_utf16", since = "1.8.0")]
 impl<'a> Iterator for EncodeUtf16<'a> {
     type Item = u16;
@@ -196,7 +204,7 @@ impl str {
         core_str::StrExt::len(self)
     }
 
-    /// Returns true if this slice has a length of zero bytes.
+    /// Returns `true` if `self` has a length of zero bytes.
     ///
     /// # Examples
     ///
@@ -290,9 +298,9 @@ impl str {
     /// excluding `end`.
     ///
     /// To get a mutable string slice instead, see the
-    /// [`slice_mut_unchecked()`] method.
+    /// [`slice_mut_unchecked`] method.
     ///
-    /// [`slice_mut_unchecked()`]: #method.slice_mut_unchecked
+    /// [`slice_mut_unchecked`]: #method.slice_mut_unchecked
     ///
     /// # Safety
     ///
@@ -333,9 +341,9 @@ impl str {
     /// excluding `end`.
     ///
     /// To get an immutable string slice instead, see the
-    /// [`slice_unchecked()`] method.
+    /// [`slice_unchecked`] method.
     ///
-    /// [`slice_unchecked()`]: #method.slice_unchecked
+    /// [`slice_unchecked`]: #method.slice_unchecked
     ///
     /// # Safety
     ///
@@ -359,10 +367,10 @@ impl str {
     /// The two slices returned go from the start of the string slice to `mid`,
     /// and from `mid` to the end of the string slice.
     ///
-    /// To get mutable string slices instead, see the [`split_at_mut()`]
+    /// To get mutable string slices instead, see the [`split_at_mut`]
     /// method.
     ///
-    /// [`split_at_mut()`]: #method.split_at_mut
+    /// [`split_at_mut`]: #method.split_at_mut
     ///
     /// # Panics
     ///
@@ -395,9 +403,9 @@ impl str {
     /// The two slices returned go from the start of the string slice to `mid`,
     /// and from `mid` to the end of the string slice.
     ///
-    /// To get immutable string slices instead, see the [`split_at()`] method.
+    /// To get immutable string slices instead, see the [`split_at`] method.
     ///
-    /// [`split_at()`]: #method.split_at
+    /// [`split_at`]: #method.split_at
     ///
     /// # Panics
     ///
@@ -816,10 +824,10 @@ impl str {
     /// [`DoubleEndedIterator`]: iter/trait.DoubleEndedIterator.html
     ///
     /// If the pattern allows a reverse search but its results might differ
-    /// from a forward search, the [`rsplit()`] method can be used.
+    /// from a forward search, the [`rsplit`] method can be used.
     ///
     /// [`char`]: primitive.char.html
-    /// [`rsplit()`]: #method.rsplit
+    /// [`rsplit`]: #method.rsplit
     ///
     /// # Examples
     ///
@@ -904,9 +912,9 @@ impl str {
     /// assert_eq!(d, &["a", "b", "c"]);
     /// ```
     ///
-    /// Use [`split_whitespace()`] for this behavior.
+    /// Use [`split_whitespace`] for this behavior.
     ///
-    /// [`split_whitespace()`]: #method.split_whitespace
+    /// [`split_whitespace`]: #method.split_whitespace
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn split<'a, P: Pattern<'a>>(&'a self, pat: P) -> Split<'a, P> {
         core_str::StrExt::split(self, pat)
@@ -928,9 +936,9 @@ impl str {
     ///
     /// [`DoubleEndedIterator`]: iter/trait.DoubleEndedIterator.html
     ///
-    /// For iterating from the front, the [`split()`] method can be used.
+    /// For iterating from the front, the [`split`] method can be used.
     ///
-    /// [`split()`]: #method.split
+    /// [`split`]: #method.split
     ///
     /// # Examples
     ///
@@ -969,10 +977,10 @@ impl str {
     /// The pattern can be a `&str`, [`char`], or a closure that determines the
     /// split.
     ///
-    /// Equivalent to [`split()`], except that the trailing substring
+    /// Equivalent to [`split`], except that the trailing substring
     /// is skipped if empty.
     ///
-    /// [`split()`]: #method.split
+    /// [`split`]: #method.split
     ///
     /// This method can be used for string data that is _terminated_,
     /// rather than _separated_ by a pattern.
@@ -987,9 +995,9 @@ impl str {
     /// [`char`]: primitive.char.html
     ///
     /// If the pattern allows a reverse search but its results might differ
-    /// from a forward search, the [`rsplit_terminator()`] method can be used.
+    /// from a forward search, the [`rsplit_terminator`] method can be used.
     ///
-    /// [`rsplit_terminator()`]: #method.rsplit_terminator
+    /// [`rsplit_terminator`]: #method.rsplit_terminator
     ///
     /// # Examples
     ///
@@ -1017,10 +1025,10 @@ impl str {
     ///
     /// [`char`]: primitive.char.html
     ///
-    /// Equivalent to [`split()`], except that the trailing substring is
+    /// Equivalent to [`split`], except that the trailing substring is
     /// skipped if empty.
     ///
-    /// [`split()`]: #method.split
+    /// [`split`]: #method.split
     ///
     /// This method can be used for string data that is _terminated_,
     /// rather than _separated_ by a pattern.
@@ -1031,10 +1039,10 @@ impl str {
     /// reverse search, and it will be double ended if a forward/reverse
     /// search yields the same elements.
     ///
-    /// For iterating from the front, the [`split_terminator()`] method can be
+    /// For iterating from the front, the [`split_terminator`] method can be
     /// used.
     ///
-    /// [`split_terminator()`]: #method.split_terminator
+    /// [`split_terminator`]: #method.split_terminator
     ///
     /// # Examples
     ///
@@ -1068,10 +1076,10 @@ impl str {
     /// The returned iterator will not be double ended, because it is
     /// not efficient to support.
     ///
-    /// If the pattern allows a reverse search, the [`rsplitn()`] method can be
+    /// If the pattern allows a reverse search, the [`rsplitn`] method can be
     /// used.
     ///
-    /// [`rsplitn()`]: #method.rsplitn
+    /// [`rsplitn`]: #method.rsplitn
     ///
     /// # Examples
     ///
@@ -1119,9 +1127,9 @@ impl str {
     /// The returned iterator will not be double ended, because it is not
     /// efficient to support.
     ///
-    /// For splitting from the front, the [`splitn()`] method can be used.
+    /// For splitting from the front, the [`splitn`] method can be used.
     ///
-    /// [`splitn()`]: #method.splitn
+    /// [`splitn`]: #method.splitn
     ///
     /// # Examples
     ///
@@ -1169,9 +1177,9 @@ impl str {
     /// [`char`]: primitive.char.html
     ///
     /// If the pattern allows a reverse search but its results might differ
-    /// from a forward search, the [`rmatches()`] method can be used.
+    /// from a forward search, the [`rmatches`] method can be used.
     ///
-    /// [`rmatches()`]: #method.rmatches
+    /// [`rmatches`]: #method.rmatches
     ///
     /// # Examples
     ///
@@ -1205,9 +1213,9 @@ impl str {
     ///
     /// [`DoubleEndedIterator`]: iter/trait.DoubleEndedIterator.html
     ///
-    /// For iterating from the front, the [`matches()`] method can be used.
+    /// For iterating from the front, the [`matches`] method can be used.
     ///
-    /// [`matches()`]: #method.matches
+    /// [`matches`]: #method.matches
     ///
     /// # Examples
     ///
@@ -1247,9 +1255,9 @@ impl str {
     /// [`DoubleEndedIterator`]: iter/trait.DoubleEndedIterator.html
     ///
     /// If the pattern allows a reverse search but its results might differ
-    /// from a forward search, the [`rmatch_indices()`] method can be used.
+    /// from a forward search, the [`rmatch_indices`] method can be used.
     ///
-    /// [`rmatch_indices()`]: #method.rmatch_indices
+    /// [`rmatch_indices`]: #method.rmatch_indices
     ///
     /// # Examples
     ///
@@ -1289,9 +1297,9 @@ impl str {
     ///
     /// [`DoubleEndedIterator`]: iter/trait.DoubleEndedIterator.html
     ///
-    /// For iterating from the front, the [`match_indices()`] method can be used.
+    /// For iterating from the front, the [`match_indices`] method can be used.
     ///
-    /// [`match_indices()`]: #method.match_indices
+    /// [`match_indices`]: #method.match_indices
     ///
     /// # Examples
     ///
@@ -1607,7 +1615,6 @@ impl str {
     /// Basic usage:
     ///
     /// ```
-    /// # #![feature(str_replacen)]
     /// let s = "foo foo 123 foo";
     /// assert_eq!("new new 123 foo", s.replacen("foo", "new", 2));
     /// assert_eq!("faa fao 123 foo", s.replacen('o', "a", 3));
@@ -1617,13 +1624,10 @@ impl str {
     /// When the pattern doesn't match:
     ///
     /// ```
-    /// # #![feature(str_replacen)]
     /// let s = "this is old";
     /// assert_eq!(s, s.replacen("cookie monster", "little lamb", 10));
     /// ```
-    #[unstable(feature = "str_replacen",
-               issue = "36436",
-               reason = "only need to replace first N matches")]
+    #[stable(feature = "str_replacen", since = "1.16.0")]
     pub fn replacen<'a, P: Pattern<'a>>(&'a self, pat: P, to: &str, count: usize) -> String {
         // Hope to reduce the times of re-allocation
         let mut result = String::with_capacity(32);
@@ -1641,6 +1645,10 @@ impl str {
     ///
     /// 'Lowercase' is defined according to the terms of the Unicode Derived Core Property
     /// `Lowercase`.
+    ///
+    /// Since some characters can expand into multiple characters when changing
+    /// the case, this function returns a [`String`] instead of modifying the
+    /// parameter in-place.
     ///
     /// [`String`]: string/struct.String.html
     ///
@@ -1713,6 +1721,10 @@ impl str {
     ///
     /// 'Uppercase' is defined according to the terms of the Unicode Derived Core Property
     /// `Uppercase`.
+    ///
+    /// Since some characters can expand into multiple characters when changing
+    /// the case, this function returns a [`String`] instead of modifying the
+    /// parameter in-place.
     ///
     /// [`String`]: string/struct.String.html
     ///
@@ -1795,11 +1807,9 @@ impl str {
     /// Basic usage:
     ///
     /// ```
-    /// #![feature(repeat_str)]
-    ///
     /// assert_eq!("abc".repeat(4), String::from("abcabcabcabc"));
     /// ```
-    #[unstable(feature = "repeat_str", issue = "37079")]
+    #[stable(feature = "repeat_str", since = "1.16.0")]
     pub fn repeat(&self, n: usize) -> String {
         let mut s = String::with_capacity(self.len() * n);
         s.extend((0..n).map(|_| self));

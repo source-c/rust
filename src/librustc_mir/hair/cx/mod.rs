@@ -18,7 +18,7 @@ use hair::*;
 use rustc::mir::transform::MirSource;
 
 use rustc::middle::const_val::ConstVal;
-use rustc_const_eval::{ConstContext, EvalHint, fatal_const_eval_err};
+use rustc_const_eval::{ConstContext, fatal_const_eval_err};
 use rustc_data_structures::indexed_vec::Idx;
 use rustc::hir::def_id::DefId;
 use rustc::hir::map::blocks::FnLikeNode;
@@ -45,13 +45,13 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
             MirSource::Const(_) |
             MirSource::Static(..) => hir::Constness::Const,
             MirSource::Fn(id) => {
-                let fn_like = FnLikeNode::from_node(infcx.tcx.map.get(id));
+                let fn_like = FnLikeNode::from_node(infcx.tcx.hir.get(id));
                 fn_like.map_or(hir::Constness::NotConst, |f| f.constness())
             }
             MirSource::Promoted(..) => bug!(),
         };
 
-        let attrs = infcx.tcx.map.attrs(src.item_id());
+        let attrs = infcx.tcx.hir.attrs(src.item_id());
 
         // Some functions always have overflow checks enabled,
         // however, they may not get codegen'd, depending on
@@ -59,13 +59,8 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
         let mut check_overflow = attrs.iter()
             .any(|item| item.check_name("rustc_inherit_overflow_checks"));
 
-        // Respect -Z force-overflow-checks=on and -C debug-assertions.
-        check_overflow |= infcx.tcx
-            .sess
-            .opts
-            .debugging_opts
-            .force_overflow_checks
-            .unwrap_or(infcx.tcx.sess.opts.debug_assertions);
+        // Respect -C overflow-checks.
+        check_overflow |= infcx.tcx.sess.overflow_checks();
 
         // Constants and const fn's always need overflow checks.
         check_overflow |= constness == hir::Constness::Const;
@@ -118,7 +113,7 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
 
     pub fn const_eval_literal(&mut self, e: &hir::Expr) -> Literal<'tcx> {
         let tcx = self.tcx.global_tcx();
-        match ConstContext::with_tables(tcx, self.tables()).eval(e, EvalHint::ExprTypeChecked) {
+        match ConstContext::with_tables(tcx, self.tables()).eval(e) {
             Ok(value) => Literal::Value { value: value },
             Err(s) => fatal_const_eval_err(tcx, &s, e.span, "expression")
         }
@@ -137,9 +132,8 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
                 let method_ty = self.tcx.item_type(item.def_id);
                 let method_ty = method_ty.subst(self.tcx, substs);
                 return (method_ty,
-                        Literal::Item {
-                            def_id: item.def_id,
-                            substs: substs,
+                        Literal::Value {
+                            value: ConstVal::Function(item.def_id, substs),
                         });
             }
         }
@@ -170,7 +164,7 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
         self.tcx
     }
 
-    pub fn tables(&self) -> &'a ty::Tables<'gcx> {
+    pub fn tables(&self) -> &'a ty::TypeckTables<'gcx> {
         self.infcx.tables.expect_interned()
     }
 

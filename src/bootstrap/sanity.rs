@@ -45,7 +45,7 @@ pub fn check(build: &mut Build) {
             let target = path.join(cmd);
             let mut cmd_alt = cmd.to_os_string();
             cmd_alt.push(".exe");
-            if target.exists() ||
+            if target.is_file() ||
                target.with_extension("exe").exists() ||
                target.join(cmd_alt).exists() {
                 return Some(target);
@@ -151,10 +151,10 @@ pub fn check(build: &mut Build) {
     }
 
     for target in build.config.target.iter() {
-        // Can't compile for iOS unless we're on OSX
+        // Can't compile for iOS unless we're on macOS
         if target.contains("apple-ios") &&
            !build.config.build.contains("apple-darwin") {
-            panic!("the iOS target is only supported on OSX");
+            panic!("the iOS target is only supported on macOS");
         }
 
         // Make sure musl-root is valid if specified
@@ -197,10 +197,6 @@ package instead of cmake:
 $ pacman -R cmake && pacman -S mingw-w64-x86_64-cmake
 ");
             }
-        }
-
-        if target.contains("arm-linux-android") {
-            need_cmd("adb".as_ref());
         }
     }
 

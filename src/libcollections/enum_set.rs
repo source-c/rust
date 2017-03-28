@@ -17,6 +17,8 @@
             reason = "matches collection reform specification, \
                       waiting for dust to settle",
             issue = "37966")]
+#![rustc_deprecated(since = "1.16.0", reason = "long since replaced")]
+#![allow(deprecated)]
 
 use core::marker;
 use core::fmt;
@@ -104,7 +106,7 @@ impl<E: CLike> EnumSet<E> {
         self.bits.count_ones() as usize
     }
 
-    /// Returns true if the `EnumSet` is empty.
+    /// Returns `true` if the `EnumSet` is empty.
     pub fn is_empty(&self) -> bool {
         self.bits == 0
     }
@@ -218,6 +220,14 @@ pub struct Iter<E> {
     index: usize,
     bits: usize,
     marker: marker::PhantomData<E>,
+}
+
+impl<E: fmt::Debug> fmt::Debug for Iter<E> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Iter")
+         .field(&self.clone())
+         .finish()
+    }
 }
 
 // FIXME(#19839) Remove in favor of `#[derive(Clone)]`

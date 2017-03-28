@@ -15,7 +15,7 @@ use rustc::middle::const_val::ConstVal;
 use rustc::mir::{Field, BorrowKind, Mutability};
 use rustc::ty::{self, TyCtxt, AdtDef, Ty, TypeVariants, Region};
 use rustc::ty::subst::{Substs, Kind};
-use rustc::hir::{self, PatKind};
+use rustc::hir::{self, PatKind, RangeEnd};
 use rustc::hir::def::{Def, CtorKind};
 use rustc::hir::pat_util::EnumerateAndAdjustIterator;
 
@@ -27,9 +27,9 @@ use syntax::ptr::P;
 use syntax_pos::Span;
 
 #[derive(Clone, Debug)]
-pub enum PatternError {
+pub enum PatternError<'tcx> {
     StaticInPattern(Span),
-    ConstEval(eval::ConstEvalErr),
+    ConstEval(eval::ConstEvalErr<'tcx>),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -84,12 +84,13 @@ pub enum PatternKind<'tcx> {
     },
 
     Constant {
-        value: ConstVal,
+        value: ConstVal<'tcx>,
     },
 
     Range {
-        lo: ConstVal,
-        hi: ConstVal,
+        lo: ConstVal<'tcx>,
+        hi: ConstVal<'tcx>,
+        end: RangeEnd,
     },
 
     /// matches against a slice, checking the length and extracting elements
@@ -117,7 +118,7 @@ fn print_const_val(value: &ConstVal, f: &mut fmt::Formatter) -> fmt::Result {
         ConstVal::Char(c) => write!(f, "{:?}", c),
         ConstVal::Struct(_) |
         ConstVal::Tuple(_) |
-        ConstVal::Function(_) |
+        ConstVal::Function(..) |
         ConstVal::Array(..) |
         ConstVal::Repeat(..) => bug!("{:?} not printable in a pattern", value)
     }
@@ -151,7 +152,11 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
                         Some(&adt_def.variants[variant_index])
                     }
                     _ => if let ty::TyAdt(adt, _) = self.ty.sty {
-                        Some(adt.struct_variant())
+                        if adt.is_univariant() {
+                            Some(&adt.variants[0])
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -214,7 +219,7 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
             }
             PatternKind::Deref { ref subpattern } => {
                 match self.ty.sty {
-                    ty::TyBox(_) => write!(f, "box ")?,
+                    ty::TyAdt(def, _) if def.is_box() => write!(f, "box ")?,
                     ty::TyRef(_, mt) => {
                         write!(f, "&")?;
                         if mt.mutbl == hir::MutMutable {
@@ -228,9 +233,12 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
             PatternKind::Constant { ref value } => {
                 print_const_val(value, f)
             }
-            PatternKind::Range { ref lo, ref hi } => {
+            PatternKind::Range { ref lo, ref hi, ref end } => {
                 print_const_val(lo, f)?;
-                write!(f, "...")?;
+                match *end {
+                    RangeEnd::Included => write!(f, "...")?,
+                    RangeEnd::Excluded => write!(f, "..")?,
+                }
                 print_const_val(hi, f)
             }
             PatternKind::Slice { ref prefix, ref slice, ref suffix } |
@@ -260,13 +268,13 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
 
 pub struct PatternContext<'a, 'gcx: 'tcx, 'tcx: 'a> {
     pub tcx: TyCtxt<'a, 'gcx, 'tcx>,
-    pub tables: &'a ty::Tables<'gcx>,
-    pub errors: Vec<PatternError>,
+    pub tables: &'a ty::TypeckTables<'gcx>,
+    pub errors: Vec<PatternError<'tcx>>,
 }
 
 impl<'a, 'gcx, 'tcx> Pattern<'tcx> {
     pub fn from_hir(tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                    tables: &'a ty::Tables<'gcx>,
+                    tables: &'a ty::TypeckTables<'gcx>,
                     pat: &hir::Pat) -> Self {
         let mut pcx = PatternContext::new(tcx, tables);
         let result = pcx.lower_pattern(pat);
@@ -279,7 +287,7 @@ impl<'a, 'gcx, 'tcx> Pattern<'tcx> {
 }
 
 impl<'a, 'gcx, 'tcx> PatternContext<'a, 'gcx, 'tcx> {
-    pub fn new(tcx: TyCtxt<'a, 'gcx, 'tcx>, tables: &'a ty::Tables<'gcx>) -> Self {
+    pub fn new(tcx: TyCtxt<'a, 'gcx, 'tcx>, tables: &'a ty::TypeckTables<'gcx>) -> Self {
         PatternContext { tcx: tcx, tables: tables, errors: vec![] }
     }
 
@@ -291,11 +299,11 @@ impl<'a, 'gcx, 'tcx> PatternContext<'a, 'gcx, 'tcx> {
 
             PatKind::Lit(ref value) => self.lower_lit(value),
 
-            PatKind::Range(ref lo, ref hi) => {
+            PatKind::Range(ref lo, ref hi, ref end) => {
                 match (self.lower_lit(lo), self.lower_lit(hi)) {
                     (PatternKind::Constant { value: lo },
                      PatternKind::Constant { value: hi }) => {
-                        PatternKind::Range { lo: lo, hi: hi }
+                        PatternKind::Range { lo: lo, hi: hi, end: end.clone() }
                     }
                     _ => PatternKind::Wild
                 }
@@ -338,7 +346,7 @@ impl<'a, 'gcx, 'tcx> PatternContext<'a, 'gcx, 'tcx> {
             PatKind::Tuple(ref subpatterns, ddpos) => {
                 let ty = self.tables.node_id_to_type(pat.id);
                 match ty.sty {
-                    ty::TyTuple(ref tys) => {
+                    ty::TyTuple(ref tys, _) => {
                         let subpatterns =
                             subpatterns.iter()
                                        .enumerate_and_adjust(tys.len(), ddpos)
@@ -356,7 +364,7 @@ impl<'a, 'gcx, 'tcx> PatternContext<'a, 'gcx, 'tcx> {
             }
 
             PatKind::Binding(bm, def_id, ref ident, ref sub) => {
-                let id = self.tcx.map.as_local_node_id(def_id).unwrap();
+                let id = self.tcx.hir.as_local_node_id(def_id).unwrap();
                 let var_ty = self.tables.node_id_to_type(pat.id);
                 let region = match var_ty.sty {
                     ty::TyRef(r, _) => Some(r),
@@ -578,11 +586,11 @@ impl<'a, 'gcx, 'tcx> PatternContext<'a, 'gcx, 'tcx> {
                 let tcx = self.tcx.global_tcx();
                 let substs = self.tables.node_id_item_substs(id)
                     .unwrap_or_else(|| tcx.intern_substs(&[]));
-                match eval::lookup_const_by_id(tcx, def_id, Some(substs)) {
-                    Some((const_expr, const_tables, _const_ty)) => {
+                match eval::lookup_const_by_id(tcx, def_id, substs) {
+                    Some((const_expr, const_tables)) => {
                         // Enter the inlined constant's tables temporarily.
                         let old_tables = self.tables;
-                        self.tables = const_tables.expect("missing tables after typeck");
+                        self.tables = const_tables;
                         let pat = self.lower_const_expr(const_expr, pat_id, span);
                         self.tables = old_tables;
                         return pat;
@@ -605,7 +613,7 @@ impl<'a, 'gcx, 'tcx> PatternContext<'a, 'gcx, 'tcx> {
 
     fn lower_lit(&mut self, expr: &hir::Expr) -> PatternKind<'tcx> {
         let const_cx = eval::ConstContext::with_tables(self.tcx.global_tcx(), self.tables);
-        match const_cx.eval(expr, eval::EvalHint::ExprTypeChecked) {
+        match const_cx.eval(expr) {
             Ok(value) => {
                 PatternKind::Constant { value: value }
             }
@@ -792,7 +800,7 @@ macro_rules! CloneImpls {
 }
 
 CloneImpls!{ <'tcx>
-    Span, Field, Mutability, ast::Name, ast::NodeId, usize, ConstVal, Region,
+    Span, Field, Mutability, ast::Name, ast::NodeId, usize, ConstVal<'tcx>, Region,
     Ty<'tcx>, BindingMode<'tcx>, &'tcx AdtDef,
     &'tcx Substs<'tcx>, &'tcx Kind<'tcx>
 }
@@ -871,10 +879,12 @@ impl<'tcx> PatternFoldable<'tcx> for PatternKind<'tcx> {
             },
             PatternKind::Range {
                 ref lo,
-                ref hi
+                ref hi,
+                ref end,
             } => PatternKind::Range {
                 lo: lo.fold_with(folder),
-                hi: hi.fold_with(folder)
+                hi: hi.fold_with(folder),
+                end: end.clone(),
             },
             PatternKind::Slice {
                 ref prefix,

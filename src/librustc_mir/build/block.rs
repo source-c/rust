@@ -16,8 +16,6 @@ use rustc::hir;
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     pub fn ast_block(&mut self,
                      destination: &Lvalue<'tcx>,
-                     // FIXME(#32959): temporary measure for the issue
-                     dest_is_unit: bool,
                      mut block: BasicBlock,
                      ast_block: &'tcx hir::Block)
                      -> BlockAnd<()> {
@@ -58,7 +56,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                         let_extent_stack.push(remainder_scope);
 
                         // Declare the bindings, which may create a visibility scope.
-                        let remainder_span = remainder_scope.span(&tcx.region_maps, &tcx.map);
+                        let remainder_span = remainder_scope.span(&tcx.region_maps, &tcx.hir);
                         let remainder_span = remainder_span.unwrap_or(span);
                         let scope = this.declare_bindings(None, remainder_span, &pattern);
 
@@ -69,7 +67,10 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                                 this.expr_into_pattern(block, pattern, init)
                             }));
                         } else {
-                            this.storage_live_for_bindings(block, &pattern);
+                            this.visit_bindings(&pattern, &mut |this, _, _, node, span, _| {
+                                this.storage_live_binding(block, node, span);
+                                this.schedule_drop_for_binding(node, span);
+                            })
                         }
 
                         // Enter the visibility scope, after evaluating the initializer.
@@ -83,8 +84,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             // of the block.
             if let Some(expr) = expr {
                 unpack!(block = this.into(destination, block, expr));
-            } else if dest_is_unit {
-                // FIXME(#31472)
+            } else {
                 let source_info = this.source_info(span);
                 this.cfg.push_assign_unit(block, source_info, destination);
             }

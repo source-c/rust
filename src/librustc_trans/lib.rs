@@ -28,7 +28,9 @@
 #![feature(box_syntax)]
 #![feature(const_fn)]
 #![feature(custom_attribute)]
+#![cfg_attr(stage0, feature(field_init_shorthand))]
 #![allow(unused_attributes)]
+#![feature(i128_type)]
 #![feature(libc)]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
@@ -40,10 +42,7 @@
 
 use rustc::dep_graph::WorkProduct;
 
-extern crate arena;
 extern crate flate;
-extern crate getopts;
-extern crate graphviz;
 extern crate libc;
 #[macro_use] extern crate rustc;
 extern crate rustc_back;
@@ -51,18 +50,17 @@ extern crate rustc_data_structures;
 extern crate rustc_incremental;
 pub extern crate rustc_llvm as llvm;
 extern crate rustc_platform_intrinsics as intrinsics;
-extern crate serialize;
 extern crate rustc_const_math;
 extern crate rustc_const_eval;
 #[macro_use]
 #[no_link]
 extern crate rustc_bitflags;
-extern crate rustc_i128;
 
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
 extern crate syntax_pos;
 extern crate rustc_errors as errors;
+extern crate serialize;
 
 pub use rustc::session;
 pub use rustc::middle;
@@ -115,7 +113,6 @@ mod cabi_x86;
 mod cabi_x86_64;
 mod cabi_x86_win64;
 mod callee;
-mod cleanup;
 mod collector;
 mod common;
 mod consts;

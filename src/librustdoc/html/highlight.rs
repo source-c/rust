@@ -27,7 +27,7 @@ use std::io;
 use std::io::prelude::*;
 
 use syntax::codemap::CodeMap;
-use syntax::parse::lexer::{self, Reader, TokenAndSpan};
+use syntax::parse::lexer::{self, TokenAndSpan};
 use syntax::parse::token;
 use syntax::parse;
 use syntax_pos::Span;
@@ -42,8 +42,7 @@ pub fn render_with_highlighting(src: &str, class: Option<&str>, id: Option<&str>
     let mut out = Vec::new();
     write_header(class, id, &mut out).unwrap();
 
-    let mut classifier = Classifier::new(lexer::StringReader::new(&sess.span_diagnostic, fm),
-                                         sess.codemap());
+    let mut classifier = Classifier::new(lexer::StringReader::new(&sess, fm), sess.codemap());
     if let Err(_) = classifier.write_source(&mut out) {
         return format!("<pre>{}</pre>", src);
     }
@@ -63,8 +62,7 @@ pub fn render_inner_with_highlighting(src: &str) -> io::Result<String> {
     let fm = sess.codemap().new_filemap("<stdin>".to_string(), None, src.to_string());
 
     let mut out = Vec::new();
-    let mut classifier = Classifier::new(lexer::StringReader::new(&sess.span_diagnostic, fm),
-                                         sess.codemap());
+    let mut classifier = Classifier::new(lexer::StringReader::new(&sess, fm), sess.codemap());
     classifier.write_source(&mut out)?;
 
     Ok(String::from_utf8_lossy(&out).into_owned())
@@ -146,12 +144,12 @@ impl<U: Write> Writer for U {
                           -> io::Result<()> {
         match klass {
             Class::None => write!(self, "{}", text),
-            klass => write!(self, "<span class='{}'>{}</span>", klass.rustdoc_class(), text),
+            klass => write!(self, "<span class=\"{}\">{}</span>", klass.rustdoc_class(), text),
         }
     }
 
     fn enter_span(&mut self, klass: Class) -> io::Result<()> {
-        write!(self, "<span class='{}'>", klass.rustdoc_class())
+        write!(self, "<span class=\"{}\">", klass.rustdoc_class())
     }
 
     fn exit_span(&mut self) -> io::Result<()> {
@@ -185,10 +183,10 @@ impl<'a> Classifier<'a> {
                 Ok(tas) => tas,
                 Err(_) => {
                     self.lexer.emit_fatal_errors();
-                    self.lexer.span_diagnostic.struct_warn("Backing out of syntax highlighting")
-                                              .note("You probably did not intend to render this \
-                                                     as a rust code-block")
-                                              .emit();
+                    self.lexer.sess.span_diagnostic
+                        .struct_warn("Backing out of syntax highlighting")
+                        .note("You probably did not intend to render this as a rust code-block")
+                        .emit();
                     return Err(io::Error::new(io::ErrorKind::Other, ""));
                 }
             };
@@ -317,7 +315,7 @@ impl<'a> Classifier<'a> {
             token::Lifetime(..) => Class::Lifetime,
 
             token::Underscore | token::Eof | token::Interpolated(..) |
-            token::MatchNt(..) | token::SubstNt(..) | token::Tilde | token::At => Class::None,
+            token::SubstNt(..) | token::Tilde | token::At => Class::None,
         };
 
         // Anything that didn't return above is the simple case where we the
@@ -365,7 +363,7 @@ fn write_header(class: Option<&str>,
     if let Some(id) = id {
         write!(out, "id='{}' ", id)?;
     }
-    write!(out, "class='rust {}'>\n", class.unwrap_or(""))
+    write!(out, "class=\"rust {}\">\n", class.unwrap_or(""))
 }
 
 fn write_footer(out: &mut Write) -> io::Result<()> {

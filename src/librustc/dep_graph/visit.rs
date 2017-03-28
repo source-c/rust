@@ -29,14 +29,14 @@ pub fn visit_all_item_likes_in_krate<'a, 'tcx, V, F>(tcx: TyCtxt<'a, 'tcx, 'tcx>
     struct TrackingVisitor<'visit, 'tcx: 'visit, F: 'visit, V: 'visit> {
         tcx: TyCtxt<'visit, 'tcx, 'tcx>,
         dep_node_fn: &'visit mut F,
-        visitor: &'visit mut V
+        visitor: &'visit mut V,
     }
 
     impl<'visit, 'tcx, F, V> ItemLikeVisitor<'tcx> for TrackingVisitor<'visit, 'tcx, F, V>
         where F: FnMut(DefId) -> DepNode<DefId>, V: ItemLikeVisitor<'tcx>
     {
         fn visit_item(&mut self, i: &'tcx hir::Item) {
-            let item_def_id = self.tcx.map.local_def_id(i.id);
+            let item_def_id = self.tcx.hir.local_def_id(i.id);
             let task_id = (self.dep_node_fn)(item_def_id);
             let _task = self.tcx.dep_graph.in_task(task_id.clone());
             debug!("Started task {:?}", task_id);
@@ -46,7 +46,7 @@ pub fn visit_all_item_likes_in_krate<'a, 'tcx, V, F>(tcx: TyCtxt<'a, 'tcx, 'tcx>
         }
 
         fn visit_trait_item(&mut self, i: &'tcx hir::TraitItem) {
-            let trait_item_def_id = self.tcx.map.local_def_id(i.id);
+            let trait_item_def_id = self.tcx.hir.local_def_id(i.id);
             let task_id = (self.dep_node_fn)(trait_item_def_id);
             let _task = self.tcx.dep_graph.in_task(task_id.clone());
             debug!("Started task {:?}", task_id);
@@ -56,7 +56,7 @@ pub fn visit_all_item_likes_in_krate<'a, 'tcx, V, F>(tcx: TyCtxt<'a, 'tcx, 'tcx>
         }
 
         fn visit_impl_item(&mut self, i: &'tcx hir::ImplItem) {
-            let impl_item_def_id = self.tcx.map.local_def_id(i.id);
+            let impl_item_def_id = self.tcx.hir.local_def_id(i.id);
             let task_id = (self.dep_node_fn)(impl_item_def_id);
             let _task = self.tcx.dep_graph.in_task(task_id.clone());
             debug!("Started task {:?}", task_id);
@@ -66,11 +66,24 @@ pub fn visit_all_item_likes_in_krate<'a, 'tcx, V, F>(tcx: TyCtxt<'a, 'tcx, 'tcx>
         }
     }
 
-    let krate = tcx.dep_graph.with_ignore(|| tcx.map.krate());
+    let krate = tcx.dep_graph.with_ignore(|| tcx.hir.krate());
     let mut tracking_visitor = TrackingVisitor {
         tcx: tcx,
         dep_node_fn: &mut dep_node_fn,
-        visitor: visitor
+        visitor: visitor,
     };
     krate.visit_all_item_likes(&mut tracking_visitor)
+}
+
+pub fn visit_all_bodies_in_krate<'a, 'tcx, C>(tcx: TyCtxt<'a, 'tcx, 'tcx>, callback: C)
+    where C: Fn(/* body_owner */
+                DefId,
+                /* body id */
+                hir::BodyId)
+{
+    let krate = tcx.hir.krate();
+    for &body_id in &krate.body_ids {
+        let body_owner_def_id = tcx.hir.body_owner_def_id(body_id);
+        callback(body_owner_def_id, body_id);
+    }
 }

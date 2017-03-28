@@ -13,41 +13,32 @@
 #![feature(binary_heap_extras)]
 #![feature(binary_heap_peek_mut_pop)]
 #![feature(box_syntax)]
-#![feature(btree_range)]
+#![feature(inclusive_range_syntax)]
 #![feature(collection_placement)]
 #![feature(collections)]
-#![feature(collections_bound)]
 #![feature(const_fn)]
-#![feature(dedup_by)]
-#![feature(enumset)]
 #![feature(exact_size_is_empty)]
 #![feature(pattern)]
 #![feature(placement_in_syntax)]
 #![feature(rand)]
-#![feature(repeat_str)]
 #![feature(step_by)]
 #![feature(str_escape)]
-#![feature(str_replacen)]
-#![feature(string_split_off)]
 #![feature(test)]
 #![feature(unboxed_closures)]
 #![feature(unicode)]
+#![feature(utf8_error_error_len)]
 
 extern crate collections;
 extern crate test;
 extern crate std_unicode;
+extern crate core;
 
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 
-#[cfg(test)]
-#[macro_use]
-mod bench;
-
 mod binary_heap;
 mod btree;
 mod cow_str;
-mod enum_set;
 mod fmt;
 mod linked_list;
 mod slice;

@@ -53,8 +53,6 @@
 //! - One for "stable", that is non-generic, code
 //! - One for more "volatile" code, i.e. monomorphized instances of functions
 //!   defined in that module
-//! - Code for monomorphized instances of functions from external crates gets
-//!   placed into every codegen unit that uses that instance.
 //!
 //! In order to see why this heuristic makes sense, let's take a look at when a
 //! codegen unit can get invalidated:
@@ -82,17 +80,6 @@
 //! side-effect of references a little by at least not touching the non-generic
 //! code of the module.
 //!
-//! As another optimization, monomorphized functions from external crates get
-//! some special handling. Since we assume that the definition of such a
-//! function changes rather infrequently compared to local items, we can just
-//! instantiate external functions in every codegen unit where it is referenced
-//! -- without having to fear that doing this will cause a lot of unnecessary
-//! re-compilations. If such a reference is added or removed, the codegen unit
-//! has to be re-translated anyway.
-//! (Note that this only makes sense if external crates actually don't change
-//! frequently. For certain multi-crate projects this might not be a valid
-//! assumption).
-//!
 //! A Note on Inlining
 //! ------------------
 //! As briefly mentioned above, in order for LLVM to be able to inline a
@@ -107,24 +94,23 @@
 //!   inlined, so it can distribute function instantiations accordingly. Since
 //!   there is no way of knowing for sure which functions LLVM will decide to
 //!   inline in the end, we apply a heuristic here: Only functions marked with
-//!   #[inline] and (as stated above) functions from external crates are
-//!   considered for inlining by the partitioner. The current implementation
-//!   will not try to determine if a function is likely to be inlined by looking
-//!   at the functions definition.
+//!   #[inline] are considered for inlining by the partitioner. The current
+//!   implementation will not try to determine if a function is likely to be
+//!   inlined by looking at the functions definition.
 //!
 //! Note though that as a side-effect of creating a codegen units per
 //! source-level module, functions from the same module will be available for
 //! inlining, even when they are not marked #[inline].
 
 use collector::InliningMap;
+use common;
 use context::SharedCrateContext;
 use llvm;
-use monomorphize;
 use rustc::dep_graph::{DepNode, WorkProductId};
 use rustc::hir::def_id::DefId;
 use rustc::hir::map::DefPathData;
 use rustc::session::config::NUMBERED_CODEGEN_UNIT_MARKER;
-use rustc::ty::TyCtxt;
+use rustc::ty::{self, TyCtxt};
 use rustc::ty::item_path::characteristic_def_id_of_type;
 use rustc_incremental::IchHasher;
 use std::cmp::Ordering;
@@ -133,7 +119,7 @@ use std::sync::Arc;
 use symbol_map::SymbolMap;
 use syntax::ast::NodeId;
 use syntax::symbol::{Symbol, InternedString};
-use trans_item::TransItem;
+use trans_item::{TransItem, InstantiationMode};
 use util::nodemap::{FxHashMap, FxHashSet};
 
 pub enum PartitioningStrategy {
@@ -200,14 +186,14 @@ impl<'tcx> CodegenUnit<'tcx> {
             symbol_name.hash(&mut state);
             let exported = match item {
                TransItem::Fn(ref instance) => {
-                    let node_id = scx.tcx().map.as_local_node_id(instance.def);
+                   let node_id =
+                       scx.tcx().hir.as_local_node_id(instance.def_id());
                     node_id.map(|node_id| exported_symbols.contains(&node_id))
                            .unwrap_or(false)
                }
                TransItem::Static(node_id) => {
                     exported_symbols.contains(&node_id)
                }
-               TransItem::DropGlue(..) => false,
             };
             exported.hash(&mut state);
         }
@@ -255,10 +241,9 @@ impl<'tcx> CodegenUnit<'tcx> {
         fn local_node_id(tcx: TyCtxt, trans_item: TransItem) -> Option<NodeId> {
             match trans_item {
                 TransItem::Fn(instance) => {
-                    tcx.map.as_local_node_id(instance.def)
+                    tcx.hir.as_local_node_id(instance.def_id())
                 }
                 TransItem::Static(node_id) => Some(node_id),
-                TransItem::DropGlue(_) => None,
             }
         }
     }
@@ -326,13 +311,15 @@ fn place_root_translation_items<'a, 'tcx, I>(scx: &SharedCrateContext<'a, 'tcx>,
     let tcx = scx.tcx();
     let mut roots = FxHashSet();
     let mut codegen_units = FxHashMap();
+    let is_incremental_build = tcx.sess.opts.incremental.is_some();
 
     for trans_item in trans_items {
-        let is_root = !trans_item.is_instantiated_only_on_demand(tcx);
+        let is_root = trans_item.instantiation_mode(tcx) == InstantiationMode::GloballyShared;
 
         if is_root {
             let characteristic_def_id = characteristic_def_id_of_trans_item(scx, trans_item);
-            let is_volatile = trans_item.is_generic_fn();
+            let is_volatile = is_incremental_build &&
+                              trans_item.is_generic_fn();
 
             let codegen_unit_name = match characteristic_def_id {
                 Some(def_id) => compute_codegen_unit_name(tcx, def_id, is_volatile),
@@ -350,25 +337,8 @@ fn place_root_translation_items<'a, 'tcx, I>(scx: &SharedCrateContext<'a, 'tcx>,
                 Some(explicit_linkage) => explicit_linkage,
                 None => {
                     match trans_item {
+                        TransItem::Fn(..) |
                         TransItem::Static(..) => llvm::ExternalLinkage,
-                        TransItem::DropGlue(..) => unreachable!(),
-                        // Is there any benefit to using ExternalLinkage?:
-                        TransItem::Fn(ref instance) => {
-                            if instance.substs.types().next().is_none() {
-                                // This is a non-generic functions, we always
-                                // make it visible externally on the chance that
-                                // it might be used in another codegen unit.
-                                // Later on base::internalize_symbols() will
-                                // assign "internal" linkage to those symbols
-                                // that are not referenced from other codegen
-                                // units (and are not publicly visible).
-                                llvm::ExternalLinkage
-                            } else {
-                                // In the current setup, generic functions cannot
-                                // be roots.
-                                unreachable!()
-                            }
-                        }
                     }
                 }
             };
@@ -448,29 +418,14 @@ fn place_inlined_translation_items<'tcx>(initial_partitioning: PreInliningPartit
             if let Some(linkage) = codegen_unit.items.get(&trans_item) {
                 // This is a root, just copy it over
                 new_codegen_unit.items.insert(trans_item, *linkage);
-            } else if initial_partitioning.roots.contains(&trans_item) {
-                // This item will be instantiated in some other codegen unit,
-                // so we just add it here with AvailableExternallyLinkage
-                // FIXME(mw): I have not seen it happening yet but having
-                //            available_externally here could potentially lead
-                //            to the same problem with exception handling tables
-                //            as in the case below.
-                new_codegen_unit.items.insert(trans_item,
-                                              llvm::AvailableExternallyLinkage);
-            } else if trans_item.is_from_extern_crate() && !trans_item.is_generic_fn() {
-                // FIXME(mw): It would be nice if we could mark these as
-                // `AvailableExternallyLinkage`, since they should have
-                // been instantiated in the extern crate. But this
-                // sometimes leads to crashes on Windows because LLVM
-                // does not handle exception handling table instantiation
-                // reliably in that case.
-                new_codegen_unit.items.insert(trans_item, llvm::InternalLinkage);
             } else {
-                // We can't be sure if this will also be instantiated
-                // somewhere else, so we add an instance here with
-                // InternalLinkage so we don't get any conflicts.
-                new_codegen_unit.items.insert(trans_item,
-                                              llvm::InternalLinkage);
+                if initial_partitioning.roots.contains(&trans_item) {
+                    bug!("GloballyShared trans-item inlined into other CGU: \
+                          {:?}", trans_item);
+                }
+
+                // This is a cgu-private copy
+                new_codegen_unit.items.insert(trans_item, llvm::InternalLinkage);
             }
         }
 
@@ -498,34 +453,37 @@ fn characteristic_def_id_of_trans_item<'a, 'tcx>(scx: &SharedCrateContext<'a, 't
     let tcx = scx.tcx();
     match trans_item {
         TransItem::Fn(instance) => {
+            let def_id = match instance.def {
+                ty::InstanceDef::Item(def_id) => def_id,
+                ty::InstanceDef::FnPtrShim(..) |
+                ty::InstanceDef::ClosureOnceShim { .. } |
+                ty::InstanceDef::Intrinsic(..) |
+                ty::InstanceDef::DropGlue(..) |
+                ty::InstanceDef::Virtual(..) => return None
+            };
+
             // If this is a method, we want to put it into the same module as
             // its self-type. If the self-type does not provide a characteristic
             // DefId, we use the location of the impl after all.
 
-            if tcx.trait_of_item(instance.def).is_some() {
+            if tcx.trait_of_item(def_id).is_some() {
                 let self_ty = instance.substs.type_at(0);
                 // This is an implementation of a trait method.
-                return characteristic_def_id_of_type(self_ty).or(Some(instance.def));
+                return characteristic_def_id_of_type(self_ty).or(Some(def_id));
             }
 
-            if let Some(impl_def_id) = tcx.impl_of_method(instance.def) {
+            if let Some(impl_def_id) = tcx.impl_of_method(def_id) {
                 // This is a method within an inherent impl, find out what the
                 // self-type is:
-                let impl_self_ty = tcx.item_type(impl_def_id);
-                let impl_self_ty = tcx.erase_regions(&impl_self_ty);
-                let impl_self_ty = monomorphize::apply_param_substs(scx,
-                                                                    instance.substs,
-                                                                    &impl_self_ty);
-
+                let impl_self_ty = common::def_ty(scx, impl_def_id, instance.substs);
                 if let Some(def_id) = characteristic_def_id_of_type(impl_self_ty) {
                     return Some(def_id);
                 }
             }
 
-            Some(instance.def)
+            Some(def_id)
         }
-        TransItem::DropGlue(dg) => characteristic_def_id_of_type(dg.ty()),
-        TransItem::Static(node_id) => Some(tcx.map.local_def_id(node_id)),
+        TransItem::Static(node_id) => Some(tcx.hir.local_def_id(node_id)),
     }
 }
 

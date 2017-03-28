@@ -140,7 +140,7 @@ macro_rules! declare_keywords {(
         $(
             #[allow(non_upper_case_globals)]
             pub const $konst: Keyword = Keyword {
-                ident: ast::Ident::with_empty_ctxt(ast::Name($index))
+                ident: ast::Ident::with_empty_ctxt(super::Symbol($index))
             };
         )*
     }
@@ -221,9 +221,10 @@ declare_keywords! {
     (53, Default,        "default")
     (54, StaticLifetime, "'static")
     (55, Union,          "union")
+    (56, Catch,          "catch")
 
     // A virtual keyword that resolves to the crate root when used in a lexical scope.
-    (56, CrateRoot, "{{root}}")
+    (57, CrateRoot, "{{root}}")
 }
 
 // If an interner exists in TLS, return it. Otherwise, prepare a fresh one.
@@ -282,25 +283,24 @@ impl Encodable for InternedString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::Name;
 
     #[test]
     fn interner_tests() {
         let mut i: Interner = Interner::new();
         // first one is zero:
-        assert_eq!(i.intern("dog"), Name(0));
+        assert_eq!(i.intern("dog"), Symbol(0));
         // re-use gets the same entry:
-        assert_eq!(i.intern ("dog"), Name(0));
+        assert_eq!(i.intern ("dog"), Symbol(0));
         // different string gets a different #:
-        assert_eq!(i.intern("cat"), Name(1));
-        assert_eq!(i.intern("cat"), Name(1));
+        assert_eq!(i.intern("cat"), Symbol(1));
+        assert_eq!(i.intern("cat"), Symbol(1));
         // dog is still at zero
-        assert_eq!(i.intern("dog"), Name(0));
+        assert_eq!(i.intern("dog"), Symbol(0));
         // gensym gets 3
-        assert_eq!(i.gensym("zebra"), Name(2));
+        assert_eq!(i.gensym("zebra"), Symbol(2));
         // gensym of same string gets new number :
-        assert_eq!(i.gensym("zebra"), Name(3));
+        assert_eq!(i.gensym("zebra"), Symbol(3));
         // gensym of *existing* string gets new number:
-        assert_eq!(i.gensym("dog"), Name(4));
+        assert_eq!(i.gensym("dog"), Symbol(4));
     }
 }

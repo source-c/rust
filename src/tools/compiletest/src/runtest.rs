@@ -13,6 +13,7 @@ use common::{CompileFail, ParseFail, Pretty, RunFail, RunPass, RunPassValgrind};
 use common::{Codegen, DebugInfoLldb, DebugInfoGdb, Rustdoc, CodegenUnits};
 use common::{Incremental, RunMake, Ui, MirOpt};
 use errors::{self, ErrorKind, Error};
+use filetime::FileTime;
 use json;
 use header::TestProps;
 use header;
@@ -24,12 +25,13 @@ use util::logv;
 use std::collections::HashSet;
 use std::env;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::{self, File, create_dir_all};
 use std::io::prelude::*;
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, ExitStatus};
 use std::str;
+use std::collections::HashMap;
 
 use extract_gdb_version;
 
@@ -43,7 +45,7 @@ pub fn run(config: Config, testpaths: &TestPaths) {
         }
 
         _ => {
-            // android has it's own gdb handling
+            // android has its own gdb handling
             if config.mode == DebugInfoGdb && config.gdb.is_none() {
                 panic!("gdb not available but debuginfo gdb debuginfo test requested");
             }
@@ -80,6 +82,8 @@ pub fn run(config: Config, testpaths: &TestPaths) {
     }
 
     base_cx.complete_all();
+
+    File::create(::stamp(&config, &testpaths)).unwrap();
 }
 
 struct TestCx<'test> {
@@ -391,7 +395,7 @@ actual:\n\
 
         let out_dir = self.output_base_name().with_extension("pretty-out");
         let _ = fs::remove_dir_all(&out_dir);
-        self.create_dir_racy(&out_dir);
+        create_dir_all(&out_dir).unwrap();
 
         // FIXME (#9639): This needs to handle non-utf8 paths
         let mut args = vec!["-".to_owned(),
@@ -1190,7 +1194,45 @@ actual:\n\
             "arm-linux-androideabi" | "armv7-linux-androideabi" | "aarch64-linux-android" => {
                 self._arm_exec_compiled_test(env)
             }
-            _=> {
+
+            // This is pretty similar to below, we're transforming:
+            //
+            //      program arg1 arg2
+            //
+            // into
+            //
+            //      qemu-test-client run program:support-lib.so arg1 arg2
+            //
+            // The test-client program will upload `program` to the emulator
+            // along with all other support libraries listed (in this case
+            // `support-lib.so`. It will then execute the program on the
+            // emulator with the arguments specified (in the environment we give
+            // the process) and then report back the same result.
+            _ if self.config.qemu_test_client.is_some() => {
+                let aux_dir = self.aux_output_dir_name();
+                let mut args = self.make_run_args();
+                let mut program = args.prog.clone();
+                if let Ok(entries) = aux_dir.read_dir() {
+                    for entry in entries {
+                        let entry = entry.unwrap();
+                        if !entry.path().is_file() {
+                            continue
+                        }
+                        program.push_str(":");
+                        program.push_str(entry.path().to_str().unwrap());
+                    }
+                }
+                args.args.insert(0, program);
+                args.args.insert(0, "run".to_string());
+                args.prog = self.config.qemu_test_client.clone().unwrap()
+                                .into_os_string().into_string().unwrap();
+                self.compose_and_run(args,
+                                     env,
+                                     self.config.run_lib_path.to_str().unwrap(),
+                                     Some(aux_dir.to_str().unwrap()),
+                                     None)
+            }
+            _ => {
                 let aux_dir = self.aux_output_dir_name();
                 self.compose_and_run(self.make_run_args(),
                                      env,
@@ -1227,7 +1269,7 @@ actual:\n\
 
     fn compose_and_run_compiler(&self, args: ProcArgs, input: Option<String>) -> ProcRes {
         if !self.props.aux_builds.is_empty() {
-            self.create_dir_racy(&self.aux_output_dir_name());
+            create_dir_all(&self.aux_output_dir_name()).unwrap();
         }
 
         let aux_dir = self.aux_output_dir_name();
@@ -1298,22 +1340,6 @@ actual:\n\
                              input)
     }
 
-    // Like std::fs::create_dir_all, except handles concurrent calls among multiple
-    // threads or processes.
-    fn create_dir_racy(&self, path: &Path) {
-        match fs::create_dir(path) {
-            Ok(()) => return,
-            Err(ref e) if e.kind() == io::ErrorKind::AlreadyExists => return,
-            Err(ref e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => panic!("failed to create dir {:?}: {}", path, e),
-        }
-        self.create_dir_racy(path.parent().unwrap());
-        match fs::create_dir(path) {
-            Ok(()) => {}
-            Err(ref e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => panic!("failed to create dir {:?}: {}", path, e),
-        }
-    }
 
     fn compose_and_run(&self,
                        ProcArgs{ args, prog }: ProcArgs,
@@ -1393,7 +1419,7 @@ actual:\n\
 
 
                 let mir_dump_dir = self.get_mir_dump_dir();
-                self.create_dir_racy(mir_dump_dir.as_path());
+                create_dir_all(mir_dump_dir.as_path()).unwrap();
                 let mut dir_opt = "dump-mir-dir=".to_string();
                 dir_opt.push_str(mir_dump_dir.to_str().unwrap());
                 debug!("dir_opt: {:?}", dir_opt);
@@ -1881,20 +1907,128 @@ actual:\n\
 
         let out_dir = self.output_base_name();
         let _ = fs::remove_dir_all(&out_dir);
-        self.create_dir_racy(&out_dir);
+        create_dir_all(&out_dir).unwrap();
 
         let proc_res = self.document(&out_dir);
         if !proc_res.status.success() {
             self.fatal_proc_rec("rustdoc failed!", &proc_res);
         }
-        let root = self.find_rust_src_root().unwrap();
 
-        let res = self.cmd2procres(Command::new(&self.config.docck_python)
-                                   .arg(root.join("src/etc/htmldocck.py"))
-                                   .arg(out_dir)
-                                   .arg(&self.testpaths.file));
-        if !res.status.success() {
-            self.fatal_proc_rec("htmldocck failed!", &res);
+        if self.props.check_test_line_numbers_match == true {
+            self.check_rustdoc_test_option(proc_res);
+        } else {
+            let root = self.find_rust_src_root().unwrap();
+            let res = self.cmd2procres(Command::new(&self.config.docck_python)
+                                       .arg(root.join("src/etc/htmldocck.py"))
+                                       .arg(out_dir)
+                                       .arg(&self.testpaths.file));
+            if !res.status.success() {
+                self.fatal_proc_rec("htmldocck failed!", &res);
+            }
+        }
+    }
+
+    fn get_lines<P: AsRef<Path>>(&self, path: &P,
+                                 mut other_files: Option<&mut Vec<String>>) -> Vec<usize> {
+        let mut file = fs::File::open(path)
+                                .expect("markdown_test_output_check_entry File::open failed");
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .expect("markdown_test_output_check_entry read_to_string failed");
+        let mut ignore = false;
+        content.lines()
+               .enumerate()
+               .filter_map(|(line_nb, line)| {
+                   if (line.trim_left().starts_with("pub mod ") ||
+                       line.trim_left().starts_with("mod ")) &&
+                      line.ends_with(";") {
+                       if let Some(ref mut other_files) = other_files {
+                           other_files.push(line.rsplit("mod ")
+                                      .next()
+                                      .unwrap()
+                                      .replace(";", ""));
+                       }
+                       None
+                   } else {
+                       let sline = line.split("///").last().unwrap_or("");
+                       let line = sline.trim_left();
+                       if line.starts_with("```") {
+                           if ignore {
+                               ignore = false;
+                               None
+                           } else {
+                               ignore = true;
+                               Some(line_nb + 1)
+                           }
+                       } else {
+                           None
+                       }
+                   }
+               })
+               .collect()
+    }
+
+    fn check_rustdoc_test_option(&self, res: ProcRes) {
+        let mut other_files = Vec::new();
+        let mut files: HashMap<String, Vec<usize>> = HashMap::new();
+        let cwd = env::current_dir().unwrap();
+        files.insert(self.testpaths.file.strip_prefix(&cwd)
+                                        .unwrap_or(&self.testpaths.file)
+                                        .to_str()
+                                        .unwrap()
+                                        .replace('\\', "/"),
+                     self.get_lines(&self.testpaths.file, Some(&mut other_files)));
+        for other_file in other_files {
+            let mut path = self.testpaths.file.clone();
+            path.set_file_name(&format!("{}.rs", other_file));
+            files.insert(path.strip_prefix(&cwd)
+                             .unwrap_or(&path)
+                             .to_str()
+                             .unwrap()
+                             .replace('\\', "/"),
+                         self.get_lines(&path, None));
+        }
+
+        let mut tested = 0;
+        for _ in res.stdout.split("\n")
+                           .filter(|s| s.starts_with("test "))
+                           .inspect(|s| {
+                               let tmp: Vec<&str> = s.split(" - ").collect();
+                               if tmp.len() == 2 {
+                                   let path = tmp[0].rsplit("test ").next().unwrap();
+                                   if let Some(ref mut v) = files.get_mut(
+                                                                &path.replace('\\', "/")) {
+                                       tested += 1;
+                                       let mut iter = tmp[1].split("(line ");
+                                       iter.next();
+                                       let line = iter.next()
+                                                      .unwrap_or(")")
+                                                      .split(")")
+                                                      .next()
+                                                      .unwrap_or("0")
+                                                      .parse()
+                                                      .unwrap_or(0);
+                                       if let Ok(pos) = v.binary_search(&line) {
+                                           v.remove(pos);
+                                       } else {
+                                           self.fatal_proc_rec(
+                                               &format!("Not found doc test: \"{}\" in \"{}\":{:?}",
+                                                        s, path, v),
+                                               &res);
+                                       }
+                                   }
+                               }
+                           }) {}
+        if tested == 0 {
+            self.fatal_proc_rec(&format!("No test has been found... {:?}", files), &res);
+        } else {
+            for (entry, v) in &files {
+                if v.len() != 0 {
+                    self.fatal_proc_rec(&format!("Not found test at line{} \"{}\":{:?}",
+                                                 if v.len() > 1 { "s" } else { "" }, entry, v),
+                                        &res);
+                }
+            }
         }
     }
 
@@ -2149,7 +2283,7 @@ actual:\n\
         if tmpdir.exists() {
             self.aggressive_rm_rf(&tmpdir).unwrap();
         }
-        self.create_dir_racy(&tmpdir);
+        create_dir_all(&tmpdir).unwrap();
 
         let host = &self.config.host;
         let make = if host.contains("bitrig") || host.contains("dragonfly") ||
@@ -2174,6 +2308,10 @@ actual:\n\
            .env("TARGET_RPATH_DIR", cwd.join(&self.config.run_lib_path))
            .env("LLVM_COMPONENTS", &self.config.llvm_components)
            .env("LLVM_CXXFLAGS", &self.config.llvm_cxxflags);
+
+        // We don't want RUSTFLAGS set from the outside to interfere with
+        // compiler flags set in the test cases:
+        cmd.env_remove("RUSTFLAGS");
 
         if self.config.target.contains("msvc") {
             // We need to pass a path to `lib.exe`, so assume that `cc` is `cl.exe`
@@ -2315,12 +2453,25 @@ actual:\n\
         }
     }
 
+    fn check_mir_test_timestamp(&self, test_name: &str, output_file: &Path) {
+        let t = |file| FileTime::from_last_modification_time(&fs::metadata(file).unwrap());
+        let source_file = &self.testpaths.file;
+        let output_time = t(output_file);
+        let source_time = t(source_file);
+        if source_time > output_time {
+            debug!("source file time: {:?} output file time: {:?}", source_time, output_time);
+            panic!("test source file `{}` is newer than potentially stale output file `{}`.",
+                   source_file.display(), test_name);
+        }
+    }
+
     fn compare_mir_test_output(&self, test_name: &str, expected_content: &Vec<&str>) {
         let mut output_file = PathBuf::new();
         output_file.push(self.get_mir_dump_dir());
         output_file.push(test_name);
         debug!("comparing the contests of: {:?}", output_file);
         debug!("with: {:?}", expected_content);
+        self.check_mir_test_timestamp(test_name, &output_file);
 
         let mut dumped_file = fs::File::open(output_file.clone()).unwrap();
         let mut dumped_string = String::new();

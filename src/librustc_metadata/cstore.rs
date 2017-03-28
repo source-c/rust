@@ -32,8 +32,10 @@ use syntax::symbol::Symbol;
 use syntax_pos;
 
 pub use rustc::middle::cstore::{NativeLibrary, NativeLibraryKind, LinkagePreference};
-pub use rustc::middle::cstore::{NativeStatic, NativeFramework, NativeUnknown};
+pub use rustc::middle::cstore::NativeLibraryKind::*;
 pub use rustc::middle::cstore::{CrateSource, LinkMeta, LibSource};
+
+pub use cstore_impl::provide;
 
 // A map from external crate numbers (as decoded from some crate file) to
 // local crate numbers (as generated during this session). Each external
@@ -79,6 +81,8 @@ pub struct CrateMetadata {
     /// quickly retrace a `DefPath`, which is needed for incremental
     /// compilation support.
     pub def_path_table: DefPathTable,
+
+    pub exported_symbols: FxHashSet<DefIndex>,
 
     pub dep_kind: Cell<DepKind>,
     pub source: CrateSource,
@@ -265,9 +269,12 @@ impl CrateMetadata {
     }
 
     pub fn is_staged_api(&self) -> bool {
-        self.get_item_attrs(CRATE_DEF_INDEX)
-            .iter()
-            .any(|attr| attr.name() == "stable" || attr.name() == "unstable")
+        for attr in self.get_item_attrs(CRATE_DEF_INDEX) {
+            if attr.path == "stable" || attr.path == "unstable" {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn is_allocator(&self) -> bool {
@@ -293,6 +300,11 @@ impl CrateMetadata {
     pub fn is_compiler_builtins(&self) -> bool {
         let attrs = self.get_item_attrs(CRATE_DEF_INDEX);
         attr::contains_name(&attrs, "compiler_builtins")
+    }
+
+    pub fn is_sanitizer_runtime(&self) -> bool {
+        let attrs = self.get_item_attrs(CRATE_DEF_INDEX);
+        attr::contains_name(&attrs, "sanitizer_runtime")
     }
 
     pub fn is_no_builtins(&self) -> bool {

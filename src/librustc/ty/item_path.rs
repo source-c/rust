@@ -52,7 +52,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
 
     /// Returns a string identifying this local node-id.
     pub fn node_path_str(self, id: ast::NodeId) -> String {
-        self.item_path_str(self.map.local_def_id(id))
+        self.item_path_str(self.hir.local_def_id(id))
     }
 
     /// Returns a string identifying this def-id. This string is
@@ -180,7 +180,8 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             data @ DefPathData::MacroDef(..) |
             data @ DefPathData::ClosureExpr |
             data @ DefPathData::Binding(..) |
-            data @ DefPathData::ImplTrait => {
+            data @ DefPathData::ImplTrait |
+            data @ DefPathData::Typeof => {
                 let parent_def_id = self.parent_def_id(def_id).unwrap();
                 self.push_item_path(buffer, parent_def_id);
                 buffer.push(&data.as_interned_str());
@@ -201,7 +202,8 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         } else {
             // for local crates, check whether type info is
             // available; typeck might not have completed yet
-            self.impl_trait_refs.borrow().contains_key(&impl_def_id)
+            self.maps.impl_trait_ref.borrow().contains_key(&impl_def_id) &&
+                self.maps.ty.borrow().contains_key(&impl_def_id)
         };
 
         if !use_types {
@@ -286,8 +288,8 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         // only occur very early in the compiler pipeline.
         let parent_def_id = self.parent_def_id(impl_def_id).unwrap();
         self.push_item_path(buffer, parent_def_id);
-        let node_id = self.map.as_local_node_id(impl_def_id).unwrap();
-        let item = self.map.expect_item(node_id);
+        let node_id = self.hir.as_local_node_id(impl_def_id).unwrap();
+        let item = self.hir.expect_item(node_id);
         let span_str = self.sess.codemap().span_to_string(item.span);
         buffer.push(&format!("<impl at {}>", span_str));
     }
@@ -314,15 +316,14 @@ pub fn characteristic_def_id_of_type(ty: Ty) -> Option<DefId> {
         ty::TyDynamic(data, ..) => data.principal().map(|p| p.def_id()),
 
         ty::TyArray(subty, _) |
-        ty::TySlice(subty) |
-        ty::TyBox(subty) => characteristic_def_id_of_type(subty),
+        ty::TySlice(subty) => characteristic_def_id_of_type(subty),
 
         ty::TyRawPtr(mt) |
         ty::TyRef(_, mt) => characteristic_def_id_of_type(mt.ty),
 
-        ty::TyTuple(ref tys) => tys.iter()
-                                   .filter_map(|ty| characteristic_def_id_of_type(ty))
-                                   .next(),
+        ty::TyTuple(ref tys, _) => tys.iter()
+                                      .filter_map(|ty| characteristic_def_id_of_type(ty))
+                                      .next(),
 
         ty::TyFnDef(def_id, ..) |
         ty::TyClosure(def_id, _) => Some(def_id),
@@ -374,14 +375,13 @@ impl LocalPathBuffer {
     fn new(root_mode: RootMode) -> LocalPathBuffer {
         LocalPathBuffer {
             root_mode: root_mode,
-            str: String::new()
+            str: String::new(),
         }
     }
 
     fn into_string(self) -> String {
         self.str
     }
-
 }
 
 impl ItemPathBuffer for LocalPathBuffer {

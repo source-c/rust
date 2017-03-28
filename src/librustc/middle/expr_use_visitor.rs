@@ -296,6 +296,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
                 arg.id,
                 arg.pat.span,
                 fn_body_scope_r, // Args live only as long as the fn body.
+                fn_body_scope_r,
                 arg_ty);
 
             self.walk_irrefutable_pat(arg_cmt, &arg.pat);
@@ -714,6 +715,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
                 adjustment::Adjust::NeverToAny |
                 adjustment::Adjust::ReifyFnPointer |
                 adjustment::Adjust::UnsafeFnPointer |
+                adjustment::Adjust::ClosureFnPointer |
                 adjustment::Adjust::MutToConstPointer => {
                     // Creating a closure/fn-pointer or unsizing consumes
                     // the input and stores it into the resulting rvalue.
@@ -1020,7 +1022,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
         self.tcx().with_freevars(closure_expr.id, |freevars| {
             for freevar in freevars {
                 let def_id = freevar.def.def_id();
-                let id_var = self.tcx().map.as_local_node_id(def_id).unwrap();
+                let id_var = self.tcx().hir.as_local_node_id(def_id).unwrap();
                 let upvar_id = ty::UpvarId { var_id: id_var,
                                              closure_expr_id: closure_expr.id };
                 let upvar_capture = self.mc.infcx.upvar_capture(upvar_id).unwrap();
@@ -1052,7 +1054,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
                         -> mc::McResult<mc::cmt<'tcx>> {
         // Create the cmt for the variable being borrowed, from the
         // caller's perspective
-        let var_id = self.tcx().map.as_local_node_id(upvar_def.def_id()).unwrap();
+        let var_id = self.tcx().hir.as_local_node_id(upvar_def.def_id()).unwrap();
         let var_ty = self.mc.infcx.node_ty(var_id)?;
         self.mc.cat_def(closure_id, closure_span, var_ty, upvar_def)
     }

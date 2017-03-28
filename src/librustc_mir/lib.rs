@@ -22,16 +22,20 @@ Rust MIR: a lowered representation of Rust. Also: an experiment!
 
 #![feature(associated_consts)]
 #![feature(box_patterns)]
+#![feature(box_syntax)]
+#![cfg_attr(stage0, feature(field_init_shorthand))]
+#![feature(i128_type)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(rustc_private)]
 #![feature(staged_api)]
+#![feature(placement_in_syntax)]
+#![feature(collection_placement)]
 
 #[macro_use] extern crate log;
 extern crate graphviz as dot;
 #[macro_use]
 extern crate rustc;
 extern crate rustc_data_structures;
-extern crate rustc_back;
 #[macro_use]
 #[no_link]
 extern crate rustc_bitflags;
@@ -41,15 +45,20 @@ extern crate syntax_pos;
 extern crate rustc_const_math;
 extern crate rustc_const_eval;
 
-extern crate rustc_i128;
-
 pub mod diagnostics;
 
 pub mod build;
-pub mod def_use;
-pub mod graphviz;
+pub mod callgraph;
 mod hair;
+mod shim;
 pub mod mir_map;
-pub mod pretty;
 pub mod transform;
+pub mod util;
 
+use rustc::ty::maps::Providers;
+
+pub fn provide(providers: &mut Providers) {
+    mir_map::provide(providers);
+    shim::provide(providers);
+    transform::qualify_consts::provide(providers);
+}

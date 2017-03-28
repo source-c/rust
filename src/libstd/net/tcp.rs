@@ -183,7 +183,7 @@ impl TcpStream {
 
     /// Sets the read timeout to the timeout specified.
     ///
-    /// If the value specified is [`None`], then [`read()`] calls will block
+    /// If the value specified is [`None`], then [`read`] calls will block
     /// indefinitely. It is an error to pass the zero `Duration` to this
     /// method.
     ///
@@ -194,7 +194,7 @@ impl TcpStream {
     /// error of the kind [`WouldBlock`], but Windows may return [`TimedOut`].
     ///
     /// [`None`]: ../../std/option/enum.Option.html#variant.None
-    /// [`read()`]: ../../std/io/trait.Read.html#tymethod.read
+    /// [`read`]: ../../std/io/trait.Read.html#tymethod.read
     /// [`WouldBlock`]: ../../std/io/enum.ErrorKind.html#variant.WouldBlock
     /// [`TimedOut`]: ../../std/io/enum.ErrorKind.html#variant.TimedOut
     ///
@@ -214,7 +214,7 @@ impl TcpStream {
 
     /// Sets the write timeout to the timeout specified.
     ///
-    /// If the value specified is [`None`], then [`write()`] calls will block
+    /// If the value specified is [`None`], then [`write`] calls will block
     /// indefinitely. It is an error to pass the zero [`Duration`] to this
     /// method.
     ///
@@ -225,7 +225,7 @@ impl TcpStream {
     /// an error of the kind [`WouldBlock`], but Windows may return [`TimedOut`].
     ///
     /// [`None`]: ../../std/option/enum.Option.html#variant.None
-    /// [`write()`]: ../../std/io/trait.Write.html#tymethod.write
+    /// [`write`]: ../../std/io/trait.Write.html#tymethod.write
     /// [`Duration`]: ../../std/time/struct.Duration.html
     /// [`WouldBlock`]: ../../std/io/enum.ErrorKind.html#variant.WouldBlock
     /// [`TimedOut`]: ../../std/io/enum.ErrorKind.html#variant.TimedOut
@@ -246,14 +246,14 @@ impl TcpStream {
 
     /// Returns the read timeout of this socket.
     ///
-    /// If the timeout is [`None`], then [`read()`] calls will block indefinitely.
+    /// If the timeout is [`None`], then [`read`] calls will block indefinitely.
     ///
     /// # Note
     ///
     /// Some platforms do not provide access to the current timeout.
     ///
     /// [`None`]: ../../std/option/enum.Option.html#variant.None
-    /// [`read()`]: ../../std/io/trait.Read.html#tymethod.read
+    /// [`read`]: ../../std/io/trait.Read.html#tymethod.read
     ///
     /// # Examples
     ///
@@ -272,14 +272,14 @@ impl TcpStream {
 
     /// Returns the write timeout of this socket.
     ///
-    /// If the timeout is [`None`], then [`write()`] calls will block indefinitely.
+    /// If the timeout is [`None`], then [`write`] calls will block indefinitely.
     ///
     /// # Note
     ///
     /// Some platforms do not provide access to the current timeout.
     ///
     /// [`None`]: ../../std/option/enum.Option.html#variant.None
-    /// [`write()`]: ../../std/io/trait.Write.html#tymethod.write
+    /// [`write`]: ../../std/io/trait.Write.html#tymethod.write
     ///
     /// # Examples
     ///
@@ -294,6 +294,29 @@ impl TcpStream {
     #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
         self.0.write_timeout()
+    }
+
+    /// Receives data on the socket from the remote adress to which it is
+    /// connected, without removing that data from the queue. On success,
+    /// returns the number of bytes peeked.
+    ///
+    /// Successive calls return the same data. This is accomplished by passing
+    /// `MSG_PEEK` as a flag to the underlying `recv` system call.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// #![feature(peek)]
+    /// use std::net::TcpStream;
+    ///
+    /// let stream = TcpStream::connect("127.0.0.1:8000")
+    ///                        .expect("couldn't bind to address");
+    /// let mut buf = [0; 10];
+    /// let len = stream.peek(&mut buf).expect("peek failed");
+    /// ```
+    #[unstable(feature = "peek", issue = "38980")]
+    pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.peek(buf)
     }
 
     /// Sets the value of the `TCP_NODELAY` option on this socket.
@@ -595,7 +618,7 @@ impl TcpListener {
 
     /// Gets the value of the `IP_TTL` option for this socket.
     ///
-    /// For more information about this option, see [`set_ttl()`][link].
+    /// For more information about this option, see [`set_ttl`][link].
     ///
     /// [link]: #method.set_ttl
     ///
@@ -1405,5 +1428,36 @@ mod tests {
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
             Err(e) => panic!("unexpected error {}", e),
         }
+    }
+
+    #[test]
+    fn peek() {
+        each_ip(&mut |addr| {
+            let (txdone, rxdone) = channel();
+
+            let srv = t!(TcpListener::bind(&addr));
+            let _t = thread::spawn(move|| {
+                let mut cl = t!(srv.accept()).0;
+                cl.write(&[1,3,3,7]).unwrap();
+                t!(rxdone.recv());
+            });
+
+            let mut c = t!(TcpStream::connect(&addr));
+            let mut b = [0; 10];
+            for _ in 1..3 {
+                let len = c.peek(&mut b).unwrap();
+                assert_eq!(len, 4);
+            }
+            let len = c.read(&mut b).unwrap();
+            assert_eq!(len, 4);
+
+            t!(c.set_nonblocking(true));
+            match c.peek(&mut b) {
+                Ok(_) => panic!("expected error"),
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) => panic!("unexpected error {}", e),
+            }
+            t!(txdone.send(()));
+        })
     }
 }

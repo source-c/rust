@@ -103,6 +103,7 @@ pub struct ExchangeHeapSingleton {
 ///
 /// See the [module-level documentation](../../std/boxed/index.html) for more.
 #[lang = "owned_box"]
+#[fundamental]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Box<T: ?Sized>(Unique<T>);
 
@@ -224,6 +225,8 @@ impl<T: ?Sized> Drop for IntermediateBox<T> {
 impl<T> Box<T> {
     /// Allocates memory on the heap and then places `x` into it.
     ///
+    /// This doesn't actually allocate if `T` is zero-sized.
+    ///
     /// # Examples
     ///
     /// ```
@@ -293,6 +296,13 @@ impl<T: ?Sized> Box<T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
+unsafe impl<#[may_dangle] T: ?Sized> Drop for Box<T> {
+    fn drop(&mut self) {
+        // FIXME: Do nothing, drop is currently performed by compiler.
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
 impl<T: Default> Default for Box<T> {
     /// Creates a `Box<T>`, with the `Default` value for T.
     fn default() -> Box<T> {
@@ -304,6 +314,14 @@ impl<T: Default> Default for Box<T> {
 impl<T> Default for Box<[T]> {
     fn default() -> Box<[T]> {
         Box::<[T; 0]>::new([])
+    }
+}
+
+#[stable(feature = "default_box_extra", since = "1.17.0")]
+impl Default for Box<str> {
+    fn default() -> Box<str> {
+        let default: Box<[u8]> = Default::default();
+        unsafe { mem::transmute(default) }
     }
 }
 
@@ -408,6 +426,23 @@ impl<T: ?Sized + Hash> Hash for Box<T> {
 impl<T> From<T> for Box<T> {
     fn from(t: T) -> Self {
         Box::new(t)
+    }
+}
+
+#[stable(feature = "box_from_slice", since = "1.17.0")]
+impl<'a, T: Copy> From<&'a [T]> for Box<[T]> {
+    fn from(slice: &'a [T]) -> Box<[T]> {
+        let mut boxed = unsafe { RawVec::with_capacity(slice.len()).into_box() };
+        boxed.copy_from_slice(slice);
+        boxed
+    }
+}
+
+#[stable(feature = "box_from_slice", since = "1.17.0")]
+impl<'a> From<&'a str> for Box<str> {
+    fn from(s: &'a str) -> Box<str> {
+        let boxed: Box<[u8]> = Box::from(s.as_bytes());
+        unsafe { mem::transmute(boxed) }
     }
 }
 

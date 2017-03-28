@@ -50,7 +50,7 @@ pub fn assert_module_sources<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     }
 
     let ams = AssertModuleSource { tcx: tcx, modules: modules };
-    for attr in &tcx.map.krate().attrs {
+    for attr in &tcx.hir.krate().attrs {
         ams.check_attr(attr);
     }
 }
@@ -113,7 +113,7 @@ impl<'a, 'tcx> AssertModuleSource<'a, 'tcx> {
     }
 
     fn field(&self, attr: &ast::Attribute, name: &str) -> ast::Name {
-        for item in attr.meta_item_list().unwrap_or(&[]) {
+        for item in attr.meta_item_list().unwrap_or_else(Vec::new) {
             if item.check_name(name) {
                 if let Some(value) = item.value_str() {
                     return value;

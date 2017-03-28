@@ -249,7 +249,7 @@ impl Command {
     // mutex, and then after the fork they unlock it.
     //
     // Despite this information, libnative's spawn has been witnessed to
-    // deadlock on both OSX and FreeBSD. I'm not entirely sure why, but
+    // deadlock on both macOS and FreeBSD. I'm not entirely sure why, but
     // all collected backtraces point at malloc/free traffic in the
     // child spawned process.
     //
@@ -500,5 +500,19 @@ impl Process {
         cvt(syscall::waitpid(self.pid, &mut status, 0))?;
         self.status = Some(ExitStatus(status as i32));
         Ok(ExitStatus(status as i32))
+    }
+
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if let Some(status) = self.status {
+            return Ok(Some(status))
+        }
+        let mut status = 0;
+        let pid = cvt(syscall::waitpid(self.pid, &mut status, syscall::WNOHANG))?;
+        if pid == 0 {
+            Ok(None)
+        } else {
+            self.status = Some(ExitStatus(status as i32));
+            Ok(Some(ExitStatus(status as i32)))
+        }
     }
 }

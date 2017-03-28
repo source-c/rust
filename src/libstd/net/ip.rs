@@ -196,8 +196,6 @@ impl IpAddr {
     /// # Examples
     ///
     /// ```
-    /// #![feature(ipaddr_checker)]
-    ///
     /// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     ///
     /// fn main() {
@@ -206,7 +204,7 @@ impl IpAddr {
     ///                false);
     /// }
     /// ```
-    #[unstable(feature = "ipaddr_checker", issue = "36949")]
+    #[stable(feature = "ipaddr_checker", since = "1.16.0")]
     pub fn is_ipv4(&self) -> bool {
         match *self {
             IpAddr::V4(_) => true,
@@ -219,8 +217,6 @@ impl IpAddr {
     /// # Examples
     ///
     /// ```
-    /// #![feature(ipaddr_checker)]
-    ///
     /// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     ///
     /// fn main() {
@@ -229,7 +225,7 @@ impl IpAddr {
     ///                true);
     /// }
     /// ```
-    #[unstable(feature = "ipaddr_checker", issue = "36949")]
+    #[stable(feature = "ipaddr_checker", since = "1.16.0")]
     pub fn is_ipv6(&self) -> bool {
         match *self {
             IpAddr::V4(_) => false,
@@ -565,6 +561,26 @@ impl PartialEq for Ipv4Addr {
     }
 }
 
+#[stable(feature = "ip_cmp", since = "1.15.0")]
+impl PartialEq<Ipv4Addr> for IpAddr {
+    fn eq(&self, other: &Ipv4Addr) -> bool {
+        match *self {
+            IpAddr::V4(ref v4) => v4 == other,
+            IpAddr::V6(_) => false,
+        }
+    }
+}
+
+#[stable(feature = "ip_cmp", since = "1.15.0")]
+impl PartialEq<IpAddr> for Ipv4Addr {
+    fn eq(&self, other: &IpAddr) -> bool {
+        match *other {
+            IpAddr::V4(ref v4) => self == v4,
+            IpAddr::V6(_) => false,
+        }
+    }
+}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Eq for Ipv4Addr {}
 
@@ -579,6 +595,26 @@ impl hash::Hash for Ipv4Addr {
 impl PartialOrd for Ipv4Addr {
     fn partial_cmp(&self, other: &Ipv4Addr) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[stable(feature = "ip_cmp", since = "1.15.0")]
+impl PartialOrd<Ipv4Addr> for IpAddr {
+    fn partial_cmp(&self, other: &Ipv4Addr) -> Option<Ordering> {
+        match *self {
+            IpAddr::V4(ref v4) => v4.partial_cmp(other),
+            IpAddr::V6(_) => Some(Ordering::Greater),
+        }
+    }
+}
+
+#[stable(feature = "ip_cmp", since = "1.15.0")]
+impl PartialOrd<IpAddr> for Ipv4Addr {
+    fn partial_cmp(&self, other: &IpAddr) -> Option<Ordering> {
+        match *other {
+            IpAddr::V4(ref v4) => self.partial_cmp(v4),
+            IpAddr::V6(_) => Some(Ordering::Less),
+        }
     }
 }
 
@@ -600,6 +636,7 @@ impl FromInner<c::in_addr> for Ipv4Addr {
 
 #[stable(feature = "ip_u32", since = "1.1.0")]
 impl From<Ipv4Addr> for u32 {
+    /// It performs the conversion in network order (big-endian).
     fn from(ip: Ipv4Addr) -> u32 {
         let ip = ip.octets();
         ((ip[0] as u32) << 24) + ((ip[1] as u32) << 16) + ((ip[2] as u32) << 8) + (ip[3] as u32)
@@ -608,6 +645,7 @@ impl From<Ipv4Addr> for u32 {
 
 #[stable(feature = "ip_u32", since = "1.1.0")]
 impl From<u32> for Ipv4Addr {
+    /// It performs the conversion in network order (big-endian).
     fn from(ip: u32) -> Ipv4Addr {
         Ipv4Addr::new((ip >> 24) as u8, (ip >> 16) as u8, (ip >> 8) as u8, ip as u8)
     }
@@ -617,6 +655,13 @@ impl From<u32> for Ipv4Addr {
 impl From<[u8; 4]> for Ipv4Addr {
     fn from(octets: [u8; 4]) -> Ipv4Addr {
         Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3])
+    }
+}
+
+#[stable(feature = "ip_from_slice", since = "1.17.0")]
+impl From<[u8; 4]> for IpAddr {
+    fn from(octets: [u8; 4]) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::from(octets))
     }
 }
 
@@ -1040,6 +1085,26 @@ impl PartialEq for Ipv6Addr {
     }
 }
 
+#[stable(feature = "ip_cmp", since = "1.15.0")]
+impl PartialEq<IpAddr> for Ipv6Addr {
+    fn eq(&self, other: &IpAddr) -> bool {
+        match *other {
+            IpAddr::V4(_) => false,
+            IpAddr::V6(ref v6) => self == v6,
+        }
+    }
+}
+
+#[stable(feature = "ip_cmp", since = "1.15.0")]
+impl PartialEq<Ipv6Addr> for IpAddr {
+    fn eq(&self, other: &Ipv6Addr) -> bool {
+        match *self {
+            IpAddr::V4(_) => false,
+            IpAddr::V6(ref v6) => v6 == other,
+        }
+    }
+}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Eq for Ipv6Addr {}
 
@@ -1054,6 +1119,26 @@ impl hash::Hash for Ipv6Addr {
 impl PartialOrd for Ipv6Addr {
     fn partial_cmp(&self, other: &Ipv6Addr) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[stable(feature = "ip_cmp", since = "1.15.0")]
+impl PartialOrd<Ipv6Addr> for IpAddr {
+    fn partial_cmp(&self, other: &Ipv6Addr) -> Option<Ordering> {
+        match *self {
+            IpAddr::V4(_) => Some(Ordering::Less),
+            IpAddr::V6(ref v6) => v6.partial_cmp(other),
+        }
+    }
+}
+
+#[stable(feature = "ip_cmp", since = "1.15.0")]
+impl PartialOrd<IpAddr> for Ipv6Addr {
+    fn partial_cmp(&self, other: &IpAddr) -> Option<Ordering> {
+        match *other {
+            IpAddr::V4(_) => Some(Ordering::Greater),
+            IpAddr::V6(ref v6) => self.partial_cmp(v6),
+        }
     }
 }
 
@@ -1073,6 +1158,26 @@ impl FromInner<c::in6_addr> for Ipv6Addr {
     }
 }
 
+#[unstable(feature = "i128", issue = "35118")]
+impl From<Ipv6Addr> for u128 {
+    fn from(ip: Ipv6Addr) -> u128 {
+        let ip = ip.segments();
+        ((ip[0] as u128) << 112) + ((ip[1] as u128) << 96) + ((ip[2] as u128) << 80) +
+            ((ip[3] as u128) << 64) + ((ip[4] as u128) << 48) + ((ip[5] as u128) << 32) +
+            ((ip[6] as u128) << 16) + (ip[7] as u128)
+    }
+}
+#[unstable(feature = "i128", issue = "35118")]
+impl From<u128> for Ipv6Addr {
+    fn from(ip: u128) -> Ipv6Addr {
+        Ipv6Addr::new(
+            (ip >> 112) as u16, (ip >> 96) as u16, (ip >> 80) as u16,
+            (ip >> 64) as u16, (ip >> 48) as u16, (ip >> 32) as u16,
+            (ip >> 16) as u16, ip as u16,
+        )
+    }
+}
+
 #[stable(feature = "ipv6_from_octets", since = "1.9.0")]
 impl From<[u8; 16]> for Ipv6Addr {
     fn from(octets: [u8; 16]) -> Ipv6Addr {
@@ -1087,6 +1192,21 @@ impl From<[u16; 8]> for Ipv6Addr {
     fn from(segments: [u16; 8]) -> Ipv6Addr {
         let [a, b, c, d, e, f, g, h] = segments;
         Ipv6Addr::new(a, b, c, d, e, f, g, h)
+    }
+}
+
+
+#[stable(feature = "ip_from_slice", since = "1.17.0")]
+impl From<[u8; 16]> for IpAddr {
+    fn from(octets: [u8; 16]) -> IpAddr {
+        IpAddr::V6(Ipv6Addr::from(octets))
+    }
+}
+
+#[stable(feature = "ip_from_slice", since = "1.17.0")]
+impl From<[u16; 8]> for IpAddr {
+    fn from(segments: [u16; 8]) -> IpAddr {
+        IpAddr::V6(Ipv6Addr::from(segments))
     }
 }
 
@@ -1424,14 +1544,26 @@ mod tests {
 
     #[test]
     fn test_ipv4_to_int() {
-        let a = Ipv4Addr::new(127, 0, 0, 1);
-        assert_eq!(u32::from(a), 2130706433);
+        let a = Ipv4Addr::new(0x11, 0x22, 0x33, 0x44);
+        assert_eq!(u32::from(a), 0x11223344);
     }
 
     #[test]
     fn test_int_to_ipv4() {
-        let a = Ipv4Addr::new(127, 0, 0, 1);
-        assert_eq!(Ipv4Addr::from(2130706433), a);
+        let a = Ipv4Addr::new(0x11, 0x22, 0x33, 0x44);
+        assert_eq!(Ipv4Addr::from(0x11223344), a);
+    }
+
+    #[test]
+    fn test_ipv6_to_int() {
+        let a = Ipv6Addr::new(0x1122, 0x3344, 0x5566, 0x7788, 0x99aa, 0xbbcc, 0xddee, 0xff11);
+        assert_eq!(u128::from(a), 0x112233445566778899aabbccddeeff11u128);
+    }
+
+    #[test]
+    fn test_int_to_ipv6() {
+        let a = Ipv6Addr::new(0x1122, 0x3344, 0x5566, 0x7788, 0x99aa, 0xbbcc, 0xddee, 0xff11);
+        assert_eq!(Ipv6Addr::from(0x112233445566778899aabbccddeeff11u128), a);
     }
 
     #[test]
@@ -1458,10 +1590,26 @@ mod tests {
     }
 
     #[test]
-    fn ord() {
-        assert!(Ipv4Addr::new(100, 64, 3, 3) < Ipv4Addr::new(192, 0, 2, 2));
-        assert!("2001:db8:f00::1002".parse::<Ipv6Addr>().unwrap() <
-                "2001:db8:f00::2001".parse::<Ipv6Addr>().unwrap());
+    fn cmp() {
+        let v41 = Ipv4Addr::new(100, 64, 3, 3);
+        let v42 = Ipv4Addr::new(192, 0, 2, 2);
+        let v61 = "2001:db8:f00::1002".parse::<Ipv6Addr>().unwrap();
+        let v62 = "2001:db8:f00::2001".parse::<Ipv6Addr>().unwrap();
+        assert!(v41 < v42);
+        assert!(v61 < v62);
+
+        assert_eq!(v41, IpAddr::V4(v41));
+        assert_eq!(v61, IpAddr::V6(v61));
+        assert!(v41 != IpAddr::V4(v42));
+        assert!(v61 != IpAddr::V6(v62));
+
+        assert!(v41 < IpAddr::V4(v42));
+        assert!(v61 < IpAddr::V6(v62));
+        assert!(IpAddr::V4(v41) < v42);
+        assert!(IpAddr::V6(v61) < v62);
+
+        assert!(v41 < IpAddr::V6(v61));
+        assert!(IpAddr::V4(v41) < v61);
     }
 
     #[test]

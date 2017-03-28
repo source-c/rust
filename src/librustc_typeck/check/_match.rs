@@ -76,7 +76,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 self.demand_suptype(pat.span, expected, pat_ty);
                 pat_ty
             }
-            PatKind::Range(ref begin, ref end) => {
+            PatKind::Range(ref begin, ref end, _) => {
                 let lhs_ty = self.check_expr(begin);
                 let rhs_ty = self.check_expr(end);
 
@@ -139,7 +139,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
                 // if there are multiple arms, make sure they all agree on
                 // what the type of the binding `x` ought to be
-                let var_id = tcx.map.as_local_node_id(def_id).unwrap();
+                let var_id = tcx.hir.as_local_node_id(def_id).unwrap();
                 if var_id != pat.id {
                     let vt = self.local_ty(pat.span, var_id);
                     self.demand_eqtype(pat.span, vt, typ);
@@ -164,7 +164,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 let mut expected_len = elements.len();
                 if ddpos.is_some() {
                     // Require known type only when `..` is present
-                    if let ty::TyTuple(ref tys) =
+                    if let ty::TyTuple(ref tys, _) =
                             self.structurally_resolved_type(pat.span, expected).sty {
                         expected_len = tys.len();
                     }
@@ -176,7 +176,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     //       from all tuple elements isn't trivial.
                     TypeVariableOrigin::TypeInference(pat.span)));
                 let element_tys = tcx.mk_type_list(element_tys_iter);
-                let pat_ty = tcx.mk_ty(ty::TyTuple(element_tys));
+                let pat_ty = tcx.mk_ty(ty::TyTuple(element_tys, false));
                 self.demand_eqtype(pat.span, expected, pat_ty);
                 for (i, elem) in elements.iter().enumerate_and_adjust(max_len, ddpos) {
                     self.check_pat(elem, &element_tys[i]);
@@ -561,7 +561,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             span_err!(tcx.sess, pat.span, E0533,
                       "expected unit struct/variant or constant, found {} `{}`",
                       def.kind_name(),
-                      hir::print::to_string(&tcx.map, |s| s.print_qpath(qpath, false)));
+                      hir::print::to_string(&tcx.hir, |s| s.print_qpath(qpath, false)));
         };
 
         // Resolve the path and check the definition for errors.
@@ -603,7 +603,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         let report_unexpected_def = |def: Def| {
             let msg = format!("expected tuple struct/variant, found {} `{}`",
                               def.kind_name(),
-                              hir::print::to_string(&tcx.map, |s| s.print_qpath(qpath, false)));
+                              hir::print::to_string(&tcx.hir, |s| s.print_qpath(qpath, false)));
             struct_span_err!(tcx.sess, pat.span, E0164, "{}", msg)
                 .span_label(pat.span, &format!("not a tuple variant or struct")).emit();
             on_error();

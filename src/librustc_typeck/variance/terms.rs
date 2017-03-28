@@ -20,9 +20,7 @@
 // a variable.
 
 use arena::TypedArena;
-use dep_graph::DepTrackingMapConfig;
 use rustc::ty::{self, TyCtxt};
-use rustc::ty::maps::ItemVariances;
 use std::fmt;
 use std::rc::Rc;
 use syntax::ast;
@@ -33,6 +31,8 @@ use util::nodemap::NodeMap;
 use self::VarianceTerm::*;
 
 pub type VarianceTermPtr<'a> = &'a VarianceTerm<'a>;
+
+use dep_graph::DepNode::ItemSignature as VarianceDepNode;
 
 #[derive(Copy, Clone, Debug)]
 pub struct InferredIndex(pub usize);
@@ -109,7 +109,7 @@ pub fn determine_parameters_to_be_inferred<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>
     };
 
     // See README.md for a discussion on dep-graph management.
-    tcx.visit_all_item_likes_in_krate(|def_id| ItemVariances::to_dep_node(&def_id), &mut terms_cx);
+    tcx.visit_all_item_likes_in_krate(|def_id| VarianceDepNode(def_id), &mut terms_cx);
 
     terms_cx
 }
@@ -132,7 +132,7 @@ fn lang_items(tcx: TyCtxt) -> Vec<(ast::NodeId, Vec<ty::Variance>)> {
     all.into_iter() // iterating over (Option<DefId>, Variance)
        .filter(|&(ref d,_)| d.is_some())
        .map(|(d, v)| (d.unwrap(), v)) // (DefId, Variance)
-       .filter_map(|(d, v)| tcx.map.as_local_node_id(d).map(|n| (n, v))) // (NodeId, Variance)
+       .filter_map(|(d, v)| tcx.hir.as_local_node_id(d).map(|n| (n, v))) // (NodeId, Variance)
        .collect()
 }
 
@@ -177,13 +177,10 @@ impl<'a, 'tcx> TermsContext<'a, 'tcx> {
         // "invalid item id" from "item id with no
         // parameters".
         if self.num_inferred() == inferreds_on_entry {
-            let item_def_id = self.tcx.map.local_def_id(item_id);
-            let newly_added = self.tcx
-                .item_variance_map
+            let item_def_id = self.tcx.hir.local_def_id(item_id);
+            self.tcx.maps.variances
                 .borrow_mut()
-                .insert(item_def_id, self.empty_variances.clone())
-                .is_none();
-            assert!(newly_added);
+                .insert(item_def_id, self.empty_variances.clone());
         }
     }
 
@@ -207,7 +204,7 @@ impl<'a, 'tcx> TermsContext<'a, 'tcx> {
                 param_id={}, \
                 inf_index={:?}, \
                 initial_variance={:?})",
-               self.tcx.item_path_str(self.tcx.map.local_def_id(item_id)),
+               self.tcx.item_path_str(self.tcx.hir.local_def_id(item_id)),
                item_id,
                index,
                param_id,
@@ -230,7 +227,7 @@ impl<'a, 'tcx> TermsContext<'a, 'tcx> {
 impl<'a, 'tcx, 'v> ItemLikeVisitor<'v> for TermsContext<'a, 'tcx> {
     fn visit_item(&mut self, item: &hir::Item) {
         debug!("add_inferreds for item {}",
-               self.tcx.map.node_to_string(item.id));
+               self.tcx.hir.node_to_string(item.id));
 
         match item.node {
             hir::ItemEnum(_, ref generics) |

@@ -13,7 +13,8 @@
 
 use rustc_data_structures::bitvec::BitVector;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
-use rustc::mir::{self, Location, TerminatorKind};
+use rustc::middle::const_val::ConstVal;
+use rustc::mir::{self, Location, TerminatorKind, Literal};
 use rustc::mir::visit::{Visitor, LvalueContext};
 use rustc::mir::traversal;
 use common;
@@ -30,7 +31,7 @@ pub fn lvalue_locals<'a, 'tcx>(mircx: &MirContext<'a, 'tcx>) -> BitVector {
         let ty = mircx.monomorphize(&ty);
         debug!("local {} has type {:?}", index, ty);
         if ty.is_scalar() ||
-            ty.is_unique() ||
+            ty.is_box() ||
             ty.is_region_ptr() ||
             ty.is_simd() ||
             common::type_is_zero_size(mircx.ccx, ty)
@@ -109,7 +110,9 @@ impl<'mir, 'a, 'tcx> Visitor<'tcx> for LocalAnalyzer<'mir, 'a, 'tcx> {
         match *kind {
             mir::TerminatorKind::Call {
                 func: mir::Operand::Constant(mir::Constant {
-                    literal: mir::Literal::Item { def_id, .. }, ..
+                    literal: Literal::Value {
+                        value: ConstVal::Function(def_id, _), ..
+                    }, ..
                 }),
                 ref args, ..
             } if Some(def_id) == self.cx.ccx.tcx().lang_items.box_free_fn() => {
@@ -156,10 +159,10 @@ impl<'mir, 'a, 'tcx> Visitor<'tcx> for LocalAnalyzer<'mir, 'a, 'tcx> {
 
                 LvalueContext::StorageLive |
                 LvalueContext::StorageDead |
+                LvalueContext::Inspect |
                 LvalueContext::Consume => {}
 
                 LvalueContext::Store |
-                LvalueContext::Inspect |
                 LvalueContext::Borrow { .. } |
                 LvalueContext::Projection(..) => {
                     self.mark_as_lvalue(index);
@@ -204,8 +207,6 @@ pub fn cleanup_kinds<'a, 'tcx>(mir: &mir::Mir<'tcx>) -> IndexVec<mir::BasicBlock
                 TerminatorKind::Resume |
                 TerminatorKind::Return |
                 TerminatorKind::Unreachable |
-                TerminatorKind::If { .. } |
-                TerminatorKind::Switch { .. } |
                 TerminatorKind::SwitchInt { .. } => {
                     /* nothing to do */
                 }

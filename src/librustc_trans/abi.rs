@@ -59,6 +59,7 @@ enum ArgKind {
 pub use self::attr_impl::ArgAttribute;
 
 #[allow(non_upper_case_globals)]
+#[allow(unused)]
 mod attr_impl {
     // The subset of llvm::Attribute needed for arguments, packed into a bitfield.
     bitflags! {
@@ -223,16 +224,6 @@ impl ArgType {
         self.kind == ArgKind::Ignore
     }
 
-    /// Get the LLVM type for an lvalue of the original Rust type of
-    /// this argument/return, i.e. the result of `type_of::type_of`.
-    pub fn memory_ty(&self, ccx: &CrateContext) -> Type {
-        if self.original_ty == Type::i1(ccx) {
-            Type::i8(ccx)
-        } else {
-            self.original_ty
-        }
-    }
-
     /// Store a direct/indirect value described by this ArgType into a
     /// lvalue for the original Rust type of this argument/return.
     /// Can be used for both storing formal arguments into Rust variables
@@ -327,20 +318,28 @@ pub struct FnType {
 
 impl FnType {
     pub fn new<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
-                         abi: Abi,
-                         sig: &ty::FnSig<'tcx>,
+                         sig: ty::FnSig<'tcx>,
                          extra_args: &[Ty<'tcx>]) -> FnType {
-        let mut fn_ty = FnType::unadjusted(ccx, abi, sig, extra_args);
-        fn_ty.adjust_for_abi(ccx, abi, sig);
+        let mut fn_ty = FnType::unadjusted(ccx, sig, extra_args);
+        fn_ty.adjust_for_abi(ccx, sig);
         fn_ty
     }
 
-    pub fn unadjusted<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
-                                abi: Abi,
-                                sig: &ty::FnSig<'tcx>,
+    pub fn new_vtable<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
+                                sig: ty::FnSig<'tcx>,
                                 extra_args: &[Ty<'tcx>]) -> FnType {
+        let mut fn_ty = FnType::unadjusted(ccx, sig, extra_args);
+        // Don't pass the vtable, it's not an argument of the virtual fn.
+        fn_ty.args[1].ignore();
+        fn_ty.adjust_for_abi(ccx, sig);
+        fn_ty
+    }
+
+    fn unadjusted<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
+                            sig: ty::FnSig<'tcx>,
+                            extra_args: &[Ty<'tcx>]) -> FnType {
         use self::Abi::*;
-        let cconv = match ccx.sess().target.target.adjust_abi(abi) {
+        let cconv = match ccx.sess().target.target.adjust_abi(sig.abi) {
             RustIntrinsic | PlatformIntrinsic |
             Rust | RustCall => llvm::CCallConv,
 
@@ -356,17 +355,19 @@ impl FnType {
             SysV64 => llvm::X86_64_SysV,
             Aapcs => llvm::ArmAapcsCallConv,
             PtxKernel => llvm::PtxKernel,
+            Msp430Interrupt => llvm::Msp430Intr,
+            X86Interrupt => llvm::X86_Intr,
 
             // These API constants ought to be more specific...
             Cdecl => llvm::CCallConv,
         };
 
         let mut inputs = sig.inputs();
-        let extra_args = if abi == RustCall {
+        let extra_args = if sig.abi == RustCall {
             assert!(!sig.variadic && extra_args.is_empty());
 
             match sig.inputs().last().unwrap().sty {
-                ty::TyTuple(ref tupled_arguments) => {
+                ty::TyTuple(ref tupled_arguments, _) => {
                     inputs = &sig.inputs()[0..sig.inputs().len() - 1];
                     &tupled_arguments[..]
                 }
@@ -387,7 +388,7 @@ impl FnType {
         let linux_s390x = target.target_os == "linux"
                        && target.arch == "s390x"
                        && target.target_env == "gnu";
-        let rust_abi = match abi {
+        let rust_abi = match sig.abi {
             RustIntrinsic | PlatformIntrinsic | Rust | RustCall => true,
             _ => false
         };
@@ -428,7 +429,7 @@ impl FnType {
         if !type_is_fat_ptr(ccx, ret_ty) {
             // The `noalias` attribute on the return value is useful to a
             // function ptr caller.
-            if let ty::TyBox(_) = ret_ty.sty {
+            if ret_ty.is_box() {
                 // `Box` pointer return values never alias because ownership
                 // is transferred
                 ret.attrs.set(ArgAttribute::NoAlias);
@@ -437,9 +438,13 @@ impl FnType {
             // We can also mark the return value as `dereferenceable` in certain cases
             match ret_ty.sty {
                 // These are not really pointers but pairs, (pointer, len)
-                ty::TyRef(_, ty::TypeAndMut { ty, .. }) |
-                ty::TyBox(ty) => {
+                ty::TyRef(_, ty::TypeAndMut { ty, .. }) => {
                     let llty = type_of::sizing_type_of(ccx, ty);
+                    let llsz = llsize_of_alloc(ccx, llty);
+                    ret.attrs.set_dereferenceable(llsz);
+                }
+                ty::TyAdt(def, _) if def.is_box() => {
+                    let llty = type_of::sizing_type_of(ccx, ret_ty.boxed_ty());
                     let llsz = llsize_of_alloc(ccx, llty);
                     ret.attrs.set_dereferenceable(llsz);
                 }
@@ -452,9 +457,9 @@ impl FnType {
         // Handle safe Rust thin and fat pointers.
         let rust_ptr_attrs = |ty: Ty<'tcx>, arg: &mut ArgType| match ty.sty {
             // `Box` pointer parameters never alias because ownership is transferred
-            ty::TyBox(inner) => {
+            ty::TyAdt(def, _) if def.is_box() => {
                 arg.attrs.set(ArgAttribute::NoAlias);
-                Some(inner)
+                Some(ty.boxed_ty())
             }
 
             ty::TyRef(b, mt) => {
@@ -501,7 +506,11 @@ impl FnType {
                 if let Some(inner) = rust_ptr_attrs(ty, &mut data) {
                     data.attrs.set(ArgAttribute::NonNull);
                     if ccx.tcx().struct_tail(inner).is_trait() {
+                        // vtables can be safely marked non-null, readonly
+                        // and noalias.
                         info.attrs.set(ArgAttribute::NonNull);
+                        info.attrs.set(ArgAttribute::ReadOnly);
+                        info.attrs.set(ArgAttribute::NoAlias);
                     }
                 }
                 args.push(data);
@@ -524,10 +533,10 @@ impl FnType {
         }
     }
 
-    pub fn adjust_for_abi<'a, 'tcx>(&mut self,
-                                    ccx: &CrateContext<'a, 'tcx>,
-                                    abi: Abi,
-                                    sig: &ty::FnSig<'tcx>) {
+    fn adjust_for_abi<'a, 'tcx>(&mut self,
+                                ccx: &CrateContext<'a, 'tcx>,
+                                sig: ty::FnSig<'tcx>) {
+        let abi = sig.abi;
         if abi == Abi::Unadjusted { return }
 
         if abi == Abi::Rust || abi == Abi::RustCall ||

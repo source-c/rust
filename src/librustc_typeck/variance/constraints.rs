@@ -13,12 +13,10 @@
 //! The second pass over the AST determines the set of constraints.
 //! We walk the set of items and, for each member, generate new constraints.
 
-use dep_graph::DepTrackingMapConfig;
 use hir::def_id::DefId;
 use middle::resolve_lifetime as rl;
 use rustc::ty::subst::Substs;
 use rustc::ty::{self, Ty, TyCtxt};
-use rustc::ty::maps::ItemVariances;
 use rustc::hir::map as hir_map;
 use syntax::ast;
 use rustc::hir;
@@ -27,6 +25,8 @@ use rustc::hir::itemlikevisit::ItemLikeVisitor;
 use super::terms::*;
 use super::terms::VarianceTerm::*;
 use super::xform::*;
+
+use dep_graph::DepNode::ItemSignature as VarianceDepNode;
 
 pub struct ConstraintContext<'a, 'tcx: 'a> {
     pub terms_cx: TermsContext<'a, 'tcx>,
@@ -65,8 +65,7 @@ pub fn add_constraints_from_crate<'a, 'tcx>(terms_cx: TermsContext<'a, 'tcx>)
     };
 
     // See README.md for a discussion on dep-graph management.
-    tcx.visit_all_item_likes_in_krate(|def_id| ItemVariances::to_dep_node(&def_id),
-                                      &mut constraint_cx);
+    tcx.visit_all_item_likes_in_krate(VarianceDepNode, &mut constraint_cx);
 
     constraint_cx
 }
@@ -74,9 +73,9 @@ pub fn add_constraints_from_crate<'a, 'tcx>(terms_cx: TermsContext<'a, 'tcx>)
 impl<'a, 'tcx, 'v> ItemLikeVisitor<'v> for ConstraintContext<'a, 'tcx> {
     fn visit_item(&mut self, item: &hir::Item) {
         let tcx = self.terms_cx.tcx;
-        let did = tcx.map.local_def_id(item.id);
+        let did = tcx.hir.local_def_id(item.id);
 
-        debug!("visit_item item={}", tcx.map.node_to_string(item.id));
+        debug!("visit_item item={}", tcx.hir.node_to_string(item.id));
 
         match item.node {
             hir::ItemEnum(..) |
@@ -145,16 +144,16 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
             Some(&index) => index,
             None => {
                 bug!("no inferred index entry for {}",
-                     self.tcx().map.node_to_string(param_id));
+                     self.tcx().hir.node_to_string(param_id));
             }
         }
     }
 
     fn find_binding_for_lifetime(&self, param_id: ast::NodeId) -> ast::NodeId {
         let tcx = self.terms_cx.tcx;
-        assert!(is_lifetime(&tcx.map, param_id));
+        assert!(is_lifetime(&tcx.hir, param_id));
         match tcx.named_region_map.defs.get(&param_id) {
-            Some(&rl::DefEarlyBoundRegion(_, lifetime_decl_id)) => lifetime_decl_id,
+            Some(&rl::Region::EarlyBound(_, lifetime_decl_id)) => lifetime_decl_id,
             Some(_) => bug!("should not encounter non early-bound cases"),
 
             // The lookup should only fail when `param_id` is
@@ -177,17 +176,17 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
             let tcx = this.terms_cx.tcx;
             let decl_id = this.find_binding_for_lifetime(param_id);
             // Currently only called on lifetimes; double-checking that.
-            assert!(is_lifetime(&tcx.map, param_id));
-            let parent_id = tcx.map.get_parent(decl_id);
-            let parent = tcx.map
+            assert!(is_lifetime(&tcx.hir, param_id));
+            let parent_id = tcx.hir.get_parent(decl_id);
+            let parent = tcx.hir
                 .find(parent_id)
-                .unwrap_or_else(|| bug!("tcx.map missing entry for id: {}", parent_id));
+                .unwrap_or_else(|| bug!("tcx.hir missing entry for id: {}", parent_id));
 
             let is_inferred;
             macro_rules! cannot_happen { () => { {
                 bug!("invalid parent: {} for {}",
-                     tcx.map.node_to_string(parent_id),
-                     tcx.map.node_to_string(param_id));
+                     tcx.hir.node_to_string(parent_id),
+                     tcx.hir.node_to_string(param_id));
             } } }
 
             match parent {
@@ -224,7 +223,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                          -> VarianceTermPtr<'a> {
         assert_eq!(param_def_id.krate, item_def_id.krate);
 
-        if let Some(param_node_id) = self.tcx().map.as_local_node_id(param_def_id) {
+        if let Some(param_node_id) = self.tcx().hir.as_local_node_id(param_def_id) {
             // Parameter on an item defined within current crate:
             // variance not yet inferred, so return a symbolic
             // variance.
@@ -279,7 +278,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
     }
 
     fn add_constraints_from_trait_ref(&mut self,
-                                      generics: &ty::Generics<'tcx>,
+                                      generics: &ty::Generics,
                                       trait_ref: ty::TraitRef<'tcx>,
                                       variance: VarianceTermPtr<'a>) {
         debug!("add_constraints_from_trait_ref: trait_ref={:?} variance={:?}",
@@ -291,7 +290,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
         // This edge is actually implied by the call to
         // `lookup_trait_def`, but I'm trying to be future-proof. See
         // README.md for a discussion on dep-graph management.
-        self.tcx().dep_graph.read(ItemVariances::to_dep_node(&trait_ref.def_id));
+        self.tcx().dep_graph.read(VarianceDepNode(trait_ref.def_id));
 
         self.add_constraints_from_substs(generics,
                                          trait_ref.def_id,
@@ -305,7 +304,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
     /// in a context with the generics defined in `generics` and
     /// ambient variance `variance`
     fn add_constraints_from_ty(&mut self,
-                               generics: &ty::Generics<'tcx>,
+                               generics: &ty::Generics,
                                ty: Ty<'tcx>,
                                variance: VarianceTermPtr<'a>) {
         debug!("add_constraints_from_ty(ty={:?}, variance={:?})",
@@ -329,7 +328,6 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 self.add_constraints_from_mt(generics, mt, variance);
             }
 
-            ty::TyBox(typ) |
             ty::TyArray(typ, _) |
             ty::TySlice(typ) => {
                 self.add_constraints_from_ty(generics, typ, variance);
@@ -339,7 +337,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 self.add_constraints_from_mt(generics, mt, variance);
             }
 
-            ty::TyTuple(subtys) => {
+            ty::TyTuple(subtys, _) => {
                 for &subty in subtys {
                     self.add_constraints_from_ty(generics, subty, variance);
                 }
@@ -351,7 +349,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 // This edge is actually implied by the call to
                 // `lookup_trait_def`, but I'm trying to be future-proof. See
                 // README.md for a discussion on dep-graph management.
-                self.tcx().dep_graph.read(ItemVariances::to_dep_node(&def.did));
+                self.tcx().dep_graph.read(VarianceDepNode(def.did));
 
                 self.add_constraints_from_substs(generics,
                                                  def.did,
@@ -368,7 +366,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 // This edge is actually implied by the call to
                 // `lookup_trait_def`, but I'm trying to be future-proof. See
                 // README.md for a discussion on dep-graph management.
-                self.tcx().dep_graph.read(ItemVariances::to_dep_node(&trait_ref.def_id));
+                self.tcx().dep_graph.read(VarianceDepNode(trait_ref.def_id));
 
                 self.add_constraints_from_substs(generics,
                                                  trait_ref.def_id,
@@ -400,7 +398,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                     i -= generics.regions.len();
                 }
                 let def_id = generics.types[i].def_id;
-                let node_id = self.tcx().map.as_local_node_id(def_id).unwrap();
+                let node_id = self.tcx().hir.as_local_node_id(def_id).unwrap();
                 match self.terms_cx.inferred_map.get(&node_id) {
                     Some(&index) => {
                         self.add_constraint(index, variance);
@@ -413,8 +411,8 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 }
             }
 
-            ty::TyFnDef(.., &ty::BareFnTy { ref sig, .. }) |
-            ty::TyFnPtr(&ty::BareFnTy { ref sig, .. }) => {
+            ty::TyFnDef(.., sig) |
+            ty::TyFnPtr(sig) => {
                 self.add_constraints_from_sig(generics, sig, variance);
             }
 
@@ -434,9 +432,9 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
     /// Adds constraints appropriate for a nominal type (enum, struct,
     /// object, etc) appearing in a context with ambient variance `variance`
     fn add_constraints_from_substs(&mut self,
-                                   generics: &ty::Generics<'tcx>,
+                                   generics: &ty::Generics,
                                    def_id: DefId,
-                                   type_param_defs: &[ty::TypeParameterDef<'tcx>],
+                                   type_param_defs: &[ty::TypeParameterDef],
                                    region_param_defs: &[ty::RegionParameterDef],
                                    substs: &Substs<'tcx>,
                                    variance: VarianceTermPtr<'a>) {
@@ -466,8 +464,8 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
     /// Adds constraints appropriate for a function with signature
     /// `sig` appearing in a context with ambient variance `variance`
     fn add_constraints_from_sig(&mut self,
-                                generics: &ty::Generics<'tcx>,
-                                sig: &ty::PolyFnSig<'tcx>,
+                                generics: &ty::Generics,
+                                sig: ty::PolyFnSig<'tcx>,
                                 variance: VarianceTermPtr<'a>) {
         let contra = self.contravariant(variance);
         for &input in sig.0.inputs() {
@@ -479,7 +477,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
     /// Adds constraints appropriate for a region appearing in a
     /// context with ambient variance `variance`
     fn add_constraints_from_region(&mut self,
-                                   generics: &ty::Generics<'tcx>,
+                                   generics: &ty::Generics,
                                    region: &'tcx ty::Region,
                                    variance: VarianceTermPtr<'a>) {
         match *region {
@@ -487,7 +485,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 assert_eq!(generics.parent, None);
                 let i = data.index as usize - generics.has_self as usize;
                 let def_id = generics.regions[i].def_id;
-                let node_id = self.tcx().map.as_local_node_id(def_id).unwrap();
+                let node_id = self.tcx().hir.as_local_node_id(def_id).unwrap();
                 if self.is_to_be_inferred(node_id) {
                     let index = self.inferred_index(node_id);
                     self.add_constraint(index, variance);
@@ -519,7 +517,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
     /// Adds constraints appropriate for a mutability-type pair
     /// appearing in a context with ambient variance `variance`
     fn add_constraints_from_mt(&mut self,
-                               generics: &ty::Generics<'tcx>,
+                               generics: &ty::Generics,
                                mt: &ty::TypeAndMut<'tcx>,
                                variance: VarianceTermPtr<'a>) {
         match mt.mutbl {

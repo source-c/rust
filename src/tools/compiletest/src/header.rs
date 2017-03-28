@@ -25,6 +25,7 @@ use extract_gdb_version;
 pub struct EarlyProps {
     pub ignore: bool,
     pub should_fail: bool,
+    pub aux: Vec<String>,
 }
 
 impl EarlyProps {
@@ -32,6 +33,7 @@ impl EarlyProps {
         let mut props = EarlyProps {
             ignore: false,
             should_fail: false,
+            aux: Vec::new(),
         };
 
         iter_header(testfile,
@@ -49,6 +51,10 @@ impl EarlyProps {
                 ignore_gdb(config, ln) ||
                 ignore_lldb(config, ln) ||
                 ignore_llvm(config, ln);
+
+            if let Some(s) = parse_aux_build(ln) {
+                props.aux.push(s);
+            }
 
             props.should_fail = props.should_fail || parse_name_directive(ln, "should-fail");
         });
@@ -73,24 +79,62 @@ impl EarlyProps {
                 return false;
             }
 
-            if parse_name_directive(line, "ignore-gdb") {
+            if !line.contains("ignore-gdb-version") &&
+               parse_name_directive(line, "ignore-gdb") {
                 return true;
             }
 
             if let Some(actual_version) = config.gdb_version {
                 if line.contains("min-gdb-version") {
-                    let min_version = line.trim()
-                        .split(' ')
-                        .last()
-                        .expect("Malformed GDB version directive");
+                    let (start_ver, end_ver) = extract_gdb_version_range(line);
+
+                    if start_ver != end_ver {
+                        panic!("Expected single GDB version")
+                    }
                     // Ignore if actual version is smaller the minimum required
                     // version
-                    actual_version < extract_gdb_version(min_version).unwrap()
+                    actual_version < start_ver
+                } else if line.contains("ignore-gdb-version") {
+                    let (min_version, max_version) = extract_gdb_version_range(line);
+
+                    if max_version < min_version {
+                        panic!("Malformed GDB version range: max < min")
+                    }
+
+                    actual_version >= min_version && actual_version <= max_version
                 } else {
                     false
                 }
             } else {
                 false
+            }
+        }
+
+        // Takes a directive of the form "ignore-gdb-version <version1> [- <version2>]",
+        // returns the numeric representation of <version1> and <version2> as
+        // tuple: (<version1> as u32, <version2> as u32)
+        // If the <version2> part is omitted, the second component of the tuple
+        // is the same as <version1>.
+        fn extract_gdb_version_range(line: &str) -> (u32, u32) {
+            const ERROR_MESSAGE: &'static str = "Malformed GDB version directive";
+
+            let range_components = line.split(' ')
+                                       .flat_map(|word| word.split('-'))
+                                       .filter(|word| word.len() > 0)
+                                       .skip_while(|word| extract_gdb_version(word).is_none())
+                                       .collect::<Vec<&str>>();
+
+            match range_components.len() {
+                1 => {
+                    let v = extract_gdb_version(range_components[0]).unwrap();
+                    (v, v)
+                }
+                2 => {
+                    let v_min = extract_gdb_version(range_components[0]).unwrap();
+                    let v_max = extract_gdb_version(range_components[1]).expect(ERROR_MESSAGE);
+                    (v_min, v_max)
+                }
+                _ => panic!(ERROR_MESSAGE),
             }
         }
 
@@ -186,6 +230,8 @@ pub struct TestProps {
     pub incremental_dir: Option<PathBuf>,
     // Specifies that a cfail test must actually compile without errors.
     pub must_compile_successfully: bool,
+    // rustdoc will test the output of the `--test` option
+    pub check_test_line_numbers_match: bool,
 }
 
 impl TestProps {
@@ -210,6 +256,7 @@ impl TestProps {
             forbid_output: vec![],
             incremental_dir: None,
             must_compile_successfully: false,
+            check_test_line_numbers_match: false,
         }
     }
 
@@ -308,6 +355,10 @@ impl TestProps {
 
             if !self.must_compile_successfully {
                 self.must_compile_successfully = parse_must_compile_successfully(ln);
+            }
+
+            if !self.check_test_line_numbers_match {
+                self.check_test_line_numbers_match = parse_check_test_line_numbers_match(ln);
             }
         });
 
@@ -418,6 +469,10 @@ fn parse_pretty_compare_only(line: &str) -> bool {
 
 fn parse_must_compile_successfully(line: &str) -> bool {
     parse_name_directive(line, "must-compile-successfully")
+}
+
+fn parse_check_test_line_numbers_match(line: &str) -> bool {
+    parse_name_directive(line, "check-test-line-numbers-match")
 }
 
 fn parse_env(line: &str, name: &str) -> Option<(String, String)> {

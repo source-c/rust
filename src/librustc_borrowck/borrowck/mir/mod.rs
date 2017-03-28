@@ -16,12 +16,12 @@ use syntax_pos::DUMMY_SP;
 use rustc::mir::{self, BasicBlock, BasicBlockData, Mir, Statement, Terminator, Location};
 use rustc::session::Session;
 use rustc::ty::{self, TyCtxt};
+use rustc_mir::util::elaborate_drops::DropFlagState;
 
 mod abs_domain;
 pub mod elaborate_drops;
 mod dataflow;
 mod gather_moves;
-mod patch;
 // mod graphviz;
 
 use self::dataflow::{BitDenotation};
@@ -57,7 +57,7 @@ pub fn borrowck_mir(bcx: &mut BorrowckCtxt,
                     id: ast::NodeId,
                     attributes: &[ast::Attribute]) {
     let tcx = bcx.tcx;
-    let def_id = tcx.map.local_def_id(id);
+    let def_id = tcx.hir.local_def_id(id);
     debug!("borrowck_mir({}) UNIMPLEMENTED", tcx.item_path_str(def_id));
 
     let mir = &tcx.item_mir(def_id);
@@ -183,21 +183,6 @@ impl<'b, 'a: 'b, 'tcx: 'a> MirBorrowckCtxt<'b, 'a, 'tcx> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-enum DropFlagState {
-    Present, // i.e. initialized
-    Absent, // i.e. deinitialized or "moved"
-}
-
-impl DropFlagState {
-    fn value(self) -> bool {
-        match self {
-            DropFlagState::Present => true,
-            DropFlagState::Absent => false
-        }
-    }
-}
-
 fn move_path_children_matching<'tcx, F>(move_data: &MoveData<'tcx>,
                                         path: MovePathIndex,
                                         mut cond: F)
@@ -248,7 +233,7 @@ fn lvalue_contents_drop_state_cannot_differ<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx
                    lv, ty);
             true
         }
-        ty::TyAdt(def, _) if def.has_dtor() || def.is_union() => {
+        ty::TyAdt(def, _) if (def.has_dtor(tcx) && !def.is_box()) || def.is_union() => {
             debug!("lvalue_contents_drop_state_cannot_differ lv: {:?} ty: {:?} Drop => true",
                    lv, ty);
             true
@@ -378,6 +363,7 @@ fn drop_flag_effects_for_location<'a, 'tcx, F>(
             }
             mir::StatementKind::StorageLive(_) |
             mir::StatementKind::StorageDead(_) |
+            mir::StatementKind::InlineAsm { .. } |
             mir::StatementKind::Nop => {}
         },
         None => {

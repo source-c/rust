@@ -28,8 +28,6 @@ impl<'tcx> MutVisitor<'tcx> for NoLandingPads {
             TerminatorKind::Resume |
             TerminatorKind::Return |
             TerminatorKind::Unreachable |
-            TerminatorKind::If { .. } |
-            TerminatorKind::Switch { .. } |
             TerminatorKind::SwitchInt { .. } => {
                 /* nothing to do */
             },
@@ -44,12 +42,16 @@ impl<'tcx> MutVisitor<'tcx> for NoLandingPads {
     }
 }
 
+pub fn no_landing_pads<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, mir: &mut Mir<'tcx>) {
+    if tcx.sess.no_landing_pads() {
+        NoLandingPads.visit_mir(mir);
+    }
+}
+
 impl<'tcx> MirPass<'tcx> for NoLandingPads {
     fn run_pass<'a>(&mut self, tcx: TyCtxt<'a, 'tcx, 'tcx>,
                     _: MirSource, mir: &mut Mir<'tcx>) {
-        if tcx.sess.no_landing_pads() {
-            self.visit_mir(mir);
-        }
+        no_landing_pads(tcx, mir)
     }
 }
 

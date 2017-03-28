@@ -15,6 +15,7 @@ use syntax_pos::{DUMMY_SP, Span};
 use codemap::{self, ExpnInfo, NameAndSpan, MacroAttribute};
 use parse::ParseSess;
 use ptr::P;
+use tokenstream::TokenStream;
 
 /// Craft a span that will be ignored by the stability lint's
 /// call to codemap's is_internal check.
@@ -56,7 +57,8 @@ pub fn maybe_inject_crates_ref(sess: &ParseSess,
     let crate_name = Symbol::intern(&alt_std_name.unwrap_or(name.to_string()));
 
     krate.module.items.insert(0, P(ast::Item {
-        attrs: vec![attr::mk_attr_outer(attr::mk_attr_id(),
+        attrs: vec![attr::mk_attr_outer(DUMMY_SP,
+                                        attr::mk_attr_id(),
                                         attr::mk_word_item(Symbol::intern("macro_use")))],
         vis: ast::Visibility::Inherited,
         node: ast::ItemKind::ExternCrate(Some(crate_name)),
@@ -69,11 +71,8 @@ pub fn maybe_inject_crates_ref(sess: &ParseSess,
     krate.module.items.insert(0, P(ast::Item {
         attrs: vec![ast::Attribute {
             style: ast::AttrStyle::Outer,
-            value: ast::MetaItem {
-                name: Symbol::intern("prelude_import"),
-                node: ast::MetaItemKind::Word,
-                span: span,
-            },
+            path: ast::Path::from_ident(span, ast::Ident::from_str("prelude_import")),
+            tokens: TokenStream::empty(),
             id: attr::mk_attr_id(),
             is_sugared_doc: false,
             span: span,
@@ -81,7 +80,7 @@ pub fn maybe_inject_crates_ref(sess: &ParseSess,
         vis: ast::Visibility::Inherited,
         node: ast::ItemKind::Use(P(codemap::dummy_spanned(ast::ViewPathGlob(ast::Path {
             segments: ["{{root}}", name, "prelude", "v1"].into_iter().map(|name| {
-                ast::Ident::from_str(name).into()
+                ast::PathSegment::from_ident(ast::Ident::from_str(name), DUMMY_SP)
             }).collect(),
             span: span,
         })))),

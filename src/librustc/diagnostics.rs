@@ -327,42 +327,67 @@ struct ListNode {
 This works because `Box` is a pointer, so its size is well-known.
 "##,
 
-E0109: r##"
-You tried to give a type parameter to a type which doesn't need it. Erroneous
-code example:
+E0106: r##"
+This error indicates that a lifetime is missing from a type. If it is an error
+inside a function signature, the problem may be with failing to adhere to the
+lifetime elision rules (see below).
 
-```compile_fail,E0109
-type X = u32<i32>; // error: type parameters are not allowed on this type
+Here are some simple examples of where you'll run into this error:
+
+```compile_fail,E0106
+struct Foo { x: &bool }        // error
+struct Foo<'a> { x: &'a bool } // correct
+
+enum Bar { A(u8), B(&bool), }        // error
+enum Bar<'a> { A(u8), B(&'a bool), } // correct
+
+type MyStr = &str;        // error
+type MyStr<'a> = &'a str; // correct
 ```
 
-Please check that you used the correct type and recheck its definition. Perhaps
-it doesn't need the type parameter.
+Lifetime elision is a special, limited kind of inference for lifetimes in
+function signatures which allows you to leave out lifetimes in certain cases.
+For more background on lifetime elision see [the book][book-le].
 
-Example:
+The lifetime elision rules require that any function signature with an elided
+output lifetime must either have
 
+ - exactly one input lifetime
+ - or, multiple input lifetimes, but the function must also be a method with a
+   `&self` or `&mut self` receiver
+
+In the first case, the output lifetime is inferred to be the same as the unique
+input lifetime. In the second case, the lifetime is instead inferred to be the
+same as the lifetime on `&self` or `&mut self`.
+
+Here are some examples of elision errors:
+
+```compile_fail,E0106
+// error, no input lifetimes
+fn foo() -> &str { }
+
+// error, `x` and `y` have distinct lifetimes inferred
+fn bar(x: &str, y: &str) -> &str { }
+
+// error, `y`'s lifetime is inferred to be distinct from `x`'s
+fn baz<'a>(x: &'a str, y: &str) -> &str { }
 ```
-type X = u32; // this compiles
+
+Here's an example that is currently an error, but may work in a future version
+of Rust:
+
+```compile_fail,E0106
+struct Foo<'a>(&'a str);
+
+trait Quux { }
+impl Quux for Foo { }
 ```
 
-Note that type parameters for enum-variant constructors go after the variant,
-not after the enum (Option::None::<u32>, not Option::<u32>::None).
-"##,
+Lifetime elision in implementation headers was part of the lifetime elision
+RFC. It is, however, [currently unimplemented][iss15872].
 
-E0110: r##"
-You tried to give a lifetime parameter to a type which doesn't need it.
-Erroneous code example:
-
-```compile_fail,E0110
-type X = u32<'static>; // error: lifetime parameters are not allowed on
-                       //        this type
-```
-
-Please check that the correct type was used and recheck its definition; perhaps
-it doesn't need the lifetime parameter. Example:
-
-```
-type X = u32; // ok!
-```
+[book-le]: https://doc.rust-lang.org/nightly/book/lifetimes.html#lifetime-elision
+[iss15872]: https://github.com/rust-lang/rust/issues/15872
 "##,
 
 E0133: r##"
@@ -557,46 +582,11 @@ them yourself.
 You can build a free-standing crate by adding `#![no_std]` to the crate
 attributes:
 
-```
+```ignore
 #![no_std]
 ```
 
 See also https://doc.rust-lang.org/book/no-stdlib.html
-"##,
-
-E0229: r##"
-An associated type binding was done outside of the type parameter declaration
-and `where` clause. Erroneous code example:
-
-```compile_fail,E0229
-pub trait Foo {
-    type A;
-    fn boo(&self) -> <Self as Foo>::A;
-}
-
-struct Bar;
-
-impl Foo for isize {
-    type A = usize;
-    fn boo(&self) -> usize { 42 }
-}
-
-fn baz<I>(x: &<I as Foo<A=Bar>>::A) {}
-// error: associated type bindings are not allowed here
-```
-
-To solve this error, please move the type bindings in the type parameter
-declaration:
-
-```ignore
-fn baz<I: Foo<A=Bar>>(x: &<I as Foo>::A) {} // ok!
-```
-
-Or in the `where` clause:
-
-```ignore
-fn baz<I>(x: &<I as Foo>::A) where I: Foo<A=Bar> {}
-```
 "##,
 
 E0261: r##"
@@ -1327,6 +1317,23 @@ error. To resolve it, add an `else` block having the same type as the `if`
 block.
 "##,
 
+E0391: r##"
+This error indicates that some types or traits depend on each other
+and therefore cannot be constructed.
+
+The following example contains a circular dependency between two traits:
+
+```compile_fail,E0391
+trait FirstTrait : SecondTrait {
+
+}
+
+trait SecondTrait : FirstTrait {
+
+}
+```
+"##,
+
 E0398: r##"
 In Rust 1.3, the default object lifetime bounds are expected to change, as
 described in RFC #1156 [1]. You are getting a warning because the compiler
@@ -1450,6 +1457,40 @@ trait Wedding<'t>: 't { }
 struct Prince<'kiss, 'SnowWhite: 'kiss> { // You say here that 'kiss must live
                                           // longer than 'SnowWhite.
     child: Box<Wedding<'kiss> + 'SnowWhite>, // And now it's all good!
+}
+```
+"##,
+
+E0491: r##"
+A reference has a longer lifetime than the data it references.
+
+Erroneous code example:
+
+```compile_fail,E0491
+// struct containing a reference requires a lifetime parameter,
+// because the data the reference points to must outlive the struct (see E0106)
+struct Struct<'a> {
+    ref_i32: &'a i32,
+}
+
+// However, a nested struct like this, the signature itself does not tell
+// whether 'a outlives 'b or the other way around.
+// So it could be possible that 'b of reference outlives 'a of the data.
+struct Nested<'a, 'b> {
+    ref_struct: &'b Struct<'a>, // compile error E0491
+}
+```
+
+To fix this issue, you can specify a bound to the lifetime like below:
+
+```
+struct Struct<'a> {
+    ref_i32: &'a i32,
+}
+
+// 'a: 'b means 'a outlives 'b
+struct Nested<'a: 'b, 'b> {
+    ref_struct: &'b Struct<'a>,
 }
 ```
 "##,
@@ -1618,8 +1659,7 @@ fn cookie() -> ! { // error: definition of an unknown language item: `cookie`
 "##,
 
 E0525: r##"
-A closure was attempted to get used whereas it doesn't implement the expected
-trait.
+A closure was used but didn't implement the expected trait.
 
 Erroneous code example:
 
@@ -1661,6 +1701,92 @@ To understand better how closures work in Rust, read:
 https://doc.rust-lang.org/book/closures.html
 "##,
 
+E0580: r##"
+The `main` function was incorrectly declared.
+
+Erroneous code example:
+
+```compile_fail,E0580
+fn main() -> i32 { // error: main function has wrong type
+    0
+}
+```
+
+The `main` function prototype should never take arguments or return type.
+Example:
+
+```
+fn main() {
+    // your code
+}
+```
+
+If you want to get command-line arguments, use `std::env::args`. To exit with a
+specified exit code, use `std::process::exit`.
+"##,
+
+E0591: r##"
+Per [RFC 401][rfc401], if you have a function declaration `foo`:
+
+```rust,ignore
+// For the purposes of this explanation, all of these
+// different kinds of `fn` declarations are equivalent:
+fn foo(x: i32) { ... }
+extern "C" fn foo(x: i32);
+impl i32 { fn foo(x: self) { ... } }
+```
+
+the type of `foo` is **not** `fn(i32)`, as one might expect.
+Rather, it is a unique, zero-sized marker type written here as `typeof(foo)`.
+However, `typeof(foo)` can be _coerced_ to a function pointer `fn(i32)`,
+so you rarely notice this:
+
+```rust,ignore
+let x: fn(i32) = foo; // OK, coerces
+```
+
+The reason that this matter is that the type `fn(i32)` is not specific to
+any particular function: it's a function _pointer_. So calling `x()` results
+in a virtual call, whereas `foo()` is statically dispatched, because the type
+of `foo` tells us precisely what function is being called.
+
+As noted above, coercions mean that most code doesn't have to be
+concerned with this distinction. However, you can tell the difference
+when using **transmute** to convert a fn item into a fn pointer.
+
+This is sometimes done as part of an FFI:
+
+```rust,ignore
+extern "C" fn foo(userdata: Box<i32>) {
+   ...
+}
+
+let f: extern "C" fn(*mut i32) = transmute(foo);
+callback(f);
+
+```
+
+Here, transmute is being used to convert the types of the fn arguments.
+This pattern is incorrect because, because the type of `foo` is a function
+**item** (`typeof(foo)`), which is zero-sized, and the target type (`fn()`)
+is a function pointer, which is not zero-sized.
+This pattern should be rewritten. There are a few possible ways to do this:
+- change the original fn declaration to match the expected signature,
+  and do the cast in the fn body (the prefered option)
+- cast the fn item fo a fn pointer before calling transmute, as shown here:
+  - `let f: extern "C" fn(*mut i32) = transmute(foo as extern "C" fn(_))`
+  - `let f: extern "C" fn(*mut i32) = transmute(foo as usize) /* works too */`
+
+The same applies to transmutes to `*mut fn()`, which were observedin practice.
+Note though that use of this type is generally incorrect.
+The intention is typically to describe a function pointer, but just `fn()`
+alone suffices for that. `*mut fn()` is a pointer to a fn pointer.
+(Since these values are typically just passed to C code, however, this rarely
+makes a difference in practice.)
+
+[rfc401]: https://github.com/rust-lang/rfcs/blob/master/text/0401-coercions.md
+"##,
+
 }
 
 
@@ -1698,7 +1824,6 @@ register_diagnostics! {
     E0488, // lifetime of variable does not enclose its declaration
     E0489, // type/lifetime parameter not in scope here
     E0490, // a value of type `..` is borrowed for too long
-    E0491, // in type `..`, reference has a longer lifetime than the data it...
     E0495, // cannot infer an appropriate lifetime due to conflicting requirements
     E0566  // conflicting representation hints
 }

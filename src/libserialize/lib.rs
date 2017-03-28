@@ -30,21 +30,12 @@ Core encoding and decoding interfaces.
 #![feature(box_syntax)]
 #![feature(collections)]
 #![feature(core_intrinsics)]
-#![feature(enumset)]
-#![feature(rustc_private)]
+#![feature(i128_type)]
 #![feature(specialization)]
 #![feature(staged_api)]
-#![feature(unicode)]
 #![cfg_attr(test, feature(test))]
 
-// test harness access
-#[cfg(test)] extern crate test;
-#[macro_use] extern crate log;
-
-extern crate std_unicode;
 extern crate collections;
-
-extern crate rustc_i128;
 
 pub use self::serialize::{Decoder, Encoder, Decodable, Encodable};
 

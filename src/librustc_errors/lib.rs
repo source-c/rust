@@ -23,16 +23,10 @@
 #![feature(staged_api)]
 #![feature(range_contains)]
 #![feature(libc)]
-#![feature(unicode)]
 
-extern crate serialize;
 extern crate term;
-#[macro_use]
-extern crate log;
-#[macro_use]
 extern crate libc;
-extern crate std_unicode;
-extern crate serialize as rustc_serialize; // used by deriving
+extern crate serialize as rustc_serialize;
 extern crate syntax_pos;
 
 pub use emitter::ColorConfig;
@@ -56,7 +50,7 @@ mod lock;
 use syntax_pos::{BytePos, Loc, FileLinesResult, FileName, MultiSpan, Span, NO_EXPANSION};
 use syntax_pos::MacroBacktrace;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, RustcEncodable, RustcDecodable)]
 pub enum RenderSpan {
     /// A FullSpan renders with both with an initial line for the
     /// message, prefixed by file:linenum, followed by a summary of
@@ -70,7 +64,7 @@ pub enum RenderSpan {
     Suggestion(CodeSuggestion),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, RustcEncodable, RustcDecodable)]
 pub struct CodeSuggestion {
     pub msp: MultiSpan,
     pub substitutes: Vec<String>,
@@ -96,7 +90,8 @@ impl CodeSuggestion {
                          hi_opt: Option<&Loc>) {
             let (lo, hi_opt) = (lo.col.to_usize(), hi_opt.map(|hi| hi.col.to_usize()));
             if let Some(line) = line_opt {
-                if line.len() > lo {
+                if let Some(lo) = line.char_indices().map(|(i, _)| i).nth(lo) {
+                    let hi_opt = hi_opt.and_then(|hi| line.char_indices().map(|(i, _)| i).nth(hi));
                     buf.push_str(match hi_opt {
                         Some(hi) => &line[lo..hi],
                         None => &line[lo..],
@@ -484,7 +479,7 @@ impl Handler {
 }
 
 
-#[derive(Copy, PartialEq, Clone, Debug)]
+#[derive(Copy, PartialEq, Clone, Debug, RustcEncodable, RustcDecodable)]
 pub enum Level {
     Bug,
     Fatal,

@@ -32,11 +32,11 @@ macro_rules! panic {
 
 /// Ensure that a boolean expression is `true` at runtime.
 ///
-/// This will invoke the `panic!` macro if the provided expression cannot be
+/// This will invoke the [`panic!`] macro if the provided expression cannot be
 /// evaluated to `true` at runtime.
 ///
 /// Assertions are always checked in both debug and release builds, and cannot
-/// be disabled. See `debug_assert!` for assertions that are not enabled in
+/// be disabled. See [`debug_assert!`] for assertions that are not enabled in
 /// release builds by default.
 ///
 /// Unsafe code relies on `assert!` to enforce run-time invariants that, if
@@ -45,8 +45,11 @@ macro_rules! panic {
 /// Other use-cases of `assert!` include [testing] and enforcing run-time
 /// invariants in safe code (whose violation cannot result in unsafety).
 ///
-/// This macro has a second version, where a custom panic message can be provided.
+/// This macro has a second version, where a custom panic message can
+/// be provided with or without arguments for formatting.
 ///
+/// [`panic!`]: macro.panic.html
+/// [`debug_assert!`]: macro.debug_assert.html
 /// [testing]: ../book/testing.html
 ///
 /// # Examples
@@ -87,17 +90,24 @@ macro_rules! assert {
 /// On panic, this macro will print the values of the expressions with their
 /// debug representations.
 ///
+/// Like [`assert!`], this macro has a second version, where a custom
+/// panic message can be provided.
+///
+/// [`assert!`]: macro.assert.html
+///
 /// # Examples
 ///
 /// ```
 /// let a = 3;
 /// let b = 1 + 2;
 /// assert_eq!(a, b);
+///
+/// assert_eq!(a, b, "we are testing addition with {} and {}", a, b);
 /// ```
 #[macro_export]
 #[stable(feature = "rust1", since = "1.0.0")]
 macro_rules! assert_eq {
-    ($left:expr , $right:expr) => ({
+    ($left:expr, $right:expr) => ({
         match (&$left, &$right) {
             (left_val, right_val) => {
                 if !(*left_val == *right_val) {
@@ -107,13 +117,13 @@ macro_rules! assert_eq {
             }
         }
     });
-    ($left:expr , $right:expr, $($arg:tt)*) => ({
+    ($left:expr, $right:expr, $($arg:tt)+) => ({
         match (&($left), &($right)) {
             (left_val, right_val) => {
                 if !(*left_val == *right_val) {
                     panic!("assertion failed: `(left == right)` \
                            (left: `{:?}`, right: `{:?}`): {}", left_val, right_val,
-                           format_args!($($arg)*))
+                           format_args!($($arg)+))
                 }
             }
         }
@@ -125,17 +135,24 @@ macro_rules! assert_eq {
 /// On panic, this macro will print the values of the expressions with their
 /// debug representations.
 ///
+/// Like `assert!()`, this macro has a second version, where a custom
+/// panic message can be provided.
+///
+/// [`assert!`]: macro.assert.html
+///
 /// # Examples
 ///
 /// ```
 /// let a = 3;
 /// let b = 2;
 /// assert_ne!(a, b);
+///
+/// assert_ne!(a, b, "we are testing that the values are not equal");
 /// ```
 #[macro_export]
 #[stable(feature = "assert_ne", since = "1.12.0")]
 macro_rules! assert_ne {
-    ($left:expr , $right:expr) => ({
+    ($left:expr, $right:expr) => ({
         match (&$left, &$right) {
             (left_val, right_val) => {
                 if *left_val == *right_val {
@@ -145,13 +162,13 @@ macro_rules! assert_ne {
             }
         }
     });
-    ($left:expr , $right:expr, $($arg:tt)*) => ({
+    ($left:expr, $right:expr, $($arg:tt)+) => ({
         match (&($left), &($right)) {
             (left_val, right_val) => {
                 if *left_val == *right_val {
                     panic!("assertion failed: `(left != right)` \
                            (left: `{:?}`, right: `{:?}`): {}", left_val, right_val,
-                           format_args!($($arg)*))
+                           format_args!($($arg)+))
                 }
             }
         }
@@ -160,13 +177,13 @@ macro_rules! assert_ne {
 
 /// Ensure that a boolean expression is `true` at runtime.
 ///
-/// This will invoke the `panic!` macro if the provided expression cannot be
+/// This will invoke the [`panic!`] macro if the provided expression cannot be
 /// evaluated to `true` at runtime.
 ///
-/// Like `assert!`, this macro also has a second version, where a custom panic
+/// Like [`assert!`], this macro also has a second version, where a custom panic
 /// message can be provided.
 ///
-/// Unlike `assert!`, `debug_assert!` statements are only enabled in non
+/// Unlike [`assert!`], `debug_assert!` statements are only enabled in non
 /// optimized builds by default. An optimized build will omit all
 /// `debug_assert!` statements unless `-C debug-assertions` is passed to the
 /// compiler. This makes `debug_assert!` useful for checks that are too
@@ -176,9 +193,12 @@ macro_rules! assert_ne {
 /// An unchecked assertion allows a program in an inconsistent state to keep
 /// running, which might have unexpected consequences but does not introduce
 /// unsafety as long as this only happens in safe code. The performance cost
-/// of assertions, is however, not measurable in general. Replacing `assert!`
+/// of assertions, is however, not measurable in general. Replacing [`assert!`]
 /// with `debug_assert!` is thus only encouraged after thorough profiling, and
 /// more importantly, only in safe code!
+///
+/// [`panic!`]: macro.panic.html
+/// [`assert!`]: macro.assert.html
 ///
 /// # Examples
 ///

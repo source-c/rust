@@ -60,6 +60,7 @@ use rustc::middle::privacy::AccessLevels;
 use rustc::middle::stability;
 use rustc::hir;
 use rustc::util::nodemap::{FxHashMap, FxHashSet};
+use rustc::session::config::nightly_options::is_nightly_build;
 use rustc_data_structures::flock;
 
 use clean::{self, AttributesExt, GetDefId, SelfTy, Mutability};
@@ -763,7 +764,7 @@ fn write_shared(cx: &Context,
             // going on). If they're in different crates then the crate defining
             // the trait will be interested in our implementation.
             if imp.def_id.krate == did.krate { continue }
-            write!(implementors, r#""{}","#, imp.impl_).unwrap();
+            write!(implementors, "{},", as_json(&imp.impl_.to_string())).unwrap();
         }
         implementors.push_str("];");
 
@@ -1547,7 +1548,7 @@ impl<'a> fmt::Display for Item<'a> {
                        component)?;
             }
         }
-        write!(fmt, "<a class='{}' href=''>{}</a>",
+        write!(fmt, "<a class=\"{}\" href=''>{}</a>",
                self.item.type_(), self.item.name.as_ref().unwrap())?;
 
         write!(fmt, "</span>")?; // in-band
@@ -1654,9 +1655,35 @@ fn document_short(w: &mut fmt::Formatter, item: &clean::Item, link: AssocItemLin
     Ok(())
 }
 
+fn md_render_assoc_item(item: &clean::Item) -> String {
+    match item.inner {
+        clean::AssociatedConstItem(ref ty, ref default) => {
+            if let Some(default) = default.as_ref() {
+                format!("```\n{}: {:?} = {}\n```\n\n", item.name.as_ref().unwrap(), ty, default)
+            } else {
+                format!("```\n{}: {:?}\n```\n\n", item.name.as_ref().unwrap(), ty)
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+fn get_doc_value(item: &clean::Item) -> Option<&str> {
+    let x = item.doc_value();
+    if x.is_none() {
+        match item.inner {
+            clean::AssociatedConstItem(_, _) => Some(""),
+            _ => None,
+        }
+    } else {
+        x
+    }
+}
+
 fn document_full(w: &mut fmt::Formatter, item: &clean::Item) -> fmt::Result {
-    if let Some(s) = item.doc_value() {
-        write!(w, "<div class='docblock'>{}</div>", Markdown(s))?;
+    if let Some(s) = get_doc_value(item) {
+        write!(w, "<div class='docblock'>{}</div>",
+               Markdown(&format!("{}{}", md_render_assoc_item(item), s)))?;
     }
     Ok(())
 }
@@ -1671,6 +1698,23 @@ fn document_stability(w: &mut fmt::Formatter, cx: &Context, item: &clean::Item) 
         write!(w, "</div>")?;
     }
     Ok(())
+}
+
+fn name_key(name: &str) -> (&str, u64, usize) {
+    // find number at end
+    let split = name.bytes().rposition(|b| b < b'0' || b'9' < b).map_or(0, |s| s + 1);
+
+    // count leading zeroes
+    let after_zeroes =
+        name[split..].bytes().position(|b| b != b'0').map_or(name.len(), |extra| split + extra);
+
+    // sort leading zeroes last
+    let num_zeroes = after_zeroes - split;
+
+    match name[split..].parse() {
+        Ok(n) => (&name[..split], n, num_zeroes),
+        Err(_) => (name, 0, num_zeroes),
+    }
 }
 
 fn item_module(w: &mut fmt::Formatter, cx: &Context,
@@ -1717,7 +1761,9 @@ fn item_module(w: &mut fmt::Formatter, cx: &Context,
             (Some(stability::Stable), Some(stability::Unstable)) => return Ordering::Less,
             _ => {}
         }
-        i1.name.cmp(&i2.name)
+        let lhs = i1.name.as_ref().map_or("", |s| &**s);
+        let rhs = i2.name.as_ref().map_or("", |s| &**s);
+        name_key(lhs).cmp(&name_key(rhs))
     }
 
     indices.sort_by(|&i1, &i2| cmp(&items[i1], &items[i2], i1, i2));
@@ -1806,18 +1852,19 @@ fn item_module(w: &mut fmt::Formatter, cx: &Context,
                     String::new()
                 };
 
-                let mut unsafety_flag = "";
-                if let clean::FunctionItem(ref func) = myitem.inner {
-                    if func.unsafety == hir::Unsafety::Unsafe {
-                        unsafety_flag = "<a title='unsafe function' href='#'><sup>⚠</sup></a>";
+                let unsafety_flag = match myitem.inner {
+                    clean::FunctionItem(ref func) | clean::ForeignFunctionItem(ref func)
+                    if func.unsafety == hir::Unsafety::Unsafe => {
+                        "<a title='unsafe function' href='#'><sup>⚠</sup></a>"
                     }
-                }
+                    _ => "",
+                };
 
                 let doc_value = myitem.doc_value().unwrap_or("");
                 write!(w, "
                        <tr class='{stab} module-item'>
-                           <td><a class='{class}' href='{href}'
-                                  title='{title}'>{name}</a>{unsafety_flag}</td>
+                           <td><a class=\"{class}\" href=\"{href}\"
+                                  title='{title_type} {title}'>{name}</a>{unsafety_flag}</td>
                            <td class='docblock-short'>
                                {stab_docs} {docs}
                            </td>
@@ -1826,9 +1873,10 @@ fn item_module(w: &mut fmt::Formatter, cx: &Context,
                        stab_docs = stab_docs,
                        docs = shorter(Some(&Markdown(doc_value).to_string())),
                        class = myitem.type_(),
-                       stab = myitem.stability_class(),
+                       stab = myitem.stability_class().unwrap_or("".to_string()),
                        unsafety_flag = unsafety_flag,
                        href = item_path(myitem.type_(), myitem.name.as_ref().unwrap()),
+                       title_type = myitem.type_(),
                        title = full_path(cx, myitem))?;
             }
         }
@@ -1876,7 +1924,7 @@ fn short_stability(item: &clean::Item, cx: &Context, show_reason: bool) -> Vec<S
                                             &cx.shared.issue_tracker_base_url,
                                             stab.issue) {
                     (true, &Some(ref tracker_url), Some(issue_no)) if issue_no > 0 =>
-                        format!(" (<code>{}</code> <a href=\"{}{}\">#{}</a>)",
+                        format!(" (<code>{} </code><a href=\"{}{}\">#{}</a>)",
                                 Escape(&stab.feature), tracker_url, issue_no, issue_no),
                     (false, &Some(ref tracker_url), Some(issue_no)) if issue_no > 0 =>
                         format!(" (<a href=\"{}{}\">#{}</a>)", Escape(&tracker_url), issue_no,
@@ -1888,11 +1936,13 @@ fn short_stability(item: &clean::Item, cx: &Context, show_reason: bool) -> Vec<S
                 if stab.unstable_reason.is_empty() {
                     stability.push(format!("<div class='stab unstable'>\
                                             <span class=microscope>🔬</span> \
-                                            This is a nightly-only experimental API. {}</div>",
-                                   unstable_extra));
+                                            This is a nightly-only experimental API. {}\
+                                            </div>",
+                                           unstable_extra));
                 } else {
                     let text = format!("<summary><span class=microscope>🔬</span> \
-                                        This is a nightly-only experimental API. {}</summary>{}",
+                                        This is a nightly-only experimental API. {}\
+                                        </summary>{}",
                                        unstable_extra, MarkdownHtml(&stab.unstable_reason));
                     stability.push(format!("<div class='stab unstable'><details>{}</details></div>",
                                    text));
@@ -1933,7 +1983,9 @@ impl<'a> fmt::Display for Initializer<'a> {
 
 fn item_constant(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
                  c: &clean::Constant) -> fmt::Result {
-    write!(w, "<pre class='rust const'>{vis}const \
+    write!(w, "<pre class='rust const'>")?;
+    render_attributes(w, it)?;
+    write!(w, "{vis}const \
                {name}: {typ}{init}</pre>",
            vis = VisSpace(&it.visibility),
            name = it.name.as_ref().unwrap(),
@@ -1944,7 +1996,9 @@ fn item_constant(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
 
 fn item_static(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
                s: &clean::Static) -> fmt::Result {
-    write!(w, "<pre class='rust static'>{vis}static {mutability}\
+    write!(w, "<pre class='rust static'>")?;
+    render_attributes(w, it)?;
+    write!(w, "{vis}static {mutability}\
                {name}: {typ}{init}</pre>",
            vis = VisSpace(&it.visibility),
            mutability = MutableSpace(s.mutability),
@@ -1968,7 +2022,9 @@ fn item_function(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
                          AbiSpace(f.abi),
                          it.name.as_ref().unwrap(),
                          f.generics).len();
-    write!(w, "<pre class='rust fn'>{vis}{constness}{unsafety}{abi}fn \
+    write!(w, "<pre class='rust fn'>")?;
+    render_attributes(w, it)?;
+    write!(w, "{vis}{constness}{unsafety}{abi}fn \
                {name}{generics}{decl}{where_clause}</pre>",
            vis = VisSpace(&it.visibility),
            constness = ConstnessSpace(vis_constness),
@@ -2003,7 +2059,9 @@ fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
     }
 
     // Output the trait definition
-    write!(w, "<pre class='rust trait'>{}{}trait {}{}{}{} ",
+    write!(w, "<pre class='rust trait'>")?;
+    render_attributes(w, it)?;
+    write!(w, "{}{}trait {}{}{}{} ",
            VisSpace(&it.visibility),
            UnsafetySpace(t.unsafety),
            it.name.as_ref().unwrap(),
@@ -2129,10 +2187,23 @@ fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
         <ul class='item-list' id='implementors-list'>
     ")?;
     if let Some(implementors) = cache.implementors.get(&it.def_id) {
-        let mut implementor_count: FxHashMap<&str, usize> = FxHashMap();
+        // The DefId is for the first Type found with that name. The bool is
+        // if any Types with the same name but different DefId have been found.
+        let mut implementor_dups: FxHashMap<&str, (DefId, bool)> = FxHashMap();
         for implementor in implementors {
-            if let clean::Type::ResolvedPath {ref path, ..} = implementor.impl_.for_ {
-                *implementor_count.entry(path.last_name()).or_insert(0) += 1;
+            match implementor.impl_.for_ {
+                clean::ResolvedPath { ref path, did, is_generic: false, .. } |
+                clean::BorrowedRef {
+                    type_: box clean::ResolvedPath { ref path, did, is_generic: false, .. },
+                    ..
+                } => {
+                    let &mut (prev_did, ref mut has_duplicates) =
+                        implementor_dups.entry(path.last_name()).or_insert((did, false));
+                    if prev_did != did {
+                        *has_duplicates = true;
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -2140,12 +2211,13 @@ fn item_trait(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
             write!(w, "<li><code>")?;
             // If there's already another implementor that has the same abbridged name, use the
             // full path, for example in `std::iter::ExactSizeIterator`
-            let use_absolute = if let clean::Type::ResolvedPath {
-                ref path, ..
-            } = implementor.impl_.for_ {
-                implementor_count[path.last_name()] > 1
-            } else {
-                false
+            let use_absolute = match implementor.impl_.for_ {
+                clean::ResolvedPath { ref path, is_generic: false, .. } |
+                clean::BorrowedRef {
+                    type_: box clean::ResolvedPath { ref path, is_generic: false, .. },
+                    ..
+                } => implementor_dups[path.last_name()].1,
+                _ => false,
             };
             fmt_impl_for_trait_page(&implementor.impl_, w, use_absolute)?;
             writeln!(w, "</code></li>")?;
@@ -2189,16 +2261,12 @@ fn naive_assoc_href(it: &clean::Item, link: AssocItemLink) -> String {
 fn assoc_const(w: &mut fmt::Formatter,
                it: &clean::Item,
                ty: &clean::Type,
-               default: Option<&String>,
+               _default: Option<&String>,
                link: AssocItemLink) -> fmt::Result {
-    write!(w, "const <a href='{}' class='constant'>{}</a>",
+    write!(w, "const <a href='{}' class=\"constant\"><b>{}</b></a>: {}",
            naive_assoc_href(it, link),
-           it.name.as_ref().unwrap())?;
-
-    write!(w, ": {}", ty)?;
-    if let Some(default) = default {
-        write!(w, " = {}", Escape(default))?;
-    }
+           it.name.as_ref().unwrap(),
+           ty)?;
     Ok(())
 }
 
@@ -2206,7 +2274,7 @@ fn assoc_type(w: &mut fmt::Formatter, it: &clean::Item,
               bounds: &Vec<clean::TyParamBound>,
               default: Option<&clean::Type>,
               link: AssocItemLink) -> fmt::Result {
-    write!(w, "type <a href='{}' class='type'>{}</a>",
+    write!(w, "type <a href='{}' class=\"type\">{}</a>",
            naive_assoc_href(it, link),
            it.name.as_ref().unwrap())?;
     if !bounds.is_empty() {
@@ -2268,9 +2336,10 @@ fn render_assoc_item(w: &mut fmt::Formatter,
             }
         };
         // FIXME(#24111): remove when `const_fn` is stabilized
-        let vis_constness = match UnstableFeatures::from_environment() {
-            UnstableFeatures::Allow => constness,
-            _ => hir::Constness::NotConst
+        let vis_constness = if is_nightly_build() {
+            constness
+        } else {
+            hir::Constness::NotConst
         };
         let prefix = format!("{}{}{:#}fn {}{:#}",
                              ConstnessSpace(vis_constness),
@@ -2349,16 +2418,19 @@ fn item_struct(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
                 let ns_id = derive_id(format!("{}.{}",
                                               field.name.as_ref().unwrap(),
                                               ItemType::StructField.name_space()));
-                write!(w, "<span id='{id}' class='{item_type}'>
+                write!(w, "<span id='{id}' class=\"{item_type}\">
                            <span id='{ns_id}' class='invisible'>
                            <code>{name}: {ty}</code>
-                           </span></span><span class='stab {stab}'></span>",
+                           </span></span>",
                        item_type = ItemType::StructField,
                        id = id,
                        ns_id = ns_id,
-                       stab = field.stability_class(),
                        name = field.name.as_ref().unwrap(),
                        ty = ty)?;
+                if let Some(stability_class) = field.stability_class() {
+                    write!(w, "<span class='stab {stab}'></span>",
+                        stab = stability_class)?;
+                }
                 document(w, cx, field)?;
             }
         }
@@ -2388,12 +2460,15 @@ fn item_union(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
     if fields.peek().is_some() {
         write!(w, "<h2 class='fields'>Fields</h2>")?;
         for (field, ty) in fields {
-            write!(w, "<span id='{shortty}.{name}' class='{shortty}'><code>{name}: {ty}</code>
-                       </span><span class='stab {stab}'></span>",
+            write!(w, "<span id='{shortty}.{name}' class=\"{shortty}\"><code>{name}: {ty}</code>
+                       </span>",
                    shortty = ItemType::StructField,
-                   stab = field.stability_class(),
                    name = field.name.as_ref().unwrap(),
                    ty = ty)?;
+            if let Some(stability_class) = field.stability_class() {
+                write!(w, "<span class='stab {stab}'></span>",
+                    stab = stability_class)?;
+            }
             document(w, cx, field)?;
         }
     }
@@ -2566,11 +2641,11 @@ fn render_attributes(w: &mut fmt::Formatter, it: &clean::Item) -> fmt::Result {
     let mut attrs = String::new();
 
     for attr in &it.attrs.other_attrs {
-        let name = attr.name();
+        let name = attr.name().unwrap();
         if !ATTRIBUTE_WHITELIST.contains(&&name.as_str()[..]) {
             continue;
         }
-        if let Some(s) = render_attribute(attr.meta()) {
+        if let Some(s) = render_attribute(&attr.meta().unwrap()) {
             attrs.push_str(&format!("#[{}]\n", s));
         }
     }
@@ -2752,7 +2827,7 @@ fn render_assoc_items(w: &mut fmt::Formatter,
             }
             AssocItemRender::DerefFor { trait_, type_, deref_mut_ } => {
                 write!(w, "<h2 id='deref-methods'>Methods from \
-                               {}&lt;Target={}&gt;</h2>", trait_, type_)?;
+                               {}&lt;Target = {}&gt;</h2>", trait_, type_)?;
                 RenderMode::ForDeref { mut_: deref_mut_ }
             }
         };
@@ -2870,7 +2945,7 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
                 if render_method_item {
                     let id = derive_id(format!("{}.{}", item_type, name));
                     let ns_id = derive_id(format!("{}.{}", name, item_type.name_space()));
-                    write!(w, "<h4 id='{}' class='{}'>", id, item_type)?;
+                    write!(w, "<h4 id='{}' class=\"{}\">", id, item_type)?;
                     write!(w, "<span id='{}' class='invisible'>", ns_id)?;
                     write!(w, "<code>")?;
                     render_assoc_item(w, item, link.anchor(&id), ItemType::Impl)?;
@@ -2882,7 +2957,7 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
             clean::TypedefItem(ref tydef, _) => {
                 let id = derive_id(format!("{}.{}", ItemType::AssociatedType, name));
                 let ns_id = derive_id(format!("{}.{}", name, item_type.name_space()));
-                write!(w, "<h4 id='{}' class='{}'>", id, item_type)?;
+                write!(w, "<h4 id='{}' class=\"{}\">", id, item_type)?;
                 write!(w, "<span id='{}' class='invisible'><code>", ns_id)?;
                 assoc_type(w, item, &Vec::new(), Some(&tydef.type_), link.anchor(&id))?;
                 write!(w, "</code></span></h4>\n")?;
@@ -2890,7 +2965,7 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
             clean::AssociatedConstItem(ref ty, ref default) => {
                 let id = derive_id(format!("{}.{}", item_type, name));
                 let ns_id = derive_id(format!("{}.{}", name, item_type.name_space()));
-                write!(w, "<h4 id='{}' class='{}'>", id, item_type)?;
+                write!(w, "<h4 id='{}' class=\"{}\">", id, item_type)?;
                 write!(w, "<span id='{}' class='invisible'><code>", ns_id)?;
                 assoc_const(w, item, ty, default.as_ref(), link.anchor(&id))?;
                 write!(w, "</code></span></h4>\n")?;
@@ -2898,7 +2973,7 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
             clean::ConstantItem(ref c) => {
                 let id = derive_id(format!("{}.{}", item_type, name));
                 let ns_id = derive_id(format!("{}.{}", name, item_type.name_space()));
-                write!(w, "<h4 id='{}' class='{}'>", id, item_type)?;
+                write!(w, "<h4 id='{}' class=\"{}\">", id, item_type)?;
                 write!(w, "<span id='{}' class='invisible'><code>", ns_id)?;
                 assoc_const(w, item, &c.type_, Some(&c.expr), link.anchor(&id))?;
                 write!(w, "</code></span></h4>\n")?;
@@ -2906,7 +2981,7 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
             clean::AssociatedTypeItem(ref bounds, ref default) => {
                 let id = derive_id(format!("{}.{}", item_type, name));
                 let ns_id = derive_id(format!("{}.{}", name, item_type.name_space()));
-                write!(w, "<h4 id='{}' class='{}'>", id, item_type)?;
+                write!(w, "<h4 id='{}' class=\"{}\">", id, item_type)?;
                 write!(w, "<span id='{}' class='invisible'><code>", ns_id)?;
                 assoc_type(w, item, bounds, default.as_ref(), link.anchor(&id))?;
                 write!(w, "</code></span></h4>\n")?;
@@ -2924,7 +2999,7 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
                         // We need the stability of the item from the trait
                         // because impls can't have a stability.
                         document_stability(w, cx, it)?;
-                        if item.doc_value().is_some() {
+                        if get_doc_value(item).is_some() {
                             document_full(w, item)?;
                         } else {
                             // In case the item isn't documented,
@@ -2984,7 +3059,9 @@ fn render_impl(w: &mut fmt::Formatter, cx: &Context, i: &Impl, link: AssocItemLi
 fn item_typedef(w: &mut fmt::Formatter, cx: &Context, it: &clean::Item,
                 t: &clean::Typedef) -> fmt::Result {
     let indent = format!("type {}{:#} ", it.name.as_ref().unwrap(), t.generics).len();
-    write!(w, "<pre class='rust typedef'>type {}{}{where_clause} = {type_};</pre>",
+    write!(w, "<pre class='rust typedef'>")?;
+    render_attributes(w, it)?;
+    write!(w, "type {}{}{where_clause} = {type_};</pre>",
            it.name.as_ref().unwrap(),
            t.generics,
            where_clause = WhereClause(&t.generics, indent),
@@ -3139,4 +3216,33 @@ fn test_unique_id() {
     test();
     reset_ids(true);
     test();
+}
+
+#[cfg(test)]
+#[test]
+fn test_name_key() {
+    assert_eq!(name_key("0"), ("", 0, 1));
+    assert_eq!(name_key("123"), ("", 123, 0));
+    assert_eq!(name_key("Fruit"), ("Fruit", 0, 0));
+    assert_eq!(name_key("Fruit0"), ("Fruit", 0, 1));
+    assert_eq!(name_key("Fruit0000"), ("Fruit", 0, 4));
+    assert_eq!(name_key("Fruit01"), ("Fruit", 1, 1));
+    assert_eq!(name_key("Fruit10"), ("Fruit", 10, 0));
+    assert_eq!(name_key("Fruit123"), ("Fruit", 123, 0));
+}
+
+#[cfg(test)]
+#[test]
+fn test_name_sorting() {
+    let names = ["Apple",
+                 "Banana",
+                 "Fruit", "Fruit0", "Fruit00",
+                 "Fruit1", "Fruit01",
+                 "Fruit2", "Fruit02",
+                 "Fruit20",
+                 "Fruit100",
+                 "Pear"];
+    let mut sorted = names.to_owned();
+    sorted.sort_by_key(|&s| name_key(s));
+    assert_eq!(names, sorted);
 }

@@ -9,6 +9,7 @@
 // except according to those terms.
 
 
+use back::symbol_names;
 use llvm;
 use llvm::{SetUnnamedAddr};
 use llvm::{ValueRef, True};
@@ -18,9 +19,9 @@ use rustc::hir::map as hir_map;
 use {debuginfo, machine};
 use base;
 use trans_item::TransItem;
-use common::{CrateContext, val_ty};
+use common::{self, CrateContext, val_ty};
 use declare;
-use monomorphize::{Instance};
+use monomorphize::Instance;
 use type_::Type;
 use type_of;
 use rustc::ty;
@@ -79,16 +80,16 @@ pub fn addr_of(ccx: &CrateContext,
 }
 
 pub fn get_static(ccx: &CrateContext, def_id: DefId) -> ValueRef {
-    let instance = Instance::mono(ccx.shared(), def_id);
+    let instance = Instance::mono(ccx.tcx(), def_id);
     if let Some(&g) = ccx.instances().borrow().get(&instance) {
         return g;
     }
 
-    let ty = ccx.tcx().item_type(def_id);
-    let g = if let Some(id) = ccx.tcx().map.as_local_node_id(def_id) {
+    let ty = common::instance_ty(ccx.shared(), &instance);
+    let g = if let Some(id) = ccx.tcx().hir.as_local_node_id(def_id) {
 
         let llty = type_of::type_of(ccx, ty);
-        let (g, attrs) = match ccx.tcx().map.get(id) {
+        let (g, attrs) = match ccx.tcx().hir.get(id) {
             hir_map::NodeItem(&hir::Item {
                 ref attrs, span, node: hir::ItemStatic(..), ..
             }) => {
@@ -113,7 +114,7 @@ pub fn get_static(ccx: &CrateContext, def_id: DefId) -> ValueRef {
             hir_map::NodeForeignItem(&hir::ForeignItem {
                 ref attrs, span, node: hir::ForeignItemStatic(..), ..
             }) => {
-                let sym = instance.symbol_name(ccx.shared());
+                let sym = symbol_names::symbol_name(instance, ccx.shared());
                 let g = if let Some(name) =
                         attr::first_attr_value_str_by_name(&attrs, "linkage") {
                     // If this is a static with a linkage specified, then we need to handle
@@ -173,7 +174,7 @@ pub fn get_static(ccx: &CrateContext, def_id: DefId) -> ValueRef {
 
         g
     } else {
-        let sym = instance.symbol_name(ccx.shared());
+        let sym = symbol_names::symbol_name(instance, ccx.shared());
 
         // FIXME(nagisa): perhaps the map of externs could be offloaded to llvm somehow?
         // FIXME(nagisa): investigate whether it can be changed into define_global
@@ -213,13 +214,13 @@ pub fn get_static(ccx: &CrateContext, def_id: DefId) -> ValueRef {
     g
 }
 
-pub fn trans_static(ccx: &CrateContext,
-                    m: hir::Mutability,
-                    id: ast::NodeId,
-                    attrs: &[ast::Attribute])
-                    -> Result<ValueRef, ConstEvalErr> {
+pub fn trans_static<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
+                              m: hir::Mutability,
+                              id: ast::NodeId,
+                              attrs: &[ast::Attribute])
+                              -> Result<ValueRef, ConstEvalErr<'tcx>> {
     unsafe {
-        let def_id = ccx.tcx().map.local_def_id(id);
+        let def_id = ccx.tcx().hir.local_def_id(id);
         let g = get_static(ccx, def_id);
 
         let v = ::mir::trans_static_initializer(ccx, def_id)?;
@@ -234,7 +235,8 @@ pub fn trans_static(ccx: &CrateContext,
             v
         };
 
-        let ty = ccx.tcx().item_type(def_id);
+        let instance = Instance::mono(ccx.tcx(), def_id);
+        let ty = common::instance_ty(ccx.shared(), &instance);
         let llty = type_of::type_of(ccx, ty);
         let g = if val_llty == llty {
             g

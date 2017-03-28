@@ -16,7 +16,8 @@
 //! # Examples
 //!
 //! ```rust
-//! use std::hash::{Hash, SipHasher, Hasher};
+//! use std::collections::hash_map::DefaultHasher;
+//! use std::hash::{Hash, Hasher};
 //!
 //! #[derive(Hash)]
 //! struct Person {
@@ -25,13 +26,21 @@
 //!     phone: u64,
 //! }
 //!
-//! let person1 = Person { id: 5, name: "Janet".to_string(), phone: 555_666_7777 };
-//! let person2 = Person { id: 5, name: "Bob".to_string(), phone: 555_666_7777 };
+//! let person1 = Person {
+//!     id: 5,
+//!     name: "Janet".to_string(),
+//!     phone: 555_666_7777,
+//! };
+//! let person2 = Person {
+//!     id: 5,
+//!     name: "Bob".to_string(),
+//!     phone: 555_666_7777,
+//! };
 //!
-//! assert!(hash(&person1) != hash(&person2));
+//! assert!(calculate_hash(&person1) != calculate_hash(&person2));
 //!
-//! fn hash<T: Hash>(t: &T) -> u64 {
-//!     let mut s = SipHasher::new();
+//! fn calculate_hash<T: Hash>(t: &T) -> u64 {
+//!     let mut s = DefaultHasher::new();
 //!     t.hash(&mut s);
 //!     s.finish()
 //! }
@@ -43,11 +52,12 @@
 //! [`Hash`]: trait.Hash.html
 //!
 //! ```rust
-//! use std::hash::{Hash, Hasher, SipHasher};
+//! use std::collections::hash_map::DefaultHasher;
+//! use std::hash::{Hash, Hasher};
 //!
 //! struct Person {
 //!     id: u32,
-//! # #[allow(dead_code)]
+//!     # #[allow(dead_code)]
 //!     name: String,
 //!     phone: u64,
 //! }
@@ -59,13 +69,21 @@
 //!     }
 //! }
 //!
-//! let person1 = Person { id: 5, name: "Janet".to_string(), phone: 555_666_7777 };
-//! let person2 = Person { id: 5, name: "Bob".to_string(), phone: 555_666_7777 };
+//! let person1 = Person {
+//!     id: 5,
+//!     name: "Janet".to_string(),
+//!     phone: 555_666_7777,
+//! };
+//! let person2 = Person {
+//!     id: 5,
+//!     name: "Bob".to_string(),
+//!     phone: 555_666_7777,
+//! };
 //!
-//! assert_eq!(hash(&person1), hash(&person2));
+//! assert_eq!(calculate_hash(&person1), calculate_hash(&person2));
 //!
-//! fn hash<T: Hash>(t: &T) -> u64 {
-//!     let mut s = SipHasher::new();
+//! fn calculate_hash<T: Hash>(t: &T) -> u64 {
+//!     let mut s = DefaultHasher::new();
 //!     t.hash(&mut s);
 //!     s.finish()
 //! }
@@ -106,7 +124,7 @@ mod sip;
 ///
 /// This trait can be used with `#[derive]` if all fields implement `Hash`.
 /// When `derive`d, the resulting hash will be the combination of the values
-/// from calling [`.hash()`] on each field.
+/// from calling [`.hash`] on each field.
 ///
 /// ## How can I implement `Hash`?
 ///
@@ -133,7 +151,7 @@ mod sip;
 /// [`Eq`]: ../../std/cmp/trait.Eq.html
 /// [`HashMap`]: ../../std/collections/struct.HashMap.html
 /// [`HashSet`]: ../../std/collections/struct.HashSet.html
-/// [`.hash()`]: #tymethod.hash
+/// [`.hash`]: #tymethod.hash
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Hash {
     /// Feeds this value into the state given, updating the hasher as necessary.
@@ -186,7 +204,6 @@ pub trait Hasher {
     fn write_u64(&mut self, i: u64) {
         self.write(&unsafe { mem::transmute::<_, [u8; 8]>(i) })
     }
-    #[cfg(not(stage0))]
     /// Writes a single `u128` into this hasher.
     #[inline]
     #[unstable(feature = "i128", issue = "35118")]
@@ -227,7 +244,6 @@ pub trait Hasher {
     fn write_i64(&mut self, i: i64) {
         self.write_u64(i as u64)
     }
-    #[cfg(not(stage0))]
     /// Writes a single `i128` into this hasher.
     #[inline]
     #[unstable(feature = "i128", issue = "35118")]
@@ -307,6 +323,7 @@ pub trait BuildHasher {
 /// [`BuildHasher`]: trait.BuildHasher.html
 /// [`Default`]: ../default/trait.Default.html
 /// [`Hasher`]: trait.Hasher.html
+/// [`HashMap`]: ../../std/collections/struct.HashMap.html
 #[stable(since = "1.7.0", feature = "build_hasher")]
 pub struct BuildHasherDefault<H>(marker::PhantomData<H>);
 
@@ -375,9 +392,6 @@ mod impls {
         (i32, write_i32),
         (i64, write_i64),
         (isize, write_isize),
-    }
-    #[cfg(not(stage0))]
-    impl_write! {
         (u128, write_u128),
         (i128, write_i128),
     }

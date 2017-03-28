@@ -288,7 +288,7 @@ impl<'a, 'gcx, 'tcx> CastCheck<'tcx> {
                                tstr);
                 }
             }
-            ty::TyBox(..) => {
+            ty::TyAdt(def, ..) if def.is_box() => {
                 match fcx.tcx.sess.codemap().span_to_snippet(self.cast_span) {
                     Ok(s) => {
                         err.span_suggestion(self.cast_span,
@@ -311,23 +311,25 @@ impl<'a, 'gcx, 'tcx> CastCheck<'tcx> {
         let t_cast = self.cast_ty;
         let t_expr = self.expr_ty;
         if t_cast.is_numeric() && t_expr.is_numeric() {
-            fcx.tcx.sess.add_lint(lint::builtin::TRIVIAL_NUMERIC_CASTS,
-                                  self.expr.id,
-                                  self.span,
-                                  format!("trivial numeric cast: `{}` as `{}`. Cast can be \
-                                           replaced by coercion, this might require type \
-                                           ascription or a temporary variable",
-                                          fcx.ty_to_string(t_expr),
-                                          fcx.ty_to_string(t_cast)));
+            fcx.tables.borrow_mut().lints.add_lint(
+                lint::builtin::TRIVIAL_NUMERIC_CASTS,
+                self.expr.id,
+                self.span,
+                format!("trivial numeric cast: `{}` as `{}`. Cast can be \
+                         replaced by coercion, this might require type \
+                         ascription or a temporary variable",
+                        fcx.ty_to_string(t_expr),
+                        fcx.ty_to_string(t_cast)));
         } else {
-            fcx.tcx.sess.add_lint(lint::builtin::TRIVIAL_CASTS,
-                                  self.expr.id,
-                                  self.span,
-                                  format!("trivial cast: `{}` as `{}`. Cast can be \
-                                           replaced by coercion, this might require type \
-                                           ascription or a temporary variable",
-                                          fcx.ty_to_string(t_expr),
-                                          fcx.ty_to_string(t_cast)));
+            fcx.tables.borrow_mut().lints.add_lint(
+                lint::builtin::TRIVIAL_CASTS,
+                self.expr.id,
+                self.span,
+                format!("trivial cast: `{}` as `{}`. Cast can be \
+                         replaced by coercion, this might require type \
+                         ascription or a temporary variable",
+                        fcx.ty_to_string(t_expr),
+                        fcx.ty_to_string(t_cast)));
         }
 
     }
@@ -348,12 +350,12 @@ impl<'a, 'gcx, 'tcx> CastCheck<'tcx> {
         } else if self.try_coercion_cast(fcx) {
             self.trivial_cast_lint(fcx);
             debug!(" -> CoercionCast");
-            fcx.tcx.cast_kinds.borrow_mut().insert(self.expr.id, CastKind::CoercionCast);
+            fcx.tables.borrow_mut().cast_kinds.insert(self.expr.id, CastKind::CoercionCast);
         } else {
             match self.do_check(fcx) {
                 Ok(k) => {
                     debug!(" -> {:?}", k);
-                    fcx.tcx.cast_kinds.borrow_mut().insert(self.expr.id, k);
+                    fcx.tables.borrow_mut().cast_kinds.insert(self.expr.id, k);
                 }
                 Err(e) => self.report_cast_error(fcx, e),
             };

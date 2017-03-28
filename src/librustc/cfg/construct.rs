@@ -18,21 +18,28 @@ use hir::{self, PatKind};
 
 struct CFGBuilder<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
-    tables: &'a ty::Tables<'tcx>,
+    tables: &'a ty::TypeckTables<'tcx>,
     graph: CFGGraph,
     fn_exit: CFGIndex,
     loop_scopes: Vec<LoopScope>,
+    breakable_block_scopes: Vec<BlockScope>,
+}
+
+#[derive(Copy, Clone)]
+struct BlockScope {
+    block_expr_id: ast::NodeId, // id of breakable block expr node
+    break_index: CFGIndex, // where to go on `break`
 }
 
 #[derive(Copy, Clone)]
 struct LoopScope {
     loop_id: ast::NodeId,     // id of loop/while node
     continue_index: CFGIndex, // where to go on a `loop`
-    break_index: CFGIndex,    // where to go on a `break
+    break_index: CFGIndex,    // where to go on a `break`
 }
 
 pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                           body: &hir::Expr) -> CFG {
+                           body: &hir::Body) -> CFG {
     let mut graph = graph::Graph::new();
     let entry = graph.add_node(CFGNodeData::Entry);
 
@@ -43,43 +50,58 @@ pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let fn_exit = graph.add_node(CFGNodeData::Exit);
     let body_exit;
 
-    // Find the function this expression is from.
-    let mut node_id = body.id;
-    loop {
-        let node = tcx.map.get(node_id);
-        if hir::map::blocks::FnLikeNode::from_node(node).is_some() {
-            break;
-        }
-        let parent = tcx.map.get_parent_node(node_id);
-        assert!(node_id != parent);
-        node_id = parent;
-    }
+    // Find the tables for this body.
+    let owner_def_id = tcx.hir.local_def_id(tcx.hir.body_owner(body.id()));
+    let tables = tcx.item_tables(owner_def_id);
 
     let mut cfg_builder = CFGBuilder {
         tcx: tcx,
-        tables: tcx.item_tables(tcx.map.local_def_id(node_id)),
+        tables: tables,
         graph: graph,
         fn_exit: fn_exit,
-        loop_scopes: Vec::new()
+        loop_scopes: Vec::new(),
+        breakable_block_scopes: Vec::new(),
     };
-    body_exit = cfg_builder.expr(body, entry);
+    body_exit = cfg_builder.expr(&body.value, entry);
     cfg_builder.add_contained_edge(body_exit, fn_exit);
-    let CFGBuilder {graph, ..} = cfg_builder;
-    CFG {graph: graph,
-         entry: entry,
-         exit: fn_exit}
+    let CFGBuilder { graph, .. } = cfg_builder;
+    CFG {
+        graph: graph,
+        entry: entry,
+        exit: fn_exit,
+    }
 }
 
 impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn block(&mut self, blk: &hir::Block, pred: CFGIndex) -> CFGIndex {
-        let mut stmts_exit = pred;
-        for stmt in &blk.stmts {
-            stmts_exit = self.stmt(stmt, stmts_exit);
+        if let Some(break_to_expr_id) = blk.break_to_expr_id {
+            let expr_exit = self.add_ast_node(blk.id, &[]);
+
+            self.breakable_block_scopes.push(BlockScope {
+                block_expr_id: break_to_expr_id,
+                break_index: expr_exit,
+            });
+
+            let mut stmts_exit = pred;
+            for stmt in &blk.stmts {
+                stmts_exit = self.stmt(stmt, stmts_exit);
+            }
+            let blk_expr_exit = self.opt_expr(&blk.expr, stmts_exit);
+            self.add_contained_edge(blk_expr_exit, expr_exit);
+
+            self.breakable_block_scopes.pop();
+
+            expr_exit
+        } else {
+            let mut stmts_exit = pred;
+            for stmt in &blk.stmts {
+                stmts_exit = self.stmt(stmt, stmts_exit);
+            }
+
+            let expr_exit = self.opt_expr(&blk.expr, stmts_exit);
+
+            self.add_ast_node(blk.id, &[expr_exit])
         }
-
-        let expr_exit = self.opt_expr(&blk.expr, stmts_exit);
-
-        self.add_ast_node(blk.id, &[expr_exit])
     }
 
     fn stmt(&mut self, stmt: &hir::Stmt, pred: CFGIndex) -> CFGIndex {
@@ -89,7 +111,8 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.add_ast_node(id, &[exit])
             }
 
-            hir::StmtExpr(ref expr, id) | hir::StmtSemi(ref expr, id) => {
+            hir::StmtExpr(ref expr, id) |
+            hir::StmtSemi(ref expr, id) => {
                 let exit = self.expr(&expr, pred);
                 self.add_ast_node(id, &[exit])
             }
@@ -103,9 +126,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.pat(&local.pat, init_exit)
             }
 
-            hir::DeclItem(_) => {
-                pred
-            }
+            hir::DeclItem(_) => pred,
         }
     }
 
@@ -115,9 +136,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             PatKind::Path(_) |
             PatKind::Lit(..) |
             PatKind::Range(..) |
-            PatKind::Wild => {
-                self.add_ast_node(pat.id, &[pred])
-            }
+            PatKind::Wild => self.add_ast_node(pat.id, &[pred]),
 
             PatKind::Box(ref subpat) |
             PatKind::Ref(ref subpat, _) |
@@ -133,8 +152,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
 
             PatKind::Struct(_, ref subpats, _) => {
-                let pats_exit =
-                    self.pats_all(subpats.iter().map(|f| &f.node.pat), pred);
+                let pats_exit = self.pats_all(subpats.iter().map(|f| &f.node.pat), pred);
                 self.add_ast_node(pat.id, &[pats_exit])
             }
 
@@ -220,15 +238,24 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 // Note that `break` and `continue` statements
                 // may cause additional edges.
 
-                // Is the condition considered part of the loop?
                 let loopback = self.add_dummy_node(&[pred]);              // 1
-                let cond_exit = self.expr(&cond, loopback);             // 2
-                let expr_exit = self.add_ast_node(expr.id, &[cond_exit]); // 3
+
+                // Create expr_exit without pred (cond_exit)
+                let expr_exit = self.add_ast_node(expr.id, &[]);         // 3
+
+                // The LoopScope needs to be on the loop_scopes stack while evaluating the
+                // condition and the body of the loop (both can break out of the loop)
                 self.loop_scopes.push(LoopScope {
                     loop_id: expr.id,
                     continue_index: loopback,
                     break_index: expr_exit
                 });
+
+                let cond_exit = self.expr(&cond, loopback);             // 2
+
+                // Add pred (cond_exit) to expr_exit
+                self.add_contained_edge(cond_exit, expr_exit);
+
                 let body_exit = self.block(&body, cond_exit);          // 4
                 self.add_contained_edge(body_exit, loopback);            // 5
                 self.loop_scopes.pop();
@@ -294,20 +321,20 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.add_unreachable_node()
             }
 
-            hir::ExprBreak(label, ref opt_expr) => {
+            hir::ExprBreak(destination, ref opt_expr) => {
                 let v = self.opt_expr(opt_expr, pred);
-                let loop_scope = self.find_scope(expr, label);
+                let (scope_id, break_dest) =
+                    self.find_scope_edge(expr, destination, ScopeCfKind::Break);
                 let b = self.add_ast_node(expr.id, &[v]);
-                self.add_exiting_edge(expr, b,
-                                      loop_scope, loop_scope.break_index);
+                self.add_exiting_edge(expr, b, scope_id, break_dest);
                 self.add_unreachable_node()
             }
 
-            hir::ExprAgain(label) => {
-                let loop_scope = self.find_scope(expr, label);
+            hir::ExprAgain(destination) => {
+                let (scope_id, cont_dest) =
+                    self.find_scope_edge(expr, destination, ScopeCfKind::Continue);
                 let a = self.add_ast_node(expr.id, &[pred]);
-                self.add_exiting_edge(expr, a,
-                                      loop_scope, loop_scope.continue_index);
+                self.add_exiting_edge(expr, a, scope_id, cont_dest);
                 self.add_unreachable_node()
             }
 
@@ -384,7 +411,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         let method_call = ty::MethodCall::expr(call_expr.id);
         let fn_ty = match self.tables.method_map.get(&method_call) {
             Some(method) => method.ty,
-            None => self.tables.expr_ty_adjusted(func_or_rcvr)
+            None => self.tables.expr_ty_adjusted(func_or_rcvr),
         };
 
         let func_or_rcvr_exit = self.expr(func_or_rcvr, pred);
@@ -553,11 +580,11 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn add_exiting_edge(&mut self,
                         from_expr: &hir::Expr,
                         from_index: CFGIndex,
-                        to_loop: LoopScope,
+                        scope_id: ast::NodeId,
                         to_index: CFGIndex) {
-        let mut data = CFGEdgeData {exiting_scopes: vec![] };
+        let mut data = CFGEdgeData { exiting_scopes: vec![] };
         let mut scope = self.tcx.region_maps.node_extent(from_expr.id);
-        let target_scope = self.tcx.region_maps.node_extent(to_loop.loop_id);
+        let target_scope = self.tcx.region_maps.node_extent(scope_id);
         while scope != target_scope {
             data.exiting_scopes.push(scope.node_id(&self.tcx.region_maps));
             scope = self.tcx.region_maps.encl_scope(scope);
@@ -577,19 +604,42 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         self.graph.add_edge(from_index, self.fn_exit, data);
     }
 
-    fn find_scope(&self,
+    fn find_scope_edge(&self,
                   expr: &hir::Expr,
-                  label: Option<hir::Label>) -> LoopScope {
-        match label {
-            None => *self.loop_scopes.last().unwrap(),
-            Some(label) => {
-                for l in &self.loop_scopes {
-                    if l.loop_id == label.loop_id {
-                        return *l;
+                  destination: hir::Destination,
+                  scope_cf_kind: ScopeCfKind) -> (ast::NodeId, CFGIndex) {
+
+        match destination.target_id {
+            hir::ScopeTarget::Block(block_expr_id) => {
+                for b in &self.breakable_block_scopes {
+                    if b.block_expr_id == block_expr_id {
+                        return (block_expr_id, match scope_cf_kind {
+                            ScopeCfKind::Break => b.break_index,
+                            ScopeCfKind::Continue => bug!("can't continue to block"),
+                        });
                     }
                 }
-                span_bug!(expr.span, "no loop scope for id {}", label.loop_id);
+                span_bug!(expr.span, "no block expr for id {}", block_expr_id);
             }
+            hir::ScopeTarget::Loop(hir::LoopIdResult::Ok(loop_id)) => {
+                for l in &self.loop_scopes {
+                    if l.loop_id == loop_id {
+                        return (loop_id, match scope_cf_kind {
+                            ScopeCfKind::Break => l.break_index,
+                            ScopeCfKind::Continue => l.continue_index,
+                        });
+                    }
+                }
+                span_bug!(expr.span, "no loop scope for id {}", loop_id);
+            }
+            hir::ScopeTarget::Loop(hir::LoopIdResult::Err(err)) =>
+                span_bug!(expr.span, "loop scope error: {}",  err),
         }
     }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum ScopeCfKind {
+    Break,
+    Continue,
 }

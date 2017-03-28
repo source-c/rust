@@ -28,9 +28,6 @@ use rustc::ty::{self, TyCtxt};
 use syntax::ast;
 use syntax_pos::Span;
 use rustc::hir;
-use rustc::hir::Expr;
-use rustc::hir::intravisit;
-use rustc::hir::intravisit::{Visitor, NestedVisitorMap};
 
 use self::restrictions::RestrictionResult;
 
@@ -53,7 +50,7 @@ pub fn gather_loans_in_fn<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
         move_error_collector: move_error::MoveErrorCollector::new(),
     };
 
-    let body = glcx.bccx.tcx.map.body(body);
+    let body = glcx.bccx.tcx.hir.body(body);
     euv::ExprUseVisitor::new(&mut glcx, &infcx).consume_body(body);
 
     glcx.report_potential_errors();
@@ -195,7 +192,8 @@ fn check_aliasability<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
             bccx.report_aliasability_violation(
                         borrow_span,
                         loan_cause,
-                        mc::AliasableReason::UnaliasableImmutable);
+                        mc::AliasableReason::UnaliasableImmutable,
+                        cmt);
             Err(())
         }
         (mc::Aliasability::FreelyAliasable(alias_cause), ty::UniqueImmBorrow) |
@@ -203,7 +201,8 @@ fn check_aliasability<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
             bccx.report_aliasability_violation(
                         borrow_span,
                         loan_cause,
-                        alias_cause);
+                        alias_cause,
+                        cmt);
             Err(())
         }
         (..) => {
@@ -512,47 +511,3 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
     }
 }
 
-/// Context used while gathering loans on static initializers
-///
-/// This visitor walks static initializer's expressions and makes
-/// sure the loans being taken are sound.
-struct StaticInitializerCtxt<'a, 'tcx: 'a> {
-    bccx: &'a BorrowckCtxt<'a, 'tcx>,
-    body_id: hir::BodyId,
-}
-
-impl<'a, 'tcx> Visitor<'tcx> for StaticInitializerCtxt<'a, 'tcx> {
-    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'tcx> {
-        NestedVisitorMap::None
-    }
-
-    fn visit_expr(&mut self, ex: &'tcx Expr) {
-        if let hir::ExprAddrOf(mutbl, ref base) = ex.node {
-            let infcx = self.bccx.tcx.borrowck_fake_infer_ctxt(self.body_id);
-            let mc = mc::MemCategorizationContext::new(&infcx);
-            let base_cmt = mc.cat_expr(&base).unwrap();
-            let borrow_kind = ty::BorrowKind::from_mutbl(mutbl);
-            // Check that we don't allow borrows of unsafe static items.
-            let err = check_aliasability(self.bccx, ex.span,
-                                         BorrowViolation(euv::AddrOf),
-                                         base_cmt, borrow_kind).is_err();
-            if err {
-                return; // reported an error, no sense in reporting more.
-            }
-        }
-
-        intravisit::walk_expr(self, ex);
-    }
-}
-
-pub fn gather_loans_in_static_initializer(bccx: &mut BorrowckCtxt, body: hir::BodyId) {
-    debug!("gather_loans_in_static_initializer(expr={:?})", body);
-
-    let mut sicx = StaticInitializerCtxt {
-        bccx: bccx,
-        body_id: body
-    };
-
-    let body = sicx.bccx.tcx.map.body(body);
-    sicx.visit_body(body);
-}

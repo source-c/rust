@@ -40,7 +40,19 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 this.in_scope(extent, block, |this| this.into(destination, block, value))
             }
             ExprKind::Block { body: ast_block } => {
-                this.ast_block(destination, expr.ty.is_nil(), block, ast_block)
+                if let Some(_) = ast_block.break_to_expr_id {
+                    // This is a `break`-able block (currently only `catch { ... }`)
+                    let exit_block = this.cfg.start_new_block();
+                    let block_exit = this.in_breakable_scope(None, exit_block,
+                                                             destination.clone(), |this| {
+                        this.ast_block(destination, block, ast_block)
+                    });
+                    this.cfg.terminate(unpack!(block_exit), source_info,
+                                       TerminatorKind::Goto { target: exit_block });
+                    exit_block.unit()
+                } else {
+                    this.ast_block(destination, block, ast_block)
+                }
             }
             ExprKind::Match { discriminant, arms } => {
                 this.match_expr(destination, expr_span, block, discriminant, arms)
@@ -52,7 +64,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     _ => false,
                 };
 
-                unpack!(block = this.as_rvalue(block, source));
+                unpack!(block = this.as_local_rvalue(block, source));
 
                 // This is an optimization. If the expression was a call then we already have an
                 // unreachable block. Don't bother to terminate it and create a new one.
@@ -65,14 +77,12 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 }
             }
             ExprKind::If { condition: cond_expr, then: then_expr, otherwise: else_expr } => {
-                let operand = unpack!(block = this.as_operand(block, cond_expr));
+                let operand = unpack!(block = this.as_local_operand(block, cond_expr));
 
                 let mut then_block = this.cfg.start_new_block();
                 let mut else_block = this.cfg.start_new_block();
-                this.cfg.terminate(block, source_info, TerminatorKind::If {
-                    cond: operand,
-                    targets: (then_block, else_block)
-                });
+                let term = TerminatorKind::if_(this.hir.tcx(), operand, then_block, else_block);
+                this.cfg.terminate(block, source_info, term);
 
                 unpack!(then_block = this.into(destination, then_block, then_expr));
                 else_block = if let Some(else_expr) = else_expr {
@@ -109,19 +119,17 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     (this.cfg.start_new_block(), this.cfg.start_new_block(),
                      this.cfg.start_new_block(), this.cfg.start_new_block());
 
-                let lhs = unpack!(block = this.as_operand(block, lhs));
+                let lhs = unpack!(block = this.as_local_operand(block, lhs));
                 let blocks = match op {
                     LogicalOp::And => (else_block, false_block),
                     LogicalOp::Or => (true_block, else_block),
                 };
-                this.cfg.terminate(block, source_info,
-                                   TerminatorKind::If { cond: lhs, targets: blocks });
+                let term = TerminatorKind::if_(this.hir.tcx(), lhs, blocks.0, blocks.1);
+                this.cfg.terminate(block, source_info, term);
 
-                let rhs = unpack!(else_block = this.as_operand(else_block, rhs));
-                this.cfg.terminate(else_block, source_info, TerminatorKind::If {
-                    cond: rhs,
-                    targets: (true_block, false_block)
-                });
+                let rhs = unpack!(else_block = this.as_local_operand(else_block, rhs));
+                let term = TerminatorKind::if_(this.hir.tcx(), rhs, true_block, false_block);
+                this.cfg.terminate(else_block, source_info, term);
 
                 this.cfg.push_assign_constant(
                     true_block, source_info, destination,
@@ -169,21 +177,19 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 this.cfg.terminate(block, source_info,
                                    TerminatorKind::Goto { target: loop_block });
 
-                this.in_loop_scope(
-                    loop_block, exit_block, destination.clone(),
+                this.in_breakable_scope(
+                    Some(loop_block), exit_block, destination.clone(),
                     move |this| {
                         // conduct the test, if necessary
                         let body_block;
                         if let Some(cond_expr) = opt_cond_expr {
                             let loop_block_end;
                             let cond = unpack!(
-                                loop_block_end = this.as_operand(loop_block, cond_expr));
+                                loop_block_end = this.as_local_operand(loop_block, cond_expr));
                             body_block = this.cfg.start_new_block();
-                            this.cfg.terminate(loop_block_end, source_info,
-                                               TerminatorKind::If {
-                                                   cond: cond,
-                                                   targets: (body_block, exit_block)
-                                               });
+                            let term = TerminatorKind::if_(this.hir.tcx(), cond,
+                                                           body_block, exit_block);
+                            this.cfg.terminate(loop_block_end, source_info, term);
 
                             // if the test is false, there's no `break` to assign `destination`, so
                             // we have to do it; this overwrites any `break`-assigned value but it's
@@ -208,14 +214,14 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 let diverges = match ty.sty {
                     ty::TyFnDef(_, _, ref f) | ty::TyFnPtr(ref f) => {
                         // FIXME(canndrew): This is_never should probably be an is_uninhabited
-                        f.sig.skip_binder().output().is_never()
+                        f.output().skip_binder().is_never()
                     }
                     _ => false
                 };
-                let fun = unpack!(block = this.as_operand(block, fun));
+                let fun = unpack!(block = this.as_local_operand(block, fun));
                 let args: Vec<_> =
                     args.into_iter()
-                        .map(|arg| unpack!(block = this.as_operand(block, arg)))
+                        .map(|arg| unpack!(block = this.as_local_operand(block, arg)))
                         .collect();
 
                 let success = this.cfg.start_new_block();
@@ -238,6 +244,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             ExprKind::AssignOp { .. } |
             ExprKind::Continue { .. } |
             ExprKind::Break { .. } |
+            ExprKind::InlineAsm { .. } |
             ExprKind::Return {.. } => {
                 this.stmt_expr(block, expr)
             }
@@ -249,6 +256,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             ExprKind::Cast { .. } |
             ExprKind::Use { .. } |
             ExprKind::ReifyFnPointer { .. } |
+            ExprKind::ClosureFnPointer { .. } |
             ExprKind::UnsafeFnPointer { .. } |
             ExprKind::Unsize { .. } |
             ExprKind::Repeat { .. } |
@@ -256,21 +264,20 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             ExprKind::VarRef { .. } |
             ExprKind::SelfRef |
             ExprKind::StaticRef { .. } |
-            ExprKind::Vec { .. } |
+            ExprKind::Array { .. } |
             ExprKind::Tuple { .. } |
             ExprKind::Adt { .. } |
             ExprKind::Closure { .. } |
             ExprKind::Index { .. } |
             ExprKind::Deref { .. } |
             ExprKind::Literal { .. } |
-            ExprKind::InlineAsm { .. } |
             ExprKind::Field { .. } => {
                 debug_assert!(match Category::of(&expr.kind).unwrap() {
                     Category::Rvalue(RvalueFunc::Into) => false,
                     _ => true,
                 });
 
-                let rvalue = unpack!(block = this.as_rvalue(block, expr));
+                let rvalue = unpack!(block = this.as_local_rvalue(block, expr));
                 this.cfg.push_assign(block, source_info, destination, rvalue);
                 block.unit()
             }

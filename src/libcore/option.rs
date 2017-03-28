@@ -60,7 +60,7 @@
 //! the optional owned box, [`Option`]`<`[`Box<T>`]`>`.
 //!
 //! The following example uses [`Option`] to create an optional box of
-//! [`i32`]. Notice that in order to use the inner [`i32`] value first the
+//! [`i32`]. Notice that in order to use the inner [`i32`] value first, the
 //! `check_optional` function needs to use pattern matching to
 //! determine whether the box has a value (i.e. it is [`Some(...)`][`Some`]) or
 //! not ([`None`]).
@@ -74,8 +74,8 @@
 //!
 //! fn check_optional(optional: &Option<Box<i32>>) {
 //!     match *optional {
-//!         Some(ref p) => println!("have value {}", p),
-//!         None => println!("have no value"),
+//!         Some(ref p) => println!("has value {}", p),
+//!         None => println!("has no value"),
 //!     }
 //! }
 //! ```
@@ -219,12 +219,14 @@ impl<T> Option<T> {
     ///
     /// # Examples
     ///
-    /// Convert an `Option<String>` into an `Option<usize>`, preserving the original.
+    /// Convert an `Option<`[`String`]`>` into an `Option<`[`usize`]`>`, preserving the original.
     /// The [`map`] method takes the `self` argument by value, consuming the original,
     /// so this technique uses `as_ref` to first take an `Option` to a reference
     /// to the value inside the original.
     ///
     /// [`map`]: enum.Option.html#method.map
+    /// [`String`]: ../../std/string/struct.String.html
+    /// [`usize`]: ../../std/primitive.usize.html
     ///
     /// ```
     /// let num_as_str: Option<String> = Some("10".to_string());
@@ -271,8 +273,10 @@ impl<T> Option<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the value is a `None` with a custom panic message provided by
+    /// Panics if the value is a [`None`] with a custom panic message provided by
     /// `msg`.
+    ///
+    /// [`None`]: #variant.None
     ///
     /// # Examples
     ///
@@ -302,7 +306,9 @@ impl<T> Option<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the self value equals `None`.
+    /// Panics if the self value equals [`None`].
+    ///
+    /// [`None`]: #variant.None
     ///
     /// # Examples
     ///
@@ -367,7 +373,10 @@ impl<T> Option<T> {
     ///
     /// # Examples
     ///
-    /// Convert an `Option<String>` into an `Option<usize>`, consuming the original:
+    /// Convert an `Option<`[`String`]`>` into an `Option<`[`usize`]`>`, consuming the original:
+    ///
+    /// [`String`]: ../../std/string/struct.String.html
+    /// [`usize`]: ../../std/primitive.usize.html
     ///
     /// ```
     /// let maybe_some_string = Some(String::from("Hello, World!"));
@@ -629,6 +638,76 @@ impl<T> Option<T> {
         match self {
             Some(_) => self,
             None => f(),
+        }
+    }
+
+    /////////////////////////////////////////////////////////////////////////
+    // Entry-like operations to insert if None and return a reference
+    /////////////////////////////////////////////////////////////////////////
+
+    /// Inserts `v` into the option if it is `None`, then
+    /// returns a mutable reference to the contained value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(option_entry)]
+    ///
+    /// let mut x = None;
+    ///
+    /// {
+    ///     let y: &mut u32 = x.get_or_insert(5);
+    ///     assert_eq!(y, &5);
+    ///
+    ///     *y = 7;
+    /// }
+    ///
+    /// assert_eq!(x, Some(7));
+    /// ```
+    #[inline]
+    #[unstable(feature = "option_entry", issue = "39288")]
+    pub fn get_or_insert(&mut self, v: T) -> &mut T {
+        match *self {
+            None => *self = Some(v),
+            _ => (),
+        }
+
+        match *self {
+            Some(ref mut v) => v,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Inserts a value computed from `f` into the option if it is `None`, then
+    /// returns a mutable reference to the contained value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(option_entry)]
+    ///
+    /// let mut x = None;
+    ///
+    /// {
+    ///     let y: &mut u32 = x.get_or_insert_with(|| 5);
+    ///     assert_eq!(y, &5);
+    ///
+    ///     *y = 7;
+    /// }
+    ///
+    /// assert_eq!(x, Some(7));
+    /// ```
+    #[inline]
+    #[unstable(feature = "option_entry", issue = "39288")]
+    pub fn get_or_insert_with<F: FnOnce() -> T>(&mut self, f: F) -> &mut T {
+        match *self {
+            None => *self = Some(f()),
+            _ => (),
+        }
+
+        match *self {
+            Some(ref mut v) => v,
+            _ => unreachable!(),
         }
     }
 

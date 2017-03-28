@@ -102,8 +102,6 @@ use syntax_pos::Span;
 use rustc::hir::intravisit::{self, Visitor, NestedVisitorMap};
 use rustc::hir::{self, PatKind};
 
-use self::SubjectNode::Subject;
-
 // a variation on try that just returns unit
 macro_rules! ignore_err {
     ($e:expr) => (match $e { Ok(e) => e, Err(_) => return () })
@@ -122,6 +120,9 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             rcx.visit_region_obligations(id);
         }
         rcx.resolve_regions_and_report_errors();
+
+        assert!(self.tables.borrow().free_region_map.is_empty());
+        self.tables.borrow_mut().free_region_map = rcx.free_region_map;
     }
 
     /// Region checking during the WF phase for items. `wf_tys` are the
@@ -148,7 +149,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
         if self.err_count_since_creation() == 0 {
             // regionck assumes typeck succeeded
-            rcx.visit_fn_body(fn_id, body, self.tcx.map.span(fn_id));
+            rcx.visit_fn_body(fn_id, body, self.tcx.hir.span(fn_id));
         }
 
         rcx.free_region_map.relate_free_regions_from_predicates(
@@ -156,10 +157,11 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
         rcx.resolve_regions_and_report_errors();
 
-        // For the top-level fn, store the free-region-map. We don't store
-        // any map for closures; they just share the same map as the
-        // function that created them.
-        self.tcx.store_free_region_map(fn_id, rcx.free_region_map);
+        // In this mode, we also copy the free-region-map into the
+        // tables of the enclosing fcx. In the other regionck modes
+        // (e.g., `regionck_item`), we don't have an enclosing tables.
+        assert!(self.tables.borrow().free_region_map.is_empty());
+        self.tables.borrow_mut().free_region_map = rcx.free_region_map;
     }
 }
 
@@ -183,7 +185,7 @@ pub struct RegionCtxt<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     repeating_scope: ast::NodeId,
 
     // id of AST node being analyzed (the subject of the analysis).
-    subject: SubjectNode,
+    subject: ast::NodeId,
 
 }
 
@@ -195,14 +197,13 @@ impl<'a, 'gcx, 'tcx> Deref for RegionCtxt<'a, 'gcx, 'tcx> {
 }
 
 pub struct RepeatingScope(ast::NodeId);
-pub enum SubjectNode { Subject(ast::NodeId), None }
+pub struct Subject(ast::NodeId);
 
 impl<'a, 'gcx, 'tcx> RegionCtxt<'a, 'gcx, 'tcx> {
     pub fn new(fcx: &'a FnCtxt<'a, 'gcx, 'tcx>,
-               initial_repeating_scope: RepeatingScope,
+               RepeatingScope(initial_repeating_scope): RepeatingScope,
                initial_body_id: ast::NodeId,
-               subject: SubjectNode) -> RegionCtxt<'a, 'gcx, 'tcx> {
-        let RepeatingScope(initial_repeating_scope) = initial_repeating_scope;
+               Subject(subject): Subject) -> RegionCtxt<'a, 'gcx, 'tcx> {
         RegionCtxt {
             fcx: fcx,
             repeating_scope: initial_repeating_scope,
@@ -416,13 +417,7 @@ impl<'a, 'gcx, 'tcx> RegionCtxt<'a, 'gcx, 'tcx> {
     }
 
     fn resolve_regions_and_report_errors(&self) {
-        let subject_node_id = match self.subject {
-            Subject(s) => s,
-            SubjectNode::None => {
-                bug!("cannot resolve_regions_and_report_errors \
-                      without subject node");
-            }
-        };
+        let subject_node_id = self.subject;
 
         self.fcx.resolve_regions_and_report_errors(&self.free_region_map,
                                                    subject_node_id);
@@ -482,7 +477,7 @@ impl<'a, 'gcx, 'tcx> Visitor<'gcx> for RegionCtxt<'a, 'gcx, 'tcx> {
 
     fn visit_fn(&mut self, _fk: intravisit::FnKind<'gcx>, _: &'gcx hir::FnDecl,
                 b: hir::BodyId, span: Span, id: ast::NodeId) {
-        let body = self.tcx.map.body(b);
+        let body = self.tcx.hir.body(b);
         self.visit_fn_body(id, body, span)
     }
 
@@ -815,9 +810,9 @@ impl<'a, 'gcx, 'tcx> RegionCtxt<'a, 'gcx, 'tcx> {
                 self.type_must_outlive(infer::RelateObjectBound(cast_expr.span), from_ty, r);
             }
 
-            /*From:*/ (&ty::TyBox(from_referent_ty),
-            /*To:  */  &ty::TyBox(to_referent_ty)) => {
-                self.walk_cast(cast_expr, from_referent_ty, to_referent_ty);
+            /*From:*/ (&ty::TyAdt(from_def, _),
+            /*To:  */  &ty::TyAdt(to_def, _)) if from_def.is_box() && to_def.is_box() => {
+                self.walk_cast(cast_expr, from_ty.boxed_ty(), to_ty.boxed_ty());
             }
 
             _ => { }
@@ -936,7 +931,7 @@ impl<'a, 'gcx, 'tcx> RegionCtxt<'a, 'gcx, 'tcx> {
                     // was applied on the base type, as that is always the case.
                     let fn_sig = method.ty.fn_sig();
                     let fn_sig = // late-bound regions should have been instantiated
-                        self.tcx.no_late_bound_regions(fn_sig).unwrap();
+                        self.tcx.no_late_bound_regions(&fn_sig).unwrap();
                     let self_ty = fn_sig.inputs()[0];
                     let (m, r) = match self_ty.sty {
                         ty::TyRef(r, ref m) => (m.mutbl, r),
@@ -996,7 +991,7 @@ impl<'a, 'gcx, 'tcx> RegionCtxt<'a, 'gcx, 'tcx> {
                                                      cmt: mc::cmt<'tcx>,
                                                      span: Span) {
         match cmt.cat {
-            Categorization::Rvalue(region) => {
+            Categorization::Rvalue(region, _) => {
                 match *region {
                     ty::ReScope(rvalue_scope) => {
                         let typ = self.resolve_type(cmt.ty);
@@ -1113,7 +1108,8 @@ impl<'a, 'gcx, 'tcx> RegionCtxt<'a, 'gcx, 'tcx> {
         for arg in args {
             let arg_ty = self.node_ty(arg.id);
             let re_scope = self.tcx.mk_region(ty::ReScope(body_scope));
-            let arg_cmt = mc.cat_rvalue(arg.id, arg.pat.span, re_scope, arg_ty);
+            let arg_cmt = mc.cat_rvalue(
+                arg.id, arg.pat.span, re_scope, re_scope, arg_ty);
             debug!("arg_ty={:?} arg_cmt={:?} arg={:?}",
                    arg_ty,
                    arg_cmt,

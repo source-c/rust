@@ -21,7 +21,7 @@ use core::ops::{BitOr, BitAnd, BitXor, Sub};
 use borrow::Borrow;
 use btree_map::{BTreeMap, Keys};
 use super::Recover;
-use Bound;
+use range::RangeArgument;
 
 // FIXME(conventions): implement bounded iterators
 
@@ -85,6 +85,15 @@ pub struct Iter<'a, T: 'a> {
     iter: Keys<'a, T, ()>,
 }
 
+#[stable(feature = "collection_debug", since = "1.17.0")]
+impl<'a, T: 'a + fmt::Debug> fmt::Debug for Iter<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Iter")
+         .field(&self.iter.clone())
+         .finish()
+    }
+}
+
 /// An owning iterator over a `BTreeSet`'s items.
 ///
 /// This structure is created by the `into_iter` method on [`BTreeSet`]
@@ -92,6 +101,7 @@ pub struct Iter<'a, T: 'a> {
 ///
 /// [`BTreeSet`]: struct.BTreeSet.html
 #[stable(feature = "rust1", since = "1.0.0")]
+#[derive(Debug)]
 pub struct IntoIter<T> {
     iter: ::btree_map::IntoIter<T, ()>,
 }
@@ -102,6 +112,8 @@ pub struct IntoIter<T> {
 ///
 /// [`BTreeSet`]: struct.BTreeSet.html
 /// [`range`]: struct.BTreeSet.html#method.range
+#[derive(Debug)]
+#[stable(feature = "btree_range", since = "1.17.0")]
 pub struct Range<'a, T: 'a> {
     iter: ::btree_map::Range<'a, T, ()>,
 }
@@ -118,6 +130,15 @@ pub struct Difference<'a, T: 'a> {
     b: Peekable<Iter<'a, T>>,
 }
 
+#[stable(feature = "collection_debug", since = "1.17.0")]
+impl<'a, T: 'a + fmt::Debug> fmt::Debug for Difference<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Difference")
+         .field(&self.clone())
+         .finish()
+    }
+}
+
 /// A lazy iterator producing elements in the set symmetric difference (in-order).
 ///
 /// This structure is created by the [`symmetric_difference`] method on
@@ -129,6 +150,15 @@ pub struct Difference<'a, T: 'a> {
 pub struct SymmetricDifference<'a, T: 'a> {
     a: Peekable<Iter<'a, T>>,
     b: Peekable<Iter<'a, T>>,
+}
+
+#[stable(feature = "collection_debug", since = "1.17.0")]
+impl<'a, T: 'a + fmt::Debug> fmt::Debug for SymmetricDifference<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("SymmetricDifference")
+         .field(&self.clone())
+         .finish()
+    }
 }
 
 /// A lazy iterator producing elements in the set intersection (in-order).
@@ -143,6 +173,15 @@ pub struct Intersection<'a, T: 'a> {
     b: Peekable<Iter<'a, T>>,
 }
 
+#[stable(feature = "collection_debug", since = "1.17.0")]
+impl<'a, T: 'a + fmt::Debug> fmt::Debug for Intersection<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Intersection")
+         .field(&self.clone())
+         .finish()
+    }
+}
+
 /// A lazy iterator producing elements in the set union (in-order).
 ///
 /// This structure is created by the [`union`] method on [`BTreeSet`].
@@ -153,6 +192,15 @@ pub struct Intersection<'a, T: 'a> {
 pub struct Union<'a, T: 'a> {
     a: Peekable<Iter<'a, T>>,
     b: Peekable<Iter<'a, T>>,
+}
+
+#[stable(feature = "collection_debug", since = "1.17.0")]
+impl<'a, T: 'a + fmt::Debug> fmt::Debug for Union<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Union")
+         .field(&self.clone())
+         .finish()
+    }
 }
 
 impl<T: Ord> BTreeSet<T> {
@@ -207,43 +255,40 @@ impl<T> BTreeSet<T> {
 }
 
 impl<T: Ord> BTreeSet<T> {
-    /// Constructs a double-ended iterator over a sub-range of elements in the set, starting
-    /// at min, and ending at max. If min is `Unbounded`, then it will be treated as "negative
-    /// infinity", and if max is `Unbounded`, then it will be treated as "positive infinity".
-    /// Thus range(Unbounded, Unbounded) will yield the whole collection.
+    /// Constructs a double-ended iterator over a sub-range of elements in the set.
+    /// The simplest way is to use the range syntax `min..max`, thus `range(min..max)` will
+    /// yield elements from min (inclusive) to max (exclusive).
+    /// The range may also be entered as `(Bound<T>, Bound<T>)`, so for example
+    /// `range((Excluded(4), Included(10)))` will yield a left-exclusive, right-inclusive
+    /// range from 4 to 10.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(btree_range, collections_bound)]
-    ///
     /// use std::collections::BTreeSet;
-    /// use std::collections::Bound::{Included, Unbounded};
+    /// use std::collections::Bound::Included;
     ///
     /// let mut set = BTreeSet::new();
     /// set.insert(3);
     /// set.insert(5);
     /// set.insert(8);
-    /// for &elem in set.range(Included(&4), Included(&8)) {
+    /// for &elem in set.range((Included(&4), Included(&8))) {
     ///     println!("{}", elem);
     /// }
-    /// assert_eq!(Some(&5), set.range(Included(&4), Unbounded).next());
+    /// assert_eq!(Some(&5), set.range(4..).next());
     /// ```
-    #[unstable(feature = "btree_range",
-               reason = "matches collection reform specification, waiting for dust to settle",
-               issue = "27787")]
-    pub fn range<'a, Min: ?Sized + Ord, Max: ?Sized + Ord>(&'a self,
-                                                           min: Bound<&Min>,
-                                                           max: Bound<&Max>)
-                                                           -> Range<'a, T>
-        where T: Borrow<Min> + Borrow<Max>
+    #[stable(feature = "btree_range", since = "1.17.0")]
+    pub fn range<K: ?Sized, R>(&self, range: R) -> Range<T>
+        where K: Ord, T: Borrow<K>, R: RangeArgument<K>
     {
-        Range { iter: self.map.range(min, max) }
+        Range { iter: self.map.range(range) }
     }
 }
 
 impl<T: Ord> BTreeSet<T> {
-    /// Visits the values representing the difference, in ascending order.
+    /// Visits the values representing the difference,
+    /// i.e. the values that are in `self` but not in `other`,
+    /// in ascending order.
     ///
     /// # Examples
     ///
@@ -269,7 +314,9 @@ impl<T: Ord> BTreeSet<T> {
         }
     }
 
-    /// Visits the values representing the symmetric difference, in ascending order.
+    /// Visits the values representing the symmetric difference,
+    /// i.e. the values that are in `self` or in `other` but not in both,
+    /// in ascending order.
     ///
     /// # Examples
     ///
@@ -297,7 +344,9 @@ impl<T: Ord> BTreeSet<T> {
         }
     }
 
-    /// Visits the values representing the intersection, in ascending order.
+    /// Visits the values representing the intersection,
+    /// i.e. the values that are both in `self` and `other`,
+    /// in ascending order.
     ///
     /// # Examples
     ///
@@ -323,7 +372,9 @@ impl<T: Ord> BTreeSet<T> {
         }
     }
 
-    /// Visits the values representing the union, in ascending order.
+    /// Visits the values representing the union,
+    /// i.e. all the values in `self` or `other`, without duplicates,
+    /// in ascending order.
     ///
     /// # Examples
     ///
@@ -364,7 +415,7 @@ impl<T: Ord> BTreeSet<T> {
         self.map.len()
     }
 
-    /// Returns true if the set contains no elements.
+    /// Returns `true` if the set contains no elements.
     ///
     /// # Examples
     ///
@@ -434,7 +485,7 @@ impl<T: Ord> BTreeSet<T> {
         Recover::get(&self.map, value)
     }
 
-    /// Returns `true` if the set has no elements in common with `other`.
+    /// Returns `true` if `self` has no elements in common with `other`.
     /// This is equivalent to checking for an empty intersection.
     ///
     /// # Examples
@@ -456,7 +507,8 @@ impl<T: Ord> BTreeSet<T> {
         self.intersection(other).next().is_none()
     }
 
-    /// Returns `true` if the set is a subset of another.
+    /// Returns `true` if the set is a subset of another,
+    /// i.e. `other` contains at least all the values in `self`.
     ///
     /// # Examples
     ///
@@ -498,7 +550,8 @@ impl<T: Ord> BTreeSet<T> {
         true
     }
 
-    /// Returns `true` if the set is a superset of another.
+    /// Returns `true` if the set is a superset of another,
+    /// i.e. `self` contains at least all the values in `other`.
     ///
     /// # Examples
     ///

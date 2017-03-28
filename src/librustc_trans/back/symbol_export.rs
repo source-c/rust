@@ -11,6 +11,7 @@
 use context::SharedCrateContext;
 use monomorphize::Instance;
 use symbol_map::SymbolMap;
+use back::symbol_names::symbol_name;
 use util::nodemap::FxHashMap;
 use rustc::hir::def_id::{DefId, CrateNum, LOCAL_CRATE};
 use rustc::session::config;
@@ -48,7 +49,7 @@ impl ExportedSymbols {
             .exported_symbols()
             .iter()
             .map(|&node_id| {
-                scx.tcx().map.local_def_id(node_id)
+                scx.tcx().hir.local_def_id(node_id)
             })
             .map(|def_id| {
                 let name = symbol_for_def_id(scx, def_id, symbol_map);
@@ -64,7 +65,7 @@ impl ExportedSymbols {
 
         if let Some(id) = scx.sess().derive_registrar_fn.get() {
             let svh = &scx.link_meta().crate_hash;
-            let def_id = scx.tcx().map.local_def_id(id);
+            let def_id = scx.tcx().hir.local_def_id(id);
             let idx = def_id.index;
             let registrar = scx.sess().generate_derive_registrar_symbol(svh, idx);
             local_crate.push((registrar, SymbolExportLevel::C));
@@ -81,10 +82,24 @@ impl ExportedSymbols {
         for cnum in scx.sess().cstore.crates() {
             debug_assert!(cnum != LOCAL_CRATE);
 
+            // If this crate is a plugin and/or a custom derive crate, then
+            // we're not even going to link those in so we skip those crates.
             if scx.sess().cstore.plugin_registrar_fn(cnum).is_some() ||
                scx.sess().cstore.derive_registrar_fn(cnum).is_some() {
                 continue;
             }
+
+            // Check to see if this crate is a "special runtime crate". These
+            // crates, implementation details of the standard library, typically
+            // have a bunch of `pub extern` and `#[no_mangle]` functions as the
+            // ABI between them. We don't want their symbols to have a `C`
+            // export level, however, as they're just implementation details.
+            // Down below we'll hardwire all of the symbols to the `Rust` export
+            // level instead.
+            let special_runtime_crate =
+                scx.sess().cstore.is_allocator(cnum) ||
+                scx.sess().cstore.is_panic_runtime(cnum) ||
+                scx.sess().cstore.is_compiler_builtins(cnum);
 
             let crate_exports = scx
                 .sess()
@@ -92,8 +107,25 @@ impl ExportedSymbols {
                 .exported_symbols(cnum)
                 .iter()
                 .map(|&def_id| {
-                    let name = Instance::mono(scx, def_id).symbol_name(scx);
-                    let export_level = export_level(scx, def_id);
+                    let name = symbol_name(Instance::mono(scx.tcx(), def_id), scx);
+                    let export_level = if special_runtime_crate {
+                        // We can probably do better here by just ensuring that
+                        // it has hidden visibility rather than public
+                        // visibility, as this is primarily here to ensure it's
+                        // not stripped during LTO.
+                        //
+                        // In general though we won't link right if these
+                        // symbols are stripped, and LTO currently strips them.
+                        if name == "rust_eh_personality" ||
+                           name == "rust_eh_register_frames" ||
+                           name == "rust_eh_unregister_frames" {
+                            SymbolExportLevel::C
+                        } else {
+                            SymbolExportLevel::Rust
+                        }
+                    } else {
+                        export_level(scx, def_id)
+                    };
                     debug!("EXPORTED SYMBOL (re-export): {} ({:?})", name, export_level);
                     (name, export_level)
                 })
@@ -181,15 +213,15 @@ fn symbol_for_def_id<'a, 'tcx>(scx: &SharedCrateContext<'a, 'tcx>,
                                -> String {
     // Just try to look things up in the symbol map. If nothing's there, we
     // recompute.
-    if let Some(node_id) = scx.tcx().map.as_local_node_id(def_id) {
+    if let Some(node_id) = scx.tcx().hir.as_local_node_id(def_id) {
         if let Some(sym) = symbol_map.get(TransItem::Static(node_id)) {
             return sym.to_owned();
         }
     }
 
-    let instance = Instance::mono(scx, def_id);
+    let instance = Instance::mono(scx.tcx(), def_id);
 
     symbol_map.get(TransItem::Fn(instance))
               .map(str::to_owned)
-              .unwrap_or_else(|| instance.symbol_name(scx))
+              .unwrap_or_else(|| symbol_name(instance, scx))
 }
