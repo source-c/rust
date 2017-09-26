@@ -11,7 +11,7 @@
 use cmp::Ordering;
 
 use super::{Chain, Cycle, Cloned, Enumerate, Filter, FilterMap, FlatMap, Fuse};
-use super::{Inspect, Map, Peekable, Scan, Skip, SkipWhile, Take, TakeWhile, Rev};
+use super::{Inspect, Map, Peekable, Scan, Skip, SkipWhile, StepBy, Take, TakeWhile, Rev};
 use super::{Zip, Sum, Product};
 use super::{ChainState, FromIterator, ZipImpl};
 
@@ -119,7 +119,7 @@ pub trait Iterator {
     /// // exactly wouldn't be possible without executing filter().
     /// assert_eq!((0, Some(10)), iter.size_hint());
     ///
-    /// // Let's add one five more numbers with chain()
+    /// // Let's add five more numbers with chain()
     /// let iter = (0..10).filter(|x| x % 2 == 0).chain(15..20);
     ///
     /// // now both bounds are increased by five
@@ -130,9 +130,10 @@ pub trait Iterator {
     ///
     /// ```
     /// // an infinite iterator has no upper bound
+    /// // and the maximum possible lower bound
     /// let iter = 0..;
     ///
-    /// assert_eq!((0, None), iter.size_hint());
+    /// assert_eq!((usize::max_value(), None), iter.size_hint());
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -256,6 +257,39 @@ pub trait Iterator {
             n -= 1;
         }
         None
+    }
+
+    /// Creates an iterator starting at the same point, but stepping by
+    /// the given amount at each iteration.
+    ///
+    /// Note that it will always return the first element of the iterator,
+    /// regardless of the step given.
+    ///
+    /// # Panics
+    ///
+    /// The method will panic if the given step is `0`.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// #![feature(iterator_step_by)]
+    /// let a = [0, 1, 2, 3, 4, 5];
+    /// let mut iter = a.into_iter().step_by(2);
+    ///
+    /// assert_eq!(iter.next(), Some(&0));
+    /// assert_eq!(iter.next(), Some(&2));
+    /// assert_eq!(iter.next(), Some(&4));
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    #[inline]
+    #[unstable(feature = "iterator_step_by",
+               reason = "unstable replacement of Range::step_by",
+               issue = "27741")]
+    fn step_by(self, step: usize) -> StepBy<Self> where Self: Sized {
+        assert!(step != 0);
+        StepBy{iter: self, step: step - 1, first_take: true}
     }
 
     /// Takes two iterators and creates a new iterator over both in sequence.
@@ -448,6 +482,49 @@ pub trait Iterator {
         Map{iter: self, f: f}
     }
 
+    /// Calls a closure on each element of an iterator.
+    ///
+    /// This is equivalent to using a [`for`] loop on the iterator, although
+    /// `break` and `continue` are not possible from a closure.  It's generally
+    /// more idiomatic to use a `for` loop, but `for_each` may be more legible
+    /// when processing items at the end of longer iterator chains.  In some
+    /// cases `for_each` may also be faster than a loop, because it will use
+    /// internal iteration on adaptors like `Chain`.
+    ///
+    /// [`for`]: ../../book/first-edition/loops.html#for
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// use std::sync::mpsc::channel;
+    ///
+    /// let (tx, rx) = channel();
+    /// (0..5).map(|x| x * 2 + 1)
+    ///       .for_each(move |x| tx.send(x).unwrap());
+    ///
+    /// let v: Vec<_> =  rx.iter().collect();
+    /// assert_eq!(v, vec![1, 3, 5, 7, 9]);
+    /// ```
+    ///
+    /// For such a small example, a `for` loop may be cleaner, but `for_each`
+    /// might be preferable to keep a functional style with longer iterators:
+    ///
+    /// ```
+    /// (0..5).flat_map(|x| x * 100 .. x * 110)
+    ///       .enumerate()
+    ///       .filter(|&(i, x)| (i + x) % 3 == 0)
+    ///       .for_each(|(i, x)| println!("{}:{}", i, x));
+    /// ```
+    #[inline]
+    #[stable(feature = "iterator_for_each", since = "1.22.0")]
+    fn for_each<F>(self, mut f: F) where
+        Self: Sized, F: FnMut(Self::Item),
+    {
+        self.fold((), move |(), item| f(item));
+    }
+
     /// Creates an iterator which uses a closure to determine if an element
     /// should be yielded.
     ///
@@ -524,7 +601,7 @@ pub trait Iterator {
     /// closure returns [`None`], it will try again, and call the closure on the
     /// next element, seeing if it will return [`Some`].
     ///
-    /// Why `filter_map` and not just [`filter`].[`map`]? The key is in this
+    /// Why `filter_map` and not just [`filter`] and [`map`]? The key is in this
     /// part:
     ///
     /// [`filter`]: #method.filter
@@ -556,15 +633,14 @@ pub trait Iterator {
     /// let a = ["1", "2", "lol"];
     ///
     /// let mut iter = a.iter()
-    ///                 .map(|s| s.parse().ok())
-    ///                 .filter(|s| s.is_some());
+    ///                 .map(|s| s.parse())
+    ///                 .filter(|s| s.is_ok())
+    ///                 .map(|s| s.unwrap());
     ///
-    /// assert_eq!(iter.next(), Some(Some(1)));
-    /// assert_eq!(iter.next(), Some(Some(2)));
+    /// assert_eq!(iter.next(), Some(1));
+    /// assert_eq!(iter.next(), Some(2));
     /// assert_eq!(iter.next(), None);
     /// ```
-    ///
-    /// There's an extra layer of [`Some`] in there.
     ///
     /// [`Option<T>`]: ../../std/option/enum.Option.html
     /// [`Some`]: ../../std/option/enum.Option.html#variant.Some
@@ -629,8 +705,9 @@ pub trait Iterator {
     ///
     /// Note that the underlying iterator is still advanced when [`peek`] is
     /// called for the first time: In order to retrieve the next element,
-    /// [`next`] is called on the underlying iterator, hence any side effects of
-    /// the [`next`] method will occur.
+    /// [`next`] is called on the underlying iterator, hence any side effects (i.e.
+    /// anything other than fetching the next value) of the [`next`] method
+    /// will occur.
     ///
     /// [`peek`]: struct.Peekable.html#method.peek
     /// [`next`]: ../../std/iter/trait.Iterator.html#tymethod.next
@@ -1166,7 +1243,7 @@ pub trait Iterator {
     /// assert_eq!(vec![2, 4, 6], doubled);
     /// ```
     ///
-    /// Because `collect()` cares about what you're collecting into, you can
+    /// Because `collect()` only cares about what you're collecting into, you can
     /// still use a partial type hint, `_`, with the turbofish:
     ///
     /// ```
@@ -1260,7 +1337,7 @@ pub trait Iterator {
         (left, right)
     }
 
-    /// An iterator adaptor that applies a function, producing a single, final value.
+    /// An iterator method that applies a function, producing a single, final value.
     ///
     /// `fold()` takes two arguments: an initial value, and a closure with two
     /// arguments: an 'accumulator', and an element. The closure returns the value that
@@ -1532,14 +1609,18 @@ pub trait Iterator {
     /// Stopping at the first `true`:
     ///
     /// ```
-    /// let a = [1, 2, 3];
+    /// let a = [1, 2, 3, 4];
     ///
     /// let mut iter = a.iter();
     ///
-    /// assert_eq!(iter.position(|&x| x == 2), Some(1));
+    /// assert_eq!(iter.position(|&x| x >= 2), Some(1));
     ///
     /// // we can still use `iter`, as there are more elements.
     /// assert_eq!(iter.next(), Some(&3));
+    ///
+    /// // The returned index depends on iterator state
+    /// assert_eq!(iter.position(|&x| x == 4), Some(0));
+    ///
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -2160,16 +2241,16 @@ pub trait Iterator {
     }
 }
 
-/// Select an element from an iterator based on the given projection
+/// Select an element from an iterator based on the given "projection"
 /// and "comparison" function.
 ///
 /// This is an idiosyncratic helper to try to factor out the
 /// commonalities of {max,min}{,_by}. In particular, this avoids
 /// having to implement optimizations several times.
 #[inline]
-fn select_fold1<I,B, FProj, FCmp>(mut it: I,
-                                  mut f_proj: FProj,
-                                  mut f_cmp: FCmp) -> Option<(B, I::Item)>
+fn select_fold1<I, B, FProj, FCmp>(mut it: I,
+                                   mut f_proj: FProj,
+                                   mut f_cmp: FCmp) -> Option<(B, I::Item)>
     where I: Iterator,
           FProj: FnMut(&I::Item) -> B,
           FCmp: FnMut(&B, &I::Item, &B, &I::Item) -> bool
@@ -2182,7 +2263,7 @@ fn select_fold1<I,B, FProj, FCmp>(mut it: I,
 
         for x in it {
             let x_p = f_proj(&x);
-            if f_cmp(&sel_p,  &sel, &x_p, &x) {
+            if f_cmp(&sel_p, &sel, &x_p, &x) {
                 sel = x;
                 sel_p = x_p;
             }

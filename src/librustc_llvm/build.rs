@@ -17,30 +17,24 @@ use std::path::{PathBuf, Path};
 
 use build_helper::output;
 
-fn detect_llvm_link(llvm_config: &Path) -> (&'static str, Option<&'static str>) {
-    let mut version_cmd = Command::new(llvm_config);
-    version_cmd.arg("--version");
-    let version_output = output(&mut version_cmd);
-    let mut parts = version_output.split('.').take(2)
-        .filter_map(|s| s.parse::<u32>().ok());
-    if let (Some(major), Some(minor)) = (parts.next(), parts.next()) {
-        if major > 3 || (major == 3 && minor >= 9) {
-            // Force the link mode we want, preferring static by default, but
-            // possibly overridden by `configure --enable-llvm-link-shared`.
-            if env::var_os("LLVM_LINK_SHARED").is_some() {
-                return ("dylib", Some("--link-shared"));
-            } else {
-                return ("static", Some("--link-static"));
-            }
-        } else if major == 3 && minor == 8 {
-            // Find out LLVM's default linking mode.
-            let mut mode_cmd = Command::new(llvm_config);
-            mode_cmd.arg("--shared-mode");
-            if output(&mut mode_cmd).trim() == "shared" {
-                return ("dylib", None);
-            } else {
-                return ("static", None);
-            }
+fn detect_llvm_link(major: u32, minor: u32, llvm_config: &Path)
+    -> (&'static str, Option<&'static str>) {
+    if major > 3 || (major == 3 && minor >= 9) {
+        // Force the link mode we want, preferring static by default, but
+        // possibly overridden by `configure --enable-llvm-link-shared`.
+        if env::var_os("LLVM_LINK_SHARED").is_some() {
+            return ("dylib", Some("--link-shared"));
+        } else {
+            return ("static", Some("--link-static"));
+        }
+    } else if major == 3 && minor == 8 {
+        // Find out LLVM's default linking mode.
+        let mut mode_cmd = Command::new(llvm_config);
+        mode_cmd.arg("--shared-mode");
+        if output(&mut mode_cmd).trim() == "shared" {
+            return ("dylib", None);
+        } else {
+            return ("static", None);
         }
     }
     ("static", None)
@@ -66,6 +60,7 @@ fn main() {
         });
 
     println!("cargo:rerun-if-changed={}", llvm_config.display());
+    println!("cargo:rerun-if-env-changed=LLVM_CONFIG");
 
     // Test whether we're cross-compiling LLVM. This is a pretty rare case
     // currently where we're producing an LLVM for a different platform than
@@ -92,9 +87,25 @@ fn main() {
     let host = env::var("HOST").expect("HOST was not set");
     let is_crossed = target != host;
 
-    let optional_components =
-        ["x86", "arm", "aarch64", "mips", "powerpc", "pnacl", "systemz", "jsbackend", "msp430",
-         "sparc", "nvptx"];
+    let mut optional_components =
+        vec!["x86", "arm", "aarch64", "mips", "powerpc", "pnacl",
+             "systemz", "jsbackend", "webassembly", "msp430", "sparc", "nvptx"];
+
+    let mut version_cmd = Command::new(&llvm_config);
+    version_cmd.arg("--version");
+    let version_output = output(&mut version_cmd);
+    let mut parts = version_output.split('.').take(2)
+        .filter_map(|s| s.parse::<u32>().ok());
+    let (major, minor) =
+        if let (Some(major), Some(minor)) = (parts.next(), parts.next()) {
+            (major, minor)
+        } else {
+            (3, 7)
+        };
+
+    if major > 3 {
+        optional_components.push("hexagon");
+    }
 
     // FIXME: surely we don't need all these components, right? Stuff like mcjit
     //        or interpreter the compiler itself never uses.
@@ -125,7 +136,8 @@ fn main() {
     let mut cmd = Command::new(&llvm_config);
     cmd.arg("--cxxflags");
     let cxxflags = output(&mut cmd);
-    let mut cfg = gcc::Config::new();
+    let mut cfg = gcc::Build::new();
+    cfg.warnings(false);
     for flag in cxxflags.split_whitespace() {
         // Ignore flags like `-m64` when we're doing a cross build
         if is_crossed && flag.starts_with("-m") {
@@ -140,7 +152,7 @@ fn main() {
         cfg.flag(flag);
     }
 
-    for component in &components[..] {
+    for component in &components {
         let mut flag = String::from("-DLLVM_COMPONENT_");
         flag.push_str(&component.to_uppercase());
         cfg.flag(&flag);
@@ -158,7 +170,7 @@ fn main() {
        .cpp_link_stdlib(None) // we handle this below
        .compile("librustllvm.a");
 
-    let (llvm_kind, llvm_link_arg) = detect_llvm_link(&llvm_config);
+    let (llvm_kind, llvm_link_arg) = detect_llvm_link(major, minor, &llvm_config);
 
     // Link in all LLVM libraries, if we're uwring the "wrong" llvm-config then
     // we don't pick up system libs because unfortunately they're for the host
@@ -173,7 +185,7 @@ fn main() {
     if !is_crossed {
         cmd.arg("--system-libs");
     }
-    cmd.args(&components[..]);
+    cmd.args(&components);
 
     for lib in output(&mut cmd).split_whitespace() {
         let name = if lib.starts_with("-l") {
@@ -217,6 +229,9 @@ fn main() {
     // hack around this by replacing the host triple with the target and pray
     // that those -L directories are the same!
     let mut cmd = Command::new(&llvm_config);
+    if let Some(link_arg) = llvm_link_arg {
+        cmd.arg(link_arg);
+    }
     cmd.arg("--ldflags");
     for lib in output(&mut cmd).split_whitespace() {
         if lib.starts_with("-LIBPATH:") {
@@ -258,5 +273,12 @@ fn main() {
         } else {
             println!("cargo:rustc-link-lib={}", stdcppname);
         }
+    }
+
+    // LLVM requires symbols from this library, but apparently they're not printed
+    // during llvm-config?
+    if target.contains("windows-gnu") {
+        println!("cargo:rustc-link-lib=static-nobundle=gcc_s");
+        println!("cargo:rustc-link-lib=static-nobundle=pthread");
     }
 }

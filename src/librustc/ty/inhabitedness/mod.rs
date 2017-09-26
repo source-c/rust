@@ -171,7 +171,7 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
         match self.sty {
             TyAdt(def, substs) => {
                 {
-                    let mut substs_set = visited.entry(def.did).or_insert(FxHashSet::default());
+                    let substs_set = visited.entry(def.did).or_insert(FxHashSet::default());
                     if !substs_set.insert(substs) {
                         // We are already calculating the inhabitedness of this type.
                         // The type must contain a reference to itself. Break the
@@ -193,7 +193,7 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
                     }
                 }
                 let ret = def.uninhabited_from(visited, tcx, substs);
-                let mut substs_set = visited.get_mut(&def.did).unwrap();
+                let substs_set = visited.get_mut(&def.did).unwrap();
                 substs_set.remove(substs);
                 ret
             },
@@ -205,7 +205,7 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
                 }))
             },
             TyArray(ty, len) => {
-                if len == 0 {
+                if len.val.to_const_int().and_then(|i| i.to_u64()) == Some(0) {
                     DefIdForest::empty()
                 } else {
                     ty.uninhabited_from(visited, tcx)

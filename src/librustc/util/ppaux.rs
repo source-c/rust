@@ -10,12 +10,14 @@
 
 use hir::def_id::DefId;
 use hir::map::definitions::DefPathData;
+use middle::const_val::ConstVal;
+use middle::region::{self, BlockRemainder};
 use ty::subst::{self, Subst};
 use ty::{BrAnon, BrEnv, BrFresh, BrNamed};
 use ty::{TyBool, TyChar, TyAdt};
 use ty::{TyError, TyStr, TyArray, TySlice, TyFloat, TyFnDef, TyFnPtr};
 use ty::{TyParam, TyRawPtr, TyRef, TyNever, TyTuple};
-use ty::{TyClosure, TyProjection, TyAnon};
+use ty::{TyClosure, TyGenerator, TyProjection, TyAnon};
 use ty::{TyDynamic, TyInt, TyUint, TyInfer};
 use ty::{self, Ty, TyCtxt, TypeFoldable};
 
@@ -23,6 +25,8 @@ use std::cell::Cell;
 use std::fmt;
 use std::usize;
 
+use rustc_const_math::ConstInt;
+use rustc_data_structures::indexed_vec::Idx;
 use syntax::abi::Abi;
 use syntax::ast::CRATE_NODE_ID;
 use syntax::symbol::Symbol;
@@ -30,6 +34,10 @@ use hir;
 
 pub fn verbose() -> bool {
     ty::tls::with(|tcx| tcx.sess.verbose())
+}
+
+pub fn identify_regions() -> bool {
+    ty::tls::with(|tcx| tcx.sess.opts.debugging_opts.identify_regions)
 }
 
 fn fn_sig(f: &mut fmt::Formatter,
@@ -104,7 +112,7 @@ pub fn parameterized(f: &mut fmt::Formatter,
                 }
             }
         }
-        let mut generics = tcx.item_generics(item_def_id);
+        let mut generics = tcx.generics_of(item_def_id);
         let mut path_def_id = did;
         verbose = tcx.sess.verbose();
         has_self = generics.has_self;
@@ -114,7 +122,7 @@ pub fn parameterized(f: &mut fmt::Formatter,
             // Methods.
             assert!(is_value_path);
             child_types = generics.types.len();
-            generics = tcx.item_generics(def_id);
+            generics = tcx.generics_of(def_id);
             num_regions = generics.regions.len();
             num_types = generics.types.len();
 
@@ -144,7 +152,7 @@ pub fn parameterized(f: &mut fmt::Formatter,
                         if !def.has_default {
                             break;
                         }
-                        if tcx.item_type(def.def_id).subst(tcx, substs) != actual {
+                        if tcx.type_of(def.def_id).subst(tcx, substs) != actual {
                             break;
                         }
                         num_supplied_defaults += 1;
@@ -154,7 +162,7 @@ pub fn parameterized(f: &mut fmt::Formatter,
         }
 
         write!(f, "{}", tcx.item_path_str(path_def_id))?;
-        Ok(tcx.lang_items.fn_trait_kind(path_def_id))
+        Ok(tcx.lang_items().fn_trait_kind(path_def_id))
     })?;
 
     if !verbose && fn_trait_kind.is_some() && projections.len() == 1 {
@@ -177,12 +185,12 @@ pub fn parameterized(f: &mut fmt::Formatter,
     let print_regions = |f: &mut fmt::Formatter, start: &str, skip, count| {
         // Don't print any regions if they're all erased.
         let regions = || substs.regions().skip(skip).take(count);
-        if regions().all(|r: &ty::Region| *r == ty::ReErased) {
+        if regions().all(|r: ty::Region| *r == ty::ReErased) {
             return Ok(());
         }
 
         for region in regions() {
-            let region: &ty::Region = region;
+            let region: ty::Region = region;
             start_or_continue(f, start, ", ")?;
             if verbose {
                 write!(f, "{:?}", region)?;
@@ -216,9 +224,11 @@ pub fn parameterized(f: &mut fmt::Formatter,
 
     for projection in projections {
         start_or_continue(f, "<", ", ")?;
-        write!(f, "{}={}",
-               projection.projection_ty.item_name,
-               projection.ty)?;
+        ty::tls::with(|tcx|
+            write!(f, "{}={}",
+            tcx.associated_item(projection.projection_ty.item_def_id).name,
+            projection.ty)
+        )?;
     }
 
     start_or_continue(f, "", ">")?;
@@ -361,12 +371,6 @@ impl<'tcx> fmt::Display for ty::TypeAndMut<'tcx> {
     }
 }
 
-impl<'tcx> fmt::Debug for ty::ItemSubsts<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ItemSubsts({:?})", self.substs)
-    }
-}
-
 impl<'tcx> fmt::Debug for ty::TraitRef<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // when printing out the debug representation, we don't need
@@ -416,6 +420,7 @@ impl<'tcx> fmt::Debug for ty::Predicate<'tcx> {
         match *self {
             ty::Predicate::Trait(ref a) => write!(f, "{:?}", a),
             ty::Predicate::Equate(ref pair) => write!(f, "{:?}", pair),
+            ty::Predicate::Subtype(ref pair) => write!(f, "{:?}", pair),
             ty::Predicate::RegionOutlives(ref pair) => write!(f, "{:?}", pair),
             ty::Predicate::TypeOutlives(ref pair) => write!(f, "{:?}", pair),
             ty::Predicate::Projection(ref pair) => write!(f, "{:?}", pair),
@@ -425,6 +430,9 @@ impl<'tcx> fmt::Debug for ty::Predicate<'tcx> {
             }
             ty::Predicate::ClosureKind(closure_def_id, kind) => {
                 write!(f, "ClosureKind({:?}, {:?})", closure_def_id, kind)
+            }
+            ty::Predicate::ConstEvaluatable(def_id, substs) => {
+                write!(f, "ConstEvaluatable({:?}, {:?})", def_id, substs)
             }
         }
     }
@@ -457,7 +465,7 @@ impl fmt::Debug for ty::BoundRegion {
     }
 }
 
-impl fmt::Debug for ty::Region {
+impl fmt::Debug for ty::RegionKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             ty::ReEarlyBound(ref data) => {
@@ -503,19 +511,7 @@ impl<'tcx> fmt::Debug for ty::ClosureUpvar<'tcx> {
     }
 }
 
-impl<'tcx> fmt::Debug for ty::ParameterEnvironment<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ParameterEnvironment(\
-            free_substs={:?}, \
-            implicit_region_bound={:?}, \
-            caller_bounds={:?})",
-            self.free_substs,
-            self.implicit_region_bound,
-            self.caller_bounds)
-    }
-}
-
-impl fmt::Display for ty::Region {
+impl fmt::Display for ty::RegionKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if verbose() {
             return write!(f, "{:?}", *self);
@@ -533,6 +529,23 @@ impl fmt::Display for ty::Region {
             ty::ReFree(ty::FreeRegion { bound_region: br, .. }) |
             ty::ReSkolemized(_, br) => {
                 write!(f, "{}", br)
+            }
+            ty::ReScope(scope) if identify_regions() => {
+                match scope.data() {
+                    region::ScopeData::Node(id) =>
+                        write!(f, "'{}s", id.as_usize()),
+                    region::ScopeData::CallSite(id) =>
+                        write!(f, "'{}cs", id.as_usize()),
+                    region::ScopeData::Arguments(id) =>
+                        write!(f, "'{}as", id.as_usize()),
+                    region::ScopeData::Destruction(id) =>
+                        write!(f, "'{}ds", id.as_usize()),
+                    region::ScopeData::Remainder(BlockRemainder { block, first_statement_index }) =>
+                        write!(f, "'{}_{}rs", block.as_usize(), first_statement_index.index()),
+                }
+            }
+            ty::ReVar(region_vid) if identify_regions() => {
+                write!(f, "'{}rv", region_vid.index)
             }
             ty::ReScope(_) |
             ty::ReVar(_) |
@@ -664,6 +677,12 @@ impl<'tcx> fmt::Display for ty::Binder<ty::TraitRef<'tcx>> {
     }
 }
 
+impl<'tcx> fmt::Display for ty::Binder<ty::FnSig<'tcx>> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        ty::tls::with(|tcx| in_binder(f, tcx, self, tcx.lift(self)))
+    }
+}
+
 impl<'tcx> fmt::Display for ty::Binder<ty::TraitPredicate<'tcx>> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         ty::tls::with(|tcx| in_binder(f, tcx, self, tcx.lift(self)))
@@ -676,20 +695,26 @@ impl<'tcx> fmt::Display for ty::Binder<ty::EquatePredicate<'tcx>> {
     }
 }
 
+impl<'tcx> fmt::Display for ty::Binder<ty::SubtypePredicate<'tcx>> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        ty::tls::with(|tcx| in_binder(f, tcx, self, tcx.lift(self)))
+    }
+}
+
 impl<'tcx> fmt::Display for ty::Binder<ty::ProjectionPredicate<'tcx>> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         ty::tls::with(|tcx| in_binder(f, tcx, self, tcx.lift(self)))
     }
 }
 
-impl<'tcx> fmt::Display for ty::Binder<ty::OutlivesPredicate<Ty<'tcx>, &'tcx ty::Region>> {
+impl<'tcx> fmt::Display for ty::Binder<ty::OutlivesPredicate<Ty<'tcx>, ty::Region<'tcx>>> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         ty::tls::with(|tcx| in_binder(f, tcx, self, tcx.lift(self)))
     }
 }
 
-impl<'tcx> fmt::Display for ty::Binder<ty::OutlivesPredicate<&'tcx ty::Region,
-                                                             &'tcx ty::Region>> {
+impl<'tcx> fmt::Display for ty::Binder<ty::OutlivesPredicate<ty::Region<'tcx>,
+                                                             ty::Region<'tcx>>> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         ty::tls::with(|tcx| in_binder(f, tcx, self, tcx.lift(self)))
     }
@@ -698,6 +723,12 @@ impl<'tcx> fmt::Display for ty::Binder<ty::OutlivesPredicate<&'tcx ty::Region,
 impl<'tcx> fmt::Display for ty::TraitRef<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         parameterized(f, self.substs, self.def_id, &[])
+    }
+}
+
+impl<'tcx> fmt::Display for ty::GeneratorInterior<'tcx> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.witness.fmt(f)
     }
 }
 
@@ -739,8 +770,14 @@ impl<'tcx> fmt::Display for ty::TypeVariants<'tcx> {
                 }
                 write!(f, ")")
             }
-            TyFnDef(def_id, substs, ref bare_fn) => {
-                write!(f, "{} {{", bare_fn.0)?;
+            TyFnDef(def_id, substs) => {
+                ty::tls::with(|tcx| {
+                    let mut sig = tcx.fn_sig(def_id);
+                    if let Some(substs) = tcx.lift(&substs) {
+                        sig = sig.subst(tcx, substs);
+                    }
+                    write!(f, "{} {{", sig.0)
+                })?;
                 parameterized(f, substs, def_id, &[])?;
                 write!(f, "}}")
             }
@@ -765,11 +802,11 @@ impl<'tcx> fmt::Display for ty::TypeVariants<'tcx> {
                 ty::tls::with(|tcx| {
                     // Grab the "TraitA + TraitB" from `impl TraitA + TraitB`,
                     // by looking up the projections associated with the def_id.
-                    let item_predicates = tcx.item_predicates(def_id);
+                    let predicates_of = tcx.predicates_of(def_id);
                     let substs = tcx.lift(&substs).unwrap_or_else(|| {
                         tcx.intern_substs(&[])
                     });
-                    let bounds = item_predicates.instantiate(tcx, substs);
+                    let bounds = predicates_of.instantiate(tcx, substs);
 
                     let mut first = true;
                     let mut is_sized = false;
@@ -777,7 +814,7 @@ impl<'tcx> fmt::Display for ty::TypeVariants<'tcx> {
                     for predicate in bounds.predicates {
                         if let Some(trait_ref) = predicate.to_opt_poly_trait_ref() {
                             // Don't print +Sized, but rather +?Sized if absent.
-                            if Some(trait_ref.def_id()) == tcx.lang_items.sized_trait() {
+                            if Some(trait_ref.def_id()) == tcx.lang_items().sized_trait() {
                                 is_sized = true;
                                 continue;
                             }
@@ -793,21 +830,56 @@ impl<'tcx> fmt::Display for ty::TypeVariants<'tcx> {
                 })
             }
             TyStr => write!(f, "str"),
-            TyClosure(did, substs) => ty::tls::with(|tcx| {
+            TyGenerator(did, substs, interior) => ty::tls::with(|tcx| {
                 let upvar_tys = substs.upvar_tys(did, tcx);
-                write!(f, "[closure")?;
+                write!(f, "[generator")?;
 
                 if let Some(node_id) = tcx.hir.as_local_node_id(did) {
                     write!(f, "@{:?}", tcx.hir.span(node_id))?;
                     let mut sep = " ";
                     tcx.with_freevars(node_id, |freevars| {
                         for (freevar, upvar_ty) in freevars.iter().zip(upvar_tys) {
-                            let def_id = freevar.def.def_id();
-                            let node_id = tcx.hir.as_local_node_id(def_id).unwrap();
                             write!(f,
                                         "{}{}:{}",
                                         sep,
-                                        tcx.local_var_name_str(node_id),
+                                        tcx.hir.name(freevar.var_id()),
+                                        upvar_ty)?;
+                            sep = ", ";
+                        }
+                        Ok(())
+                    })?
+                } else {
+                    // cross-crate closure types should only be
+                    // visible in trans bug reports, I imagine.
+                    write!(f, "@{:?}", did)?;
+                    let mut sep = " ";
+                    for (index, upvar_ty) in upvar_tys.enumerate() {
+                        write!(f, "{}{}:{}", sep, index, upvar_ty)?;
+                        sep = ", ";
+                    }
+                }
+
+                write!(f, " {}", interior)?;
+
+                write!(f, "]")
+            }),
+            TyClosure(did, substs) => ty::tls::with(|tcx| {
+                let upvar_tys = substs.upvar_tys(did, tcx);
+                write!(f, "[closure")?;
+
+                if let Some(node_id) = tcx.hir.as_local_node_id(did) {
+                    if tcx.sess.opts.debugging_opts.span_free_formats {
+                        write!(f, "@{:?}", node_id)?;
+                    } else {
+                        write!(f, "@{:?}", tcx.hir.span(node_id))?;
+                    }
+                    let mut sep = " ";
+                    tcx.with_freevars(node_id, |freevars| {
+                        for (freevar, upvar_ty) in freevars.iter().zip(upvar_tys) {
+                            write!(f,
+                                        "{}{}:{}",
+                                        sep,
+                                        tcx.hir.name(freevar.var_id()),
                                         upvar_ty)?;
                             sep = ", ";
                         }
@@ -826,7 +898,21 @@ impl<'tcx> fmt::Display for ty::TypeVariants<'tcx> {
 
                 write!(f, "]")
             }),
-            TyArray(ty, sz) => write!(f, "[{}; {}]",  ty, sz),
+            TyArray(ty, sz) => {
+                write!(f, "[{}; ", ty)?;
+                match sz.val {
+                    ConstVal::Integral(ConstInt::Usize(sz)) => {
+                        write!(f, "{}", sz)?;
+                    }
+                    ConstVal::Unevaluated(_def_id, substs) => {
+                        write!(f, "<unevaluated{:?}>", &substs[..])?;
+                    }
+                    _ => {
+                        write!(f, "{:?}", sz)?;
+                    }
+                }
+                write!(f, "]")
+            }
             TySlice(ty) => write!(f, "[{}]",  ty)
         }
     }
@@ -840,9 +926,9 @@ impl<'tcx> fmt::Display for ty::TyS<'tcx> {
 
 impl fmt::Debug for ty::UpvarId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "UpvarId({};`{}`;{})",
+        write!(f, "UpvarId({:?};`{}`;{:?})",
                self.var_id,
-               ty::tls::with(|tcx| tcx.local_var_name_str(self.var_id)),
+               ty::tls::with(|tcx| tcx.hir.name(tcx.hir.hir_to_node_id(self.var_id))),
                self.closure_expr_id)
     }
 }
@@ -897,6 +983,12 @@ impl<'tcx> fmt::Display for ty::EquatePredicate<'tcx> {
     }
 }
 
+impl<'tcx> fmt::Display for ty::SubtypePredicate<'tcx> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} <: {}", self.a, self.b)
+    }
+}
+
 impl<'tcx> fmt::Debug for ty::TraitPredicate<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "TraitPredicate({:?})",
@@ -928,9 +1020,15 @@ impl<'tcx> fmt::Display for ty::ProjectionPredicate<'tcx> {
 
 impl<'tcx> fmt::Display for ty::ProjectionTy<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // FIXME(tschottdorf): use something like
+        //   parameterized(f, self.substs, self.item_def_id, &[])
+        // (which currently ICEs).
+        let (trait_ref, item_name) = ty::tls::with(|tcx|
+            (self.trait_ref(tcx), tcx.associated_item(self.item_def_id).name)
+        );
         write!(f, "{:?}::{}",
-               self.trait_ref,
-               self.item_name)
+               trait_ref,
+               item_name)
     }
 }
 
@@ -949,6 +1047,7 @@ impl<'tcx> fmt::Display for ty::Predicate<'tcx> {
         match *self {
             ty::Predicate::Trait(ref data) => write!(f, "{}", data),
             ty::Predicate::Equate(ref predicate) => write!(f, "{}", predicate),
+            ty::Predicate::Subtype(ref predicate) => write!(f, "{}", predicate),
             ty::Predicate::RegionOutlives(ref predicate) => write!(f, "{}", predicate),
             ty::Predicate::TypeOutlives(ref predicate) => write!(f, "{}", predicate),
             ty::Predicate::Projection(ref predicate) => write!(f, "{}", predicate),
@@ -962,6 +1061,11 @@ impl<'tcx> fmt::Display for ty::Predicate<'tcx> {
                     write!(f, "the closure `{}` implements the trait `{}`",
                            tcx.item_path_str(closure_def_id), kind)
                 }),
+            ty::Predicate::ConstEvaluatable(def_id, substs) => {
+                write!(f, "the constant `")?;
+                parameterized(f, substs, def_id, &[])?;
+                write!(f, "` can be evaluated")
+            }
         }
     }
 }

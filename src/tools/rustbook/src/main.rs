@@ -13,13 +13,13 @@ extern crate mdbook;
 extern crate clap;
 
 use std::env;
-use std::error::Error;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{App, ArgMatches, SubCommand, AppSettings};
 
 use mdbook::MDBook;
+use mdbook::errors::Result;
 
 fn main() {
     let d_message = "-d, --dest-dir=[dest-dir]
@@ -41,7 +41,6 @@ fn main() {
     // Check which subcomamnd the user ran...
     let res = match matches.subcommand() {
         ("build", Some(sub_matches)) => build(sub_matches),
-        ("test", Some(sub_matches)) => test(sub_matches),
         (_, _) => unreachable!(),
     };
 
@@ -50,27 +49,17 @@ fn main() {
         ::std::process::exit(101);
     }
 }
-
 // Build command implementation
-fn build(args: &ArgMatches) -> Result<(), Box<Error>> {
+pub fn build(args: &ArgMatches) -> Result<()> {
     let book_dir = get_book_dir(args);
-    let book = MDBook::new(&book_dir).read_config();
+    let book = MDBook::new(&book_dir).read_config()?;
 
     let mut book = match args.value_of("dest-dir") {
-        Some(dest_dir) => book.set_dest(Path::new(dest_dir)),
-        None => book
+        Some(dest_dir) => book.with_destination(dest_dir),
+        None => book,
     };
 
-    try!(book.build());
-
-    Ok(())
-}
-
-fn test(args: &ArgMatches) -> Result<(), Box<Error>> {
-    let book_dir = get_book_dir(args);
-    let mut book = MDBook::new(&book_dir).read_config();
-
-    try!(book.test());
+    book.build()?;
 
     Ok(())
 }

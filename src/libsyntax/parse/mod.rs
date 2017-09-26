@@ -11,8 +11,8 @@
 //! The main parser interface
 
 use ast::{self, CrateConfig};
-use codemap::CodeMap;
-use syntax_pos::{self, Span, FileMap};
+use codemap::{CodeMap, FilePathMapping};
+use syntax_pos::{self, Span, FileMap, NO_EXPANSION};
 use errors::{Handler, ColorConfig, DiagnosticBuilder};
 use feature_gate::UnstableFeatures;
 use parse::parser::Parser;
@@ -53,8 +53,8 @@ pub struct ParseSess {
 }
 
 impl ParseSess {
-    pub fn new() -> Self {
-        let cm = Rc::new(CodeMap::new());
+    pub fn new(file_path_mapping: FilePathMapping) -> Self {
+        let cm = Rc::new(CodeMap::new(file_path_mapping));
         let handler = Handler::with_tty_emitter(ColorConfig::Auto,
                                                 true,
                                                 false,
@@ -69,7 +69,7 @@ impl ParseSess {
             config: HashSet::new(),
             missing_fragment_specifiers: RefCell::new(HashSet::new()),
             included_mod_stack: RefCell::new(vec![]),
-            code_map: code_map
+            code_map,
         }
     }
 
@@ -107,49 +107,52 @@ pub fn parse_crate_attrs_from_file<'a>(input: &Path, sess: &'a ParseSess)
     parser.parse_inner_attributes()
 }
 
-pub fn parse_crate_from_source_str<'a>(name: String, source: String, sess: &'a ParseSess)
-                                       -> PResult<'a, ast::Crate> {
+pub fn parse_crate_from_source_str(name: String, source: String, sess: &ParseSess)
+                                       -> PResult<ast::Crate> {
     new_parser_from_source_str(sess, name, source).parse_crate_mod()
 }
 
-pub fn parse_crate_attrs_from_source_str<'a>(name: String, source: String, sess: &'a ParseSess)
-                                             -> PResult<'a, Vec<ast::Attribute>> {
+pub fn parse_crate_attrs_from_source_str(name: String, source: String, sess: &ParseSess)
+                                             -> PResult<Vec<ast::Attribute>> {
     new_parser_from_source_str(sess, name, source).parse_inner_attributes()
 }
 
-pub fn parse_expr_from_source_str<'a>(name: String, source: String, sess: &'a ParseSess)
-                                      -> PResult<'a, P<ast::Expr>> {
+pub fn parse_expr_from_source_str(name: String, source: String, sess: &ParseSess)
+                                      -> PResult<P<ast::Expr>> {
     new_parser_from_source_str(sess, name, source).parse_expr()
 }
 
 /// Parses an item.
 ///
-/// Returns `Ok(Some(item))` when successful, `Ok(None)` when no item was found, and`Err`
+/// Returns `Ok(Some(item))` when successful, `Ok(None)` when no item was found, and `Err`
 /// when a syntax error occurred.
-pub fn parse_item_from_source_str<'a>(name: String, source: String, sess: &'a ParseSess)
-                                      -> PResult<'a, Option<P<ast::Item>>> {
+pub fn parse_item_from_source_str(name: String, source: String, sess: &ParseSess)
+                                      -> PResult<Option<P<ast::Item>>> {
     new_parser_from_source_str(sess, name, source).parse_item()
 }
 
-pub fn parse_meta_from_source_str<'a>(name: String, source: String, sess: &'a ParseSess)
-                                      -> PResult<'a, ast::MetaItem> {
+pub fn parse_meta_from_source_str(name: String, source: String, sess: &ParseSess)
+                                      -> PResult<ast::MetaItem> {
     new_parser_from_source_str(sess, name, source).parse_meta_item()
 }
 
-pub fn parse_stmt_from_source_str<'a>(name: String, source: String, sess: &'a ParseSess)
-                                      -> PResult<'a, Option<ast::Stmt>> {
+pub fn parse_stmt_from_source_str(name: String, source: String, sess: &ParseSess)
+                                      -> PResult<Option<ast::Stmt>> {
     new_parser_from_source_str(sess, name, source).parse_stmt()
 }
 
-pub fn parse_stream_from_source_str<'a>(name: String, source: String, sess: &'a ParseSess)
-                                        -> TokenStream {
-    filemap_to_stream(sess, sess.codemap().new_filemap(name, None, source))
+pub fn parse_stream_from_source_str(name: String, source: String, sess: &ParseSess,
+                                    override_span: Option<Span>)
+                                    -> TokenStream {
+    filemap_to_stream(sess, sess.codemap().new_filemap(name, source), override_span)
 }
 
 // Create a new parser from a source string
-pub fn new_parser_from_source_str<'a>(sess: &'a ParseSess, name: String, source: String)
-                                      -> Parser<'a> {
-    filemap_to_parser(sess, sess.codemap().new_filemap(name, None, source))
+pub fn new_parser_from_source_str(sess: &ParseSess, name: String, source: String)
+                                      -> Parser {
+    let mut parser = filemap_to_parser(sess, sess.codemap().new_filemap(name, source));
+    parser.recurse_into_file_modules = false;
+    parser
 }
 
 /// Create a new parser, handling errors as appropriate
@@ -173,12 +176,12 @@ pub fn new_sub_parser_from_file<'a>(sess: &'a ParseSess,
 }
 
 /// Given a filemap and config, return a parser
-pub fn filemap_to_parser<'a>(sess: &'a ParseSess, filemap: Rc<FileMap>, ) -> Parser<'a> {
+pub fn filemap_to_parser(sess: & ParseSess, filemap: Rc<FileMap>, ) -> Parser {
     let end_pos = filemap.end_pos;
-    let mut parser = stream_to_parser(sess, filemap_to_stream(sess, filemap));
+    let mut parser = stream_to_parser(sess, filemap_to_stream(sess, filemap, None));
 
     if parser.token == token::Eof && parser.span == syntax_pos::DUMMY_SP {
-        parser.span = syntax_pos::mk_sp(end_pos, end_pos);
+        parser.span = Span::new(end_pos, end_pos, NO_EXPANSION);
     }
 
     parser
@@ -186,7 +189,7 @@ pub fn filemap_to_parser<'a>(sess: &'a ParseSess, filemap: Rc<FileMap>, ) -> Par
 
 // must preserve old name for now, because quote! from the *existing*
 // compiler expands into it
-pub fn new_parser_from_tts<'a>(sess: &'a ParseSess, tts: Vec<TokenTree>) -> Parser<'a> {
+pub fn new_parser_from_tts(sess: &ParseSess, tts: Vec<TokenTree>) -> Parser {
     stream_to_parser(sess, tts.into_iter().collect())
 }
 
@@ -210,24 +213,24 @@ fn file_to_filemap(sess: &ParseSess, path: &Path, spanopt: Option<Span>)
 }
 
 /// Given a filemap, produce a sequence of token-trees
-pub fn filemap_to_stream(sess: &ParseSess, filemap: Rc<FileMap>) -> TokenStream {
+pub fn filemap_to_stream(sess: &ParseSess, filemap: Rc<FileMap>, override_span: Option<Span>)
+                         -> TokenStream {
     let mut srdr = lexer::StringReader::new(sess, filemap);
+    srdr.override_span = override_span;
     srdr.real_token();
     panictry!(srdr.parse_all_token_trees())
 }
 
-/// Given stream and the ParseSess, produce a parser
-pub fn stream_to_parser<'a>(sess: &'a ParseSess, stream: TokenStream) -> Parser<'a> {
-    let mut p = Parser::new(sess, stream, None, false);
-    p.check_unknown_macro_variable();
-    p
+/// Given stream and the `ParseSess`, produce a parser
+pub fn stream_to_parser(sess: &ParseSess, stream: TokenStream) -> Parser {
+    Parser::new(sess, stream, None, true, false)
 }
 
 /// Parse a string representing a character literal into its final form.
 /// Rather than just accepting/rejecting a given literal, unescapes it as
 /// well. Can take any slice prefixed by a character escape. Returns the
 /// character and the number of characters consumed.
-pub fn char_lit(lit: &str) -> (char, isize) {
+pub fn char_lit(lit: &str, diag: Option<(Span, &Handler)>) -> (char, isize) {
     use std::char;
 
     // Handle non-escaped chars first.
@@ -253,20 +256,35 @@ pub fn char_lit(lit: &str) -> (char, isize) {
             (c, 4)
         }
         'u' => {
-            assert!(lit.as_bytes()[2] == b'{');
+            assert_eq!(lit.as_bytes()[2], b'{');
             let idx = lit.find('}').unwrap();
-            let v = u32::from_str_radix(&lit[3..idx], 16).unwrap();
-            let c = char::from_u32(v).unwrap();
+            let s = &lit[3..idx].chars().filter(|&c| c != '_').collect::<String>();
+            let v = u32::from_str_radix(&s, 16).unwrap();
+            let c = char::from_u32(v).unwrap_or_else(|| {
+                if let Some((span, diag)) = diag {
+                    let mut diag = diag.struct_span_err(span, "invalid unicode character escape");
+                    if v > 0x10FFFF {
+                        diag.help("unicode escape must be at most 10FFFF").emit();
+                    } else {
+                        diag.help("unicode escape must not be a surrogate").emit();
+                    }
+                }
+                '\u{FFFD}'
+            });
             (c, (idx + 1) as isize)
         }
         _ => panic!("lexer should have rejected a bad character escape {}", lit)
     }
 }
 
+pub fn escape_default(s: &str) -> String {
+    s.chars().map(char::escape_default).flat_map(|x| x).collect()
+}
+
 /// Parse a string representing a string literal into its final form. Does
 /// unescaping.
-pub fn str_lit(lit: &str) -> String {
-    debug!("parse_str_lit: given {}", lit.escape_default());
+pub fn str_lit(lit: &str, diag: Option<(Span, &Handler)>) -> String {
+    debug!("parse_str_lit: given {}", escape_default(lit));
     let mut res = String::with_capacity(lit.len());
 
     // FIXME #8372: This could be a for-loop if it didn't borrow the iterator
@@ -285,51 +303,46 @@ pub fn str_lit(lit: &str) -> String {
     }
 
     let mut chars = lit.char_indices().peekable();
-    loop {
-        match chars.next() {
-            Some((i, c)) => {
-                match c {
-                    '\\' => {
-                        let ch = chars.peek().unwrap_or_else(|| {
-                            panic!("{}", error(i))
-                        }).1;
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' => {
+                let ch = chars.peek().unwrap_or_else(|| {
+                    panic!("{}", error(i))
+                }).1;
 
-                        if ch == '\n' {
-                            eat(&mut chars);
-                        } else if ch == '\r' {
-                            chars.next();
-                            let ch = chars.peek().unwrap_or_else(|| {
-                                panic!("{}", error(i))
-                            }).1;
+                if ch == '\n' {
+                    eat(&mut chars);
+                } else if ch == '\r' {
+                    chars.next();
+                    let ch = chars.peek().unwrap_or_else(|| {
+                        panic!("{}", error(i))
+                    }).1;
 
-                            if ch != '\n' {
-                                panic!("lexer accepted bare CR");
-                            }
-                            eat(&mut chars);
-                        } else {
-                            // otherwise, a normal escape
-                            let (c, n) = char_lit(&lit[i..]);
-                            for _ in 0..n - 1 { // we don't need to move past the first \
-                                chars.next();
-                            }
-                            res.push(c);
-                        }
-                    },
-                    '\r' => {
-                        let ch = chars.peek().unwrap_or_else(|| {
-                            panic!("{}", error(i))
-                        }).1;
-
-                        if ch != '\n' {
-                            panic!("lexer accepted bare CR");
-                        }
-                        chars.next();
-                        res.push('\n');
+                    if ch != '\n' {
+                        panic!("lexer accepted bare CR");
                     }
-                    c => res.push(c),
+                    eat(&mut chars);
+                } else {
+                    // otherwise, a normal escape
+                    let (c, n) = char_lit(&lit[i..], diag);
+                    for _ in 0..n - 1 { // we don't need to move past the first \
+                        chars.next();
+                    }
+                    res.push(c);
                 }
             },
-            None => break
+            '\r' => {
+                let ch = chars.peek().unwrap_or_else(|| {
+                    panic!("{}", error(i))
+                }).1;
+
+                if ch != '\n' {
+                    panic!("lexer accepted bare CR");
+                }
+                chars.next();
+                res.push('\n');
+            }
+            c => res.push(c),
         }
     }
 
@@ -341,25 +354,19 @@ pub fn str_lit(lit: &str) -> String {
 /// Parse a string representing a raw string literal into its final form. The
 /// only operation this does is convert embedded CRLF into a single LF.
 pub fn raw_str_lit(lit: &str) -> String {
-    debug!("raw_str_lit: given {}", lit.escape_default());
+    debug!("raw_str_lit: given {}", escape_default(lit));
     let mut res = String::with_capacity(lit.len());
 
-    // FIXME #8372: This could be a for-loop if it didn't borrow the iterator
     let mut chars = lit.chars().peekable();
-    loop {
-        match chars.next() {
-            Some(c) => {
-                if c == '\r' {
-                    if *chars.peek().unwrap() != '\n' {
-                        panic!("lexer accepted bare CR");
-                    }
-                    chars.next();
-                    res.push('\n');
-                } else {
-                    res.push(c);
-                }
-            },
-            None => break
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if *chars.peek().unwrap() != '\n' {
+                panic!("lexer accepted bare CR");
+            }
+            chars.next();
+            res.push('\n');
+        } else {
+            res.push(c);
         }
     }
 
@@ -389,7 +396,7 @@ pub fn lit_token(lit: token::Lit, suf: Option<Symbol>, diag: Option<(Span, &Hand
 
     match lit {
        token::Byte(i) => (true, Some(LitKind::Byte(byte_lit(&i.as_str()).0))),
-       token::Char(i) => (true, Some(LitKind::Char(char_lit(&i.as_str()).0))),
+       token::Char(i) => (true, Some(LitKind::Char(char_lit(&i.as_str(), diag).0))),
 
         // There are some valid suffixes for integer and float literals,
         // so all the handling is done internally.
@@ -397,7 +404,7 @@ pub fn lit_token(lit: token::Lit, suf: Option<Symbol>, diag: Option<(Span, &Hand
         token::Float(s) => (false, float_lit(&s.as_str(), suf, diag)),
 
         token::Str_(s) => {
-            let s = Symbol::intern(&str_lit(&s.as_str()));
+            let s = Symbol::intern(&str_lit(&s.as_str(), diag));
             (true, Some(LitKind::Str(s, ast::StrStyle::Cooked)))
         }
         token::StrRaw(s, n) => {
@@ -457,7 +464,7 @@ pub fn byte_lit(lit: &str) -> (u8, usize) {
     if lit.len() == 1 {
         (lit.as_bytes()[0], 1)
     } else {
-        assert!(lit.as_bytes()[0] == b'\\', err(0));
+        assert_eq!(lit.as_bytes()[0], b'\\', "{}", err(0));
         let b = match lit.as_bytes()[1] {
             b'"' => b'"',
             b'n' => b'\n',
@@ -478,7 +485,7 @@ pub fn byte_lit(lit: &str) -> (u8, usize) {
                 }
             }
         };
-        return (b, 2);
+        (b, 2)
     }
 }
 
@@ -489,7 +496,7 @@ pub fn byte_str_lit(lit: &str) -> Rc<Vec<u8>> {
     let error = |i| format!("lexer should have rejected {} at {}", lit, i);
 
     /// Eat everything up to a non-whitespace
-    fn eat<'a, I: Iterator<Item=(usize, u8)>>(it: &mut iter::Peekable<I>) {
+    fn eat<I: Iterator<Item=(usize, u8)>>(it: &mut iter::Peekable<I>) {
         loop {
             match it.peek().map(|x| x.1) {
                 Some(b' ') | Some(b'\n') | Some(b'\r') | Some(b'\t') => {
@@ -576,7 +583,7 @@ pub fn integer_lit(s: &str, suffix: Option<Symbol>, diag: Option<(Span, &Handler
             if let Some(err) = err {
                 err!(diag, |span, diag| diag.span_err(span, err));
             }
-            return filtered_float_lit(Symbol::intern(&s), Some(suf), diag)
+            return filtered_float_lit(Symbol::intern(s), Some(suf), diag)
         }
     }
 
@@ -665,7 +672,7 @@ mod tests {
 
     // produce a syntax_pos::span
     fn sp(a: u32, b: u32) -> Span {
-        Span {lo: BytePos(a), hi: BytePos(b), expn_id: NO_EXPANSION}
+        Span::new(BytePos(a), BytePos(b), NO_EXPANSION)
     }
 
     fn str2seg(s: &str, lo: u32, hi: u32) -> ast::PathSegment {
@@ -691,7 +698,7 @@ mod tests {
                     id: ast::DUMMY_NODE_ID,
                     node: ast::ExprKind::Path(None, ast::Path {
                         span: sp(0, 6),
-                        segments: vec![ast::PathSegment::crate_root(),
+                        segments: vec![ast::PathSegment::crate_root(sp(0, 2)),
                                        str2seg("a", 2, 3),
                                        str2seg("b", 5, 6)]
                     }),
@@ -830,7 +837,7 @@ mod tests {
     }
 
     #[test] fn parse_ident_pat () {
-        let sess = ParseSess::new();
+        let sess = ParseSess::new(FilePathMapping::empty());
         let mut parser = string_to_parser(&sess, "b".to_string());
         assert!(panictry!(parser.parse_pat())
                 == P(ast::Pat{
@@ -847,11 +854,18 @@ mod tests {
     // check the contents of the tt manually:
     #[test] fn parse_fundecl () {
         // this test depends on the intern order of "fn" and "i32"
-        assert_eq!(string_to_item("fn a (b : i32) { b; }".to_string()),
+        let item = string_to_item("fn a (b : i32) { b; }".to_string()).map(|m| {
+            m.map(|mut m| {
+                m.tokens = None;
+                m
+            })
+        });
+        assert_eq!(item,
                   Some(
                       P(ast::Item{ident:Ident::from_str("a"),
                             attrs:Vec::new(),
                             id: ast::DUMMY_NODE_ID,
+                            tokens: None,
                             node: ast::ItemKind::Fn(P(ast::FnDecl {
                                 inputs: vec![ast::Arg{
                                     ty: P(ast::Ty{id: ast::DUMMY_NODE_ID,
@@ -864,13 +878,14 @@ mod tests {
                                     pat: P(ast::Pat {
                                         id: ast::DUMMY_NODE_ID,
                                         node: PatKind::Ident(
-                                            ast::BindingMode::ByValue(ast::Mutability::Immutable),
-                                                Spanned{
-                                                    span: sp(6,7),
-                                                    node: Ident::from_str("b")},
-                                                None
-                                                    ),
-                                            span: sp(6,7)
+                                            ast::BindingMode::ByValue(
+                                                ast::Mutability::Immutable),
+                                            Spanned{
+                                                span: sp(6,7),
+                                                node: Ident::from_str("b")},
+                                            None
+                                        ),
+                                        span: sp(6,7)
                                     }),
                                         id: ast::DUMMY_NODE_ID
                                     }],
@@ -889,6 +904,7 @@ mod tests {
                                         where_clause: ast::WhereClause {
                                             id: ast::DUMMY_NODE_ID,
                                             predicates: Vec::new(),
+                                            span: syntax_pos::DUMMY_SP,
                                         },
                                         span: syntax_pos::DUMMY_SP,
                                     },
@@ -971,7 +987,7 @@ mod tests {
 
         for &src in &srcs {
             let spans = get_spans_of_pat_idents(src);
-            let Span{ lo, hi, .. } = spans[0];
+            let (lo, hi) = (spans[0].lo(), spans[0].hi());
             assert!("self" == &src[lo.to_usize()..hi.to_usize()],
                     "\"{}\" != \"self\". src=\"{}\"",
                     &src[lo.to_usize()..hi.to_usize()], src)
@@ -1000,7 +1016,7 @@ mod tests {
     }
 
     #[test] fn crlf_doc_comments() {
-        let sess = ParseSess::new();
+        let sess = ParseSess::new(FilePathMapping::empty());
 
         let name = "<source>".to_string();
         let source = "/// doc comment\r\nfn foo() {}".to_string();
@@ -1025,7 +1041,7 @@ mod tests {
 
     #[test]
     fn ttdelim_span() {
-        let sess = ParseSess::new();
+        let sess = ParseSess::new(FilePathMapping::empty());
         let expr = parse::parse_expr_from_source_str("foo".to_string(),
             "foo!( fn main() { body } )".to_string(), &sess).unwrap();
 
@@ -1039,6 +1055,25 @@ mod tests {
         match sess.codemap().span_to_snippet(span) {
             Ok(s) => assert_eq!(&s[..], "{ body }"),
             Err(_) => panic!("could not get snippet"),
+        }
+    }
+
+    // This tests that when parsing a string (rather than a file) we don't try
+    // and read in a file for a module declaration and just parse a stub.
+    // See `recurse_into_file_modules` in the parser.
+    #[test]
+    fn out_of_line_mod() {
+        let sess = ParseSess::new(FilePathMapping::empty());
+        let item = parse_item_from_source_str(
+            "foo".to_owned(),
+            "mod foo { struct S; mod this_does_not_exist; }".to_owned(),
+            &sess,
+        ).unwrap().unwrap();
+
+        if let ast::ItemKind::Mod(ref m) = item.node {
+            assert!(m.items.len() == 2);
+        } else {
+            panic!();
         }
     }
 }

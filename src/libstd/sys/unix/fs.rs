@@ -23,19 +23,21 @@ use sys::time::SystemTime;
 use sys::{cvt, cvt_r};
 use sys_common::{AsInner, FromInner};
 
-#[cfg(any(target_os = "linux", target_os = "emscripten"))]
+#[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "l4re"))]
 use libc::{stat64, fstat64, lstat64, off64_t, ftruncate64, lseek64, dirent64, readdir64_r, open64};
 #[cfg(target_os = "android")]
 use libc::{stat as stat64, fstat as fstat64, lstat as lstat64, lseek64,
            dirent as dirent64, open as open64};
 #[cfg(not(any(target_os = "linux",
               target_os = "emscripten",
+              target_os = "l4re",
               target_os = "android")))]
 use libc::{stat as stat64, fstat as fstat64, lstat as lstat64, off_t as off64_t,
            ftruncate as ftruncate64, lseek as lseek64, dirent as dirent64, open as open64};
 #[cfg(not(any(target_os = "linux",
               target_os = "emscripten",
               target_os = "solaris",
+              target_os = "l4re",
               target_os = "fuchsia")))]
 use libc::{readdir_r as readdir64_r};
 
@@ -93,7 +95,7 @@ pub struct DirBuilder { mode: mode_t }
 impl FileAttr {
     pub fn size(&self) -> u64 { self.stat.st_size as u64 }
     pub fn perm(&self) -> FilePermissions {
-        FilePermissions { mode: (self.stat.st_mode as mode_t) & 0o777 }
+        FilePermissions { mode: (self.stat.st_mode as mode_t) }
     }
 
     pub fn file_type(&self) -> FileType {
@@ -170,11 +172,17 @@ impl AsInner<stat64> for FileAttr {
 }
 
 impl FilePermissions {
-    pub fn readonly(&self) -> bool { self.mode & 0o222 == 0 }
+    pub fn readonly(&self) -> bool {
+        // check if any class (owner, group, others) has write permission
+        self.mode & 0o222 == 0
+    }
+
     pub fn set_readonly(&mut self, readonly: bool) {
         if readonly {
+            // remove write permission for all classes; equivalent to `chmod a-w <file>`
             self.mode &= !0o222;
         } else {
+            // add write permission for all classes; equivalent to `chmod a+w <file>`
             self.mode |= 0o222;
         }
     }
@@ -284,12 +292,7 @@ impl DirEntry {
         lstat(&self.path())
     }
 
-    #[cfg(target_os = "solaris")]
-    pub fn file_type(&self) -> io::Result<FileType> {
-        stat(&self.path()).map(|m| m.file_type())
-    }
-
-    #[cfg(target_os = "haiku")]
+    #[cfg(any(target_os = "solaris", target_os = "haiku"))]
     pub fn file_type(&self) -> io::Result<FileType> {
         lstat(&self.path()).map(|m| m.file_type())
     }
@@ -315,6 +318,7 @@ impl DirEntry {
               target_os = "android",
               target_os = "solaris",
               target_os = "haiku",
+              target_os = "l4re",
               target_os = "fuchsia"))]
     pub fn ino(&self) -> u64 {
         self.entry.d_ino as u64
@@ -345,6 +349,7 @@ impl DirEntry {
     #[cfg(any(target_os = "android",
               target_os = "linux",
               target_os = "emscripten",
+              target_os = "l4re",
               target_os = "haiku"))]
     fn name_bytes(&self) -> &[u8] {
         unsafe {
@@ -491,10 +496,6 @@ impl File {
         self.0.read(buf)
     }
 
-    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.0.read_to_end(buf)
-    }
-
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         self.0.read_at(buf, offset)
     }
@@ -517,6 +518,8 @@ impl File {
             SeekFrom::End(off) => (libc::SEEK_END, off),
             SeekFrom::Current(off) => (libc::SEEK_CUR, off),
         };
+        #[cfg(target_os = "emscripten")]
+        let pos = pos as i32;
         let n = cvt(unsafe { lseek64(self.0.raw(), pos, whence) })?;
         Ok(n as u64)
     }

@@ -11,6 +11,7 @@
 use rustc::ty::Ty;
 use rustc::mir::*;
 use rustc_data_structures::indexed_vec::{IndexVec, Idx};
+use syntax_pos::Span;
 
 /// This struct represents a patch to MIR, which can add
 /// new statements and basic blocks and patch over block
@@ -45,6 +46,7 @@ impl<'tcx> MirPatch<'tcx> {
         for (bb, block) in mir.basic_blocks().iter_enumerated() {
             if let TerminatorKind::Resume = block.terminator().kind {
                 if block.statements.len() > 0 {
+                    assert!(resume_stmt_block.is_none());
                     resume_stmt_block = Some(bb);
                 } else {
                     resume_block = Some(bb);
@@ -92,10 +94,17 @@ impl<'tcx> MirPatch<'tcx> {
         }
     }
 
-    pub fn new_temp(&mut self, ty: Ty<'tcx>) -> Local {
+    pub fn new_temp(&mut self, ty: Ty<'tcx>, span: Span) -> Local {
         let index = self.next_local;
         self.next_local += 1;
-        self.new_locals.push(LocalDecl::new_temp(ty));
+        self.new_locals.push(LocalDecl::new_temp(ty, span));
+        Local::new(index as usize)
+    }
+
+    pub fn new_internal(&mut self, ty: Ty<'tcx>, span: Span) -> Local {
+        let index = self.next_local;
+        self.next_local += 1;
+        self.new_locals.push(LocalDecl::new_internal(ty, span));
         Local::new(index as usize)
     }
 
@@ -154,7 +163,7 @@ impl<'tcx> MirPatch<'tcx> {
             );
             mir[loc.block].statements.insert(
                 loc.statement_index, Statement {
-                    source_info: source_info,
+                    source_info,
                     kind: stmt
                 });
             delta += 1;

@@ -9,7 +9,7 @@
 // except according to those terms.
 
 use borrow::{Borrow, Cow};
-use fmt::{self, Debug};
+use fmt;
 use mem;
 use ops;
 use cmp;
@@ -29,7 +29,7 @@ use sys_common::{AsInner, IntoInner, FromInner};
 /// * On Windows, strings are often arbitrary sequences of non-zero 16-bit
 ///   values, interpreted as UTF-16 when it is valid to do so.
 ///
-/// * In Rust, strings are always valid UTF-8, but may contain zeros.
+/// * In Rust, strings are always valid UTF-8, which may contain zeros.
 ///
 /// `OsString` and [`OsStr`] bridge this gap by simultaneously representing Rust
 /// and platform-native string values, and in particular allowing a Rust string
@@ -123,7 +123,7 @@ impl OsString {
 
     /// Creates a new `OsString` with the given capacity.
     ///
-    /// The string will be able to hold exactly `capacity` lenth units of other
+    /// The string will be able to hold exactly `capacity` length units of other
     /// OS strings without reallocating. If `capacity` is 0, the string will not
     /// allocate.
     ///
@@ -230,8 +230,6 @@ impl OsString {
     /// # Examples
     ///
     /// ```
-    /// #![feature(osstring_shrink_to_fit)]
-    ///
     /// use std::ffi::OsString;
     ///
     /// let mut s = OsString::from("foo");
@@ -242,25 +240,25 @@ impl OsString {
     /// s.shrink_to_fit();
     /// assert_eq!(3, s.capacity());
     /// ```
-    #[unstable(feature = "osstring_shrink_to_fit", issue = "40421")]
+    #[stable(feature = "osstring_shrink_to_fit", since = "1.19.0")]
     pub fn shrink_to_fit(&mut self) {
         self.inner.shrink_to_fit()
     }
 
-    /// Converts this `OsString` into a boxed `OsStr`.
+    /// Converts this `OsString` into a boxed [`OsStr`].
+    ///
+    /// [`OsStr`]: struct.OsStr.html
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(into_boxed_os_str)]
-    ///
     /// use std::ffi::{OsString, OsStr};
     ///
     /// let s = OsString::from("hello");
     ///
     /// let b: Box<OsStr> = s.into_boxed_os_str();
     /// ```
-    #[unstable(feature = "into_boxed_os_str", issue = "40380")]
+    #[stable(feature = "into_boxed_os_str", since = "1.20.0")]
     pub fn into_boxed_os_str(self) -> Box<OsStr> {
         unsafe { mem::transmute(self.inner.into_box()) }
     }
@@ -310,8 +308,8 @@ impl Default for OsString {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl Debug for OsString {
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+impl fmt::Debug for OsString {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&**self, formatter)
     }
 }
@@ -482,12 +480,13 @@ impl OsStr {
     /// Returns the length of this `OsStr`.
     ///
     /// Note that this does **not** return the number of bytes in this string
-    /// as, for example, OS strings on Windows are encoded as a list of `u16`
+    /// as, for example, OS strings on Windows are encoded as a list of [`u16`]
     /// rather than a list of bytes. This number is simply useful for passing to
     /// other methods like [`OsString::with_capacity`] to avoid reallocations.
     ///
     /// See `OsStr` introduction for more information about encoding.
     ///
+    /// [`u16`]: ../primitive.u16.html
     /// [`OsString::with_capacity`]: struct.OsString.html#method.with_capacity
     ///
     /// # Examples
@@ -506,8 +505,11 @@ impl OsStr {
         self.inner.inner.len()
     }
 
-    /// Converts a `Box<OsStr>` into an `OsString` without copying or allocating.
-    #[unstable(feature = "into_boxed_os_str", issue = "40380")]
+    /// Converts a [`Box`]`<OsStr>` into an [`OsString`] without copying or allocating.
+    ///
+    /// [`Box`]: ../boxed/struct.Box.html
+    /// [`OsString`]: struct.OsString.html
+    #[stable(feature = "into_boxed_os_str", since = "1.20.0")]
     pub fn into_os_string(self: Box<OsStr>) -> OsString {
         let inner: Box<Slice> = unsafe { mem::transmute(self) };
         OsString { inner: Buf::from_box(inner) }
@@ -529,17 +531,17 @@ impl<'a> From<&'a OsStr> for Box<OsStr> {
     }
 }
 
-#[stable(feature = "os_string_from_box", since = "1.17.0")]
-impl<'a> From<Box<OsStr>> for OsString {
+#[stable(feature = "os_string_from_box", since = "1.18.0")]
+impl From<Box<OsStr>> for OsString {
     fn from(boxed: Box<OsStr>) -> OsString {
         boxed.into_os_string()
     }
 }
 
-#[stable(feature = "box_from_c_string", since = "1.17.0")]
-impl Into<Box<OsStr>> for OsString {
-    fn into(self) -> Box<OsStr> {
-        self.into_boxed_os_str()
+#[stable(feature = "box_from_os_string", since = "1.20.0")]
+impl From<OsString> for Box<OsStr> {
+    fn from(s: OsString) -> Box<OsStr> {
+        s.into_boxed_os_str()
     }
 }
 
@@ -663,9 +665,15 @@ impl Hash for OsStr {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl Debug for OsStr {
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        self.inner.fmt(formatter)
+impl fmt::Debug for OsStr {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.inner, formatter)
+    }
+}
+
+impl OsStr {
+    pub(crate) fn display(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.inner, formatter)
     }
 }
 
@@ -677,7 +685,13 @@ impl Borrow<OsStr> for OsString {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl ToOwned for OsStr {
     type Owned = OsString;
-    fn to_owned(&self) -> OsString { self.to_os_string() }
+    fn to_owned(&self) -> OsString {
+        self.to_os_string()
+    }
+    fn clone_into(&self, target: &mut OsString) {
+        target.clear();
+        target.push(self);
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -862,5 +876,15 @@ mod tests {
     fn boxed_default() {
         let boxed = <Box<OsStr>>::default();
         assert!(boxed.is_empty());
+    }
+
+    #[test]
+    fn test_os_str_clone_into() {
+        let mut os_string = OsString::with_capacity(123);
+        os_string.push("hello");
+        let os_str = OsStr::new("bonjour");
+        os_str.clone_into(&mut os_string);
+        assert_eq!(os_str, os_string);
+        assert!(os_string.capacity() >= 123);
     }
 }

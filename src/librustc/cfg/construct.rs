@@ -10,14 +10,16 @@
 
 use rustc_data_structures::graph;
 use cfg::*;
+use middle::region;
 use ty::{self, TyCtxt};
-use syntax::ast;
 use syntax::ptr::P;
 
 use hir::{self, PatKind};
+use hir::def_id::DefId;
 
 struct CFGBuilder<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    owner_def_id: DefId,
     tables: &'a ty::TypeckTables<'tcx>,
     graph: CFGGraph,
     fn_exit: CFGIndex,
@@ -27,13 +29,13 @@ struct CFGBuilder<'a, 'tcx: 'a> {
 
 #[derive(Copy, Clone)]
 struct BlockScope {
-    block_expr_id: ast::NodeId, // id of breakable block expr node
+    block_expr_id: hir::ItemLocalId, // id of breakable block expr node
     break_index: CFGIndex, // where to go on `break`
 }
 
 #[derive(Copy, Clone)]
 struct LoopScope {
-    loop_id: ast::NodeId,     // id of loop/while node
+    loop_id: hir::ItemLocalId,     // id of loop/while node
     continue_index: CFGIndex, // where to go on a `loop`
     break_index: CFGIndex,    // where to go on a `break`
 }
@@ -52,13 +54,14 @@ pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     // Find the tables for this body.
     let owner_def_id = tcx.hir.local_def_id(tcx.hir.body_owner(body.id()));
-    let tables = tcx.item_tables(owner_def_id);
+    let tables = tcx.typeck_tables_of(owner_def_id);
 
     let mut cfg_builder = CFGBuilder {
-        tcx: tcx,
-        tables: tables,
-        graph: graph,
-        fn_exit: fn_exit,
+        tcx,
+        owner_def_id,
+        tables,
+        graph,
+        fn_exit,
         loop_scopes: Vec::new(),
         breakable_block_scopes: Vec::new(),
     };
@@ -66,19 +69,20 @@ pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     cfg_builder.add_contained_edge(body_exit, fn_exit);
     let CFGBuilder { graph, .. } = cfg_builder;
     CFG {
-        graph: graph,
-        entry: entry,
+        owner_def_id,
+        graph,
+        entry,
         exit: fn_exit,
     }
 }
 
 impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn block(&mut self, blk: &hir::Block, pred: CFGIndex) -> CFGIndex {
-        if let Some(break_to_expr_id) = blk.break_to_expr_id {
-            let expr_exit = self.add_ast_node(blk.id, &[]);
+        if blk.targeted_by_break {
+            let expr_exit = self.add_ast_node(blk.hir_id.local_id, &[]);
 
             self.breakable_block_scopes.push(BlockScope {
-                block_expr_id: break_to_expr_id,
+                block_expr_id: blk.hir_id.local_id,
                 break_index: expr_exit,
             });
 
@@ -100,21 +104,22 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
             let expr_exit = self.opt_expr(&blk.expr, stmts_exit);
 
-            self.add_ast_node(blk.id, &[expr_exit])
+            self.add_ast_node(blk.hir_id.local_id, &[expr_exit])
         }
     }
 
     fn stmt(&mut self, stmt: &hir::Stmt, pred: CFGIndex) -> CFGIndex {
+        let hir_id = self.tcx.hir.node_to_hir_id(stmt.node.id());
         match stmt.node {
-            hir::StmtDecl(ref decl, id) => {
+            hir::StmtDecl(ref decl, _) => {
                 let exit = self.decl(&decl, pred);
-                self.add_ast_node(id, &[exit])
+                self.add_ast_node(hir_id.local_id, &[exit])
             }
 
-            hir::StmtExpr(ref expr, id) |
-            hir::StmtSemi(ref expr, id) => {
+            hir::StmtExpr(ref expr, _) |
+            hir::StmtSemi(ref expr, _) => {
                 let exit = self.expr(&expr, pred);
-                self.add_ast_node(id, &[exit])
+                self.add_ast_node(hir_id.local_id, &[exit])
             }
         }
     }
@@ -136,31 +141,31 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             PatKind::Path(_) |
             PatKind::Lit(..) |
             PatKind::Range(..) |
-            PatKind::Wild => self.add_ast_node(pat.id, &[pred]),
+            PatKind::Wild => self.add_ast_node(pat.hir_id.local_id, &[pred]),
 
             PatKind::Box(ref subpat) |
             PatKind::Ref(ref subpat, _) |
             PatKind::Binding(.., Some(ref subpat)) => {
                 let subpat_exit = self.pat(&subpat, pred);
-                self.add_ast_node(pat.id, &[subpat_exit])
+                self.add_ast_node(pat.hir_id.local_id, &[subpat_exit])
             }
 
             PatKind::TupleStruct(_, ref subpats, _) |
             PatKind::Tuple(ref subpats, _) => {
                 let pats_exit = self.pats_all(subpats.iter(), pred);
-                self.add_ast_node(pat.id, &[pats_exit])
+                self.add_ast_node(pat.hir_id.local_id, &[pats_exit])
             }
 
             PatKind::Struct(_, ref subpats, _) => {
                 let pats_exit = self.pats_all(subpats.iter().map(|f| &f.node.pat), pred);
-                self.add_ast_node(pat.id, &[pats_exit])
+                self.add_ast_node(pat.hir_id.local_id, &[pats_exit])
             }
 
             PatKind::Slice(ref pre, ref vec, ref post) => {
                 let pre_exit = self.pats_all(pre.iter(), pred);
                 let vec_exit = self.pats_all(vec.iter(), pre_exit);
                 let post_exit = self.pats_all(post.iter(), vec_exit);
-                self.add_ast_node(pat.id, &[post_exit])
+                self.add_ast_node(pat.hir_id.local_id, &[post_exit])
             }
         }
     }
@@ -176,7 +181,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         match expr.node {
             hir::ExprBlock(ref blk) => {
                 let blk_exit = self.block(&blk, pred);
-                self.add_ast_node(expr.id, &[blk_exit])
+                self.add_ast_node(expr.hir_id.local_id, &[blk_exit])
             }
 
             hir::ExprIf(ref cond, ref then, None) => {
@@ -195,8 +200,8 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 //   [..expr..]
                 //
                 let cond_exit = self.expr(&cond, pred);                // 1
-                let then_exit = self.block(&then, cond_exit);          // 2
-                self.add_ast_node(expr.id, &[cond_exit, then_exit])      // 3,4
+                let then_exit = self.expr(&then, cond_exit);          // 2
+                self.add_ast_node(expr.hir_id.local_id, &[cond_exit, then_exit])      // 3,4
             }
 
             hir::ExprIf(ref cond, ref then, Some(ref otherwise)) => {
@@ -215,9 +220,9 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 //   [..expr..]
                 //
                 let cond_exit = self.expr(&cond, pred);                // 1
-                let then_exit = self.block(&then, cond_exit);          // 2
+                let then_exit = self.expr(&then, cond_exit);          // 2
                 let else_exit = self.expr(&otherwise, cond_exit);      // 3
-                self.add_ast_node(expr.id, &[then_exit, else_exit])      // 4, 5
+                self.add_ast_node(expr.hir_id.local_id, &[then_exit, else_exit])      // 4, 5
             }
 
             hir::ExprWhile(ref cond, ref body, _) => {
@@ -241,12 +246,12 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 let loopback = self.add_dummy_node(&[pred]);              // 1
 
                 // Create expr_exit without pred (cond_exit)
-                let expr_exit = self.add_ast_node(expr.id, &[]);         // 3
+                let expr_exit = self.add_ast_node(expr.hir_id.local_id, &[]);         // 3
 
                 // The LoopScope needs to be on the loop_scopes stack while evaluating the
                 // condition and the body of the loop (both can break out of the loop)
                 self.loop_scopes.push(LoopScope {
-                    loop_id: expr.id,
+                    loop_id: expr.hir_id.local_id,
                     continue_index: loopback,
                     break_index: expr_exit
                 });
@@ -278,9 +283,9 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 // may cause additional edges.
 
                 let loopback = self.add_dummy_node(&[pred]);              // 1
-                let expr_exit = self.add_ast_node(expr.id, &[]);          // 2
+                let expr_exit = self.add_ast_node(expr.hir_id.local_id, &[]);          // 2
                 self.loop_scopes.push(LoopScope {
-                    loop_id: expr.id,
+                    loop_id: expr.hir_id.local_id,
                     continue_index: loopback,
                     break_index: expr_exit,
                 });
@@ -291,7 +296,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
 
             hir::ExprMatch(ref discr, ref arms, _) => {
-                self.match_(expr.id, &discr, &arms, pred)
+                self.match_(expr.hir_id.local_id, &discr, &arms, pred)
             }
 
             hir::ExprBinary(op, ref l, ref r) if op.node.is_lazy() => {
@@ -311,30 +316,30 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 //
                 let l_exit = self.expr(&l, pred);                      // 1
                 let r_exit = self.expr(&r, l_exit);                    // 2
-                self.add_ast_node(expr.id, &[l_exit, r_exit])            // 3,4
+                self.add_ast_node(expr.hir_id.local_id, &[l_exit, r_exit])            // 3,4
             }
 
             hir::ExprRet(ref v) => {
                 let v_exit = self.opt_expr(v, pred);
-                let b = self.add_ast_node(expr.id, &[v_exit]);
+                let b = self.add_ast_node(expr.hir_id.local_id, &[v_exit]);
                 self.add_returning_edge(expr, b);
                 self.add_unreachable_node()
             }
 
             hir::ExprBreak(destination, ref opt_expr) => {
                 let v = self.opt_expr(opt_expr, pred);
-                let (scope_id, break_dest) =
+                let (target_scope, break_dest) =
                     self.find_scope_edge(expr, destination, ScopeCfKind::Break);
-                let b = self.add_ast_node(expr.id, &[v]);
-                self.add_exiting_edge(expr, b, scope_id, break_dest);
+                let b = self.add_ast_node(expr.hir_id.local_id, &[v]);
+                self.add_exiting_edge(expr, b, target_scope, break_dest);
                 self.add_unreachable_node()
             }
 
             hir::ExprAgain(destination) => {
-                let (scope_id, cont_dest) =
+                let (target_scope, cont_dest) =
                     self.find_scope_edge(expr, destination, ScopeCfKind::Continue);
-                let a = self.add_ast_node(expr.id, &[pred]);
-                self.add_exiting_edge(expr, a, scope_id, cont_dest);
+                let a = self.add_ast_node(expr.hir_id.local_id, &[pred]);
+                self.add_exiting_edge(expr, a, target_scope, cont_dest);
                 self.add_unreachable_node()
             }
 
@@ -351,11 +356,11 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
 
             hir::ExprIndex(ref l, ref r) |
-            hir::ExprBinary(_, ref l, ref r) if self.tables.is_method_call(expr.id) => {
+            hir::ExprBinary(_, ref l, ref r) if self.tables.is_method_call(expr) => {
                 self.call(expr, pred, &l, Some(&**r).into_iter())
             }
 
-            hir::ExprUnary(_, ref e) if self.tables.is_method_call(expr.id) => {
+            hir::ExprUnary(_, ref e) if self.tables.is_method_call(expr) => {
                 self.call(expr, pred, &e, None::<hir::Expr>.iter())
             }
 
@@ -385,6 +390,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             hir::ExprUnary(_, ref e) |
             hir::ExprField(ref e, _) |
             hir::ExprTupField(ref e, _) |
+            hir::ExprYield(ref e) |
             hir::ExprRepeat(ref e, _) => {
                 self.straightline(expr, pred, Some(&**e).into_iter())
             }
@@ -392,7 +398,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             hir::ExprInlineAsm(_, ref outputs, ref inputs) => {
                 let post_outputs = self.exprs(outputs.iter().map(|e| &*e), pred);
                 let post_inputs = self.exprs(inputs.iter().map(|e| &*e), post_outputs);
-                self.add_ast_node(expr.id, &[post_inputs])
+                self.add_ast_node(expr.hir_id.local_id, &[post_inputs])
             }
 
             hir::ExprClosure(..) |
@@ -408,16 +414,10 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             pred: CFGIndex,
             func_or_rcvr: &hir::Expr,
             args: I) -> CFGIndex {
-        let method_call = ty::MethodCall::expr(call_expr.id);
-        let fn_ty = match self.tables.method_map.get(&method_call) {
-            Some(method) => method.ty,
-            None => self.tables.expr_ty_adjusted(func_or_rcvr),
-        };
-
         let func_or_rcvr_exit = self.expr(func_or_rcvr, pred);
         let ret = self.straightline(call_expr, func_or_rcvr_exit, args);
         // FIXME(canndrew): This is_never should probably be an is_uninhabited.
-        if fn_ty.fn_ret().0.is_never() {
+        if self.tables.expr_ty(call_expr).is_never() {
             self.add_unreachable_node()
         } else {
             ret
@@ -445,10 +445,10 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         //! Handles case of an expression that evaluates `subexprs` in order
 
         let subexprs_exit = self.exprs(subexprs, pred);
-        self.add_ast_node(expr.id, &[subexprs_exit])
+        self.add_ast_node(expr.hir_id.local_id, &[subexprs_exit])
     }
 
-    fn match_(&mut self, id: ast::NodeId, discr: &hir::Expr,
+    fn match_(&mut self, id: hir::ItemLocalId, discr: &hir::Expr,
               arms: &[hir::Arm], pred: CFGIndex) -> CFGIndex {
         // The CFG for match expression is quite complex, so no ASCII
         // art for it (yet).
@@ -553,8 +553,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         self.add_node(CFGNodeData::Dummy, preds)
     }
 
-    fn add_ast_node(&mut self, id: ast::NodeId, preds: &[CFGIndex]) -> CFGIndex {
-        assert!(id != ast::DUMMY_NODE_ID);
+    fn add_ast_node(&mut self, id: hir::ItemLocalId, preds: &[CFGIndex]) -> CFGIndex {
         self.add_node(CFGNodeData::AST(id), preds)
     }
 
@@ -580,14 +579,14 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn add_exiting_edge(&mut self,
                         from_expr: &hir::Expr,
                         from_index: CFGIndex,
-                        scope_id: ast::NodeId,
+                        target_scope: region::Scope,
                         to_index: CFGIndex) {
         let mut data = CFGEdgeData { exiting_scopes: vec![] };
-        let mut scope = self.tcx.region_maps.node_extent(from_expr.id);
-        let target_scope = self.tcx.region_maps.node_extent(scope_id);
+        let mut scope = region::Scope::Node(from_expr.hir_id.local_id);
+        let region_scope_tree = self.tcx.region_scope_tree(self.owner_def_id);
         while scope != target_scope {
-            data.exiting_scopes.push(scope.node_id(&self.tcx.region_maps));
-            scope = self.tcx.region_maps.encl_scope(scope);
+            data.exiting_scopes.push(scope.item_local_id());
+            scope = region_scope_tree.encl_scope(scope);
         }
         self.graph.add_edge(from_index, to_index, data);
     }
@@ -607,13 +606,14 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn find_scope_edge(&self,
                   expr: &hir::Expr,
                   destination: hir::Destination,
-                  scope_cf_kind: ScopeCfKind) -> (ast::NodeId, CFGIndex) {
+                  scope_cf_kind: ScopeCfKind) -> (region::Scope, CFGIndex) {
 
         match destination.target_id {
             hir::ScopeTarget::Block(block_expr_id) => {
                 for b in &self.breakable_block_scopes {
-                    if b.block_expr_id == block_expr_id {
-                        return (block_expr_id, match scope_cf_kind {
+                    if b.block_expr_id == self.tcx.hir.node_to_hir_id(block_expr_id).local_id {
+                        let scope_id = self.tcx.hir.node_to_hir_id(block_expr_id).local_id;
+                        return (region::Scope::Node(scope_id), match scope_cf_kind {
                             ScopeCfKind::Break => b.break_index,
                             ScopeCfKind::Continue => bug!("can't continue to block"),
                         });
@@ -623,8 +623,9 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
             hir::ScopeTarget::Loop(hir::LoopIdResult::Ok(loop_id)) => {
                 for l in &self.loop_scopes {
-                    if l.loop_id == loop_id {
-                        return (loop_id, match scope_cf_kind {
+                    if l.loop_id == self.tcx.hir.node_to_hir_id(loop_id).local_id {
+                        let scope_id = self.tcx.hir.node_to_hir_id(loop_id).local_id;
+                        return (region::Scope::Node(scope_id), match scope_cf_kind {
                             ScopeCfKind::Break => l.break_index,
                             ScopeCfKind::Continue => l.continue_index,
                         });

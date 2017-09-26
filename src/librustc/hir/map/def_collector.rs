@@ -14,7 +14,8 @@ use hir::def_id::{CRATE_DEF_INDEX, DefIndex, DefIndexAddressSpace};
 use syntax::ast::*;
 use syntax::ext::hygiene::Mark;
 use syntax::visit;
-use syntax::symbol::{Symbol, keywords};
+use syntax::symbol::keywords;
+use syntax::symbol::Symbol;
 
 use hir::map::{ITEM_LIKE_SPACE, REGULAR_SPACE};
 
@@ -22,6 +23,7 @@ use hir::map::{ITEM_LIKE_SPACE, REGULAR_SPACE};
 pub struct DefCollector<'a> {
     definitions: &'a mut Definitions,
     parent_def: Option<DefIndex>,
+    expansion: Mark,
     pub visit_macro_invoc: Option<&'a mut FnMut(MacroInvocationData)>,
 }
 
@@ -32,19 +34,18 @@ pub struct MacroInvocationData {
 }
 
 impl<'a> DefCollector<'a> {
-    pub fn new(definitions: &'a mut Definitions) -> Self {
+    pub fn new(definitions: &'a mut Definitions, expansion: Mark) -> Self {
         DefCollector {
-            definitions: definitions,
+            definitions,
+            expansion,
             parent_def: None,
             visit_macro_invoc: None,
         }
     }
 
-    pub fn collect_root(&mut self) {
-        let root = self.create_def_with_parent(None,
-                                               CRATE_NODE_ID,
-                                               DefPathData::CrateRoot,
-                                               ITEM_LIKE_SPACE);
+    pub fn collect_root(&mut self, crate_name: &str, crate_disambiguator: &str) {
+        let root = self.definitions.create_root_def(crate_name,
+                                                    crate_disambiguator);
         assert_eq!(root, CRATE_DEF_INDEX);
         self.parent_def = Some(root);
     }
@@ -54,18 +55,10 @@ impl<'a> DefCollector<'a> {
                   data: DefPathData,
                   address_space: DefIndexAddressSpace)
                   -> DefIndex {
-        let parent_def = self.parent_def;
+        let parent_def = self.parent_def.unwrap();
         debug!("create_def(node_id={:?}, data={:?}, parent_def={:?})", node_id, data, parent_def);
-        self.definitions.create_def_with_parent(parent_def, node_id, data, address_space)
-    }
-
-    fn create_def_with_parent(&mut self,
-                              parent: Option<DefIndex>,
-                              node_id: NodeId,
-                              data: DefPathData,
-                              address_space: DefIndexAddressSpace)
-                              -> DefIndex {
-        self.definitions.create_def_with_parent(parent, node_id, data, address_space)
+        self.definitions
+            .create_def_with_parent(parent_def, node_id, data, address_space, self.expansion)
     }
 
     pub fn with_parent<F: FnOnce(&mut Self)>(&mut self, parent_def: DefIndex, f: F) {
@@ -92,8 +85,8 @@ impl<'a> DefCollector<'a> {
     fn visit_macro_invoc(&mut self, id: NodeId, const_expr: bool) {
         if let Some(ref mut visit) = self.visit_macro_invoc {
             visit(MacroInvocationData {
-                mark: Mark::from_placeholder_id(id),
-                const_expr: const_expr,
+                mark: id.placeholder_to_mark(),
+                const_expr,
                 def_index: self.parent_def.unwrap(),
             })
         }
@@ -120,6 +113,7 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
                 DefPathData::ValueNs(i.ident.name.as_str()),
             ItemKind::MacroDef(..) => DefPathData::MacroDef(i.ident.name.as_str()),
             ItemKind::Mac(..) => return self.visit_macro_invoc(i.id, false),
+            ItemKind::GlobalAsm(..) => DefPathData::Misc,
             ItemKind::Use(ref view_path) => {
                 match view_path.node {
                     ViewPathGlob(..) => {}
@@ -171,9 +165,9 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
                     }
 
                     for (index, field) in struct_def.fields().iter().enumerate() {
-                        let name = field.ident.map(|ident| ident.name.as_str())
-                            .unwrap_or(Symbol::intern(&index.to_string()).as_str());
-                        this.create_def(field.id, DefPathData::Field(name), REGULAR_SPACE);
+                        let name = field.ident.map(|ident| ident.name)
+                            .unwrap_or_else(|| Symbol::intern(&index.to_string()));
+                        this.create_def(field.id, DefPathData::Field(name.as_str()), REGULAR_SPACE);
                     }
                 }
                 _ => {}
@@ -239,21 +233,10 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
     }
 
     fn visit_pat(&mut self, pat: &'a Pat) {
-        let parent_def = self.parent_def;
-
         match pat.node {
             PatKind::Mac(..) => return self.visit_macro_invoc(pat.id, false),
-            PatKind::Ident(_, id, _) => {
-                let def = self.create_def(pat.id,
-                                          DefPathData::Binding(id.node.name.as_str()),
-                                          REGULAR_SPACE);
-                self.parent_def = Some(def);
-            }
-            _ => {}
+            _ => visit::walk_pat(self, pat),
         }
-
-        visit::walk_pat(self, pat);
-        self.parent_def = parent_def;
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {
@@ -290,7 +273,7 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
 
     fn visit_lifetime_def(&mut self, def: &'a LifetimeDef) {
         self.create_def(def.lifetime.id,
-                        DefPathData::LifetimeDef(def.lifetime.name.as_str()),
+                        DefPathData::LifetimeDef(def.lifetime.ident.name.as_str()),
                         REGULAR_SPACE);
     }
 

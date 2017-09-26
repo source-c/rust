@@ -13,7 +13,6 @@
 
 use intrinsics;
 use rustc::traits::{ObligationCause, ObligationCauseCode};
-use rustc::ty::subst::Substs;
 use rustc::ty::{self, TyCtxt, Ty};
 use rustc::util::nodemap::FxHashMap;
 use require_same_types;
@@ -35,38 +34,42 @@ fn equate_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                    output: Ty<'tcx>) {
     let def_id = tcx.hir.local_def_id(it.id);
 
-    let substs = Substs::for_item(tcx, def_id,
-                                  |_, _| tcx.mk_region(ty::ReErased),
-                                  |def, _| tcx.mk_param_from_def(def));
+    match it.node {
+        hir::ForeignItemFn(..) => {}
+        _ => {
+            struct_span_err!(tcx.sess, it.span, E0622,
+                             "intrinsic must be a function")
+                .span_label(it.span, "expected a function")
+                .emit();
+            return;
+        }
+    }
 
-    let fty = tcx.mk_fn_def(def_id, substs, ty::Binder(tcx.mk_fn_sig(
-        inputs.into_iter(),
-        output,
-        false,
-        hir::Unsafety::Unsafe,
-        abi
-    )));
-    let i_n_tps = tcx.item_generics(def_id).types.len();
+    let i_n_tps = tcx.generics_of(def_id).types.len();
     if i_n_tps != n_tps {
         let span = match it.node {
             hir::ForeignItemFn(_, _, ref generics) => generics.span,
-            hir::ForeignItemStatic(..) => it.span
+            _ => bug!()
         };
 
         struct_span_err!(tcx.sess, span, E0094,
                         "intrinsic has wrong number of type \
                         parameters: found {}, expected {}",
                         i_n_tps, n_tps)
-            .span_label(span, &format!("expected {} type parameter", n_tps))
+            .span_label(span, format!("expected {} type parameter", n_tps))
             .emit();
-    } else {
-        require_same_types(tcx,
-                           &ObligationCause::new(it.span,
-                                                 it.id,
-                                                 ObligationCauseCode::IntrinsicType),
-                           tcx.item_type(def_id),
-                           fty);
+        return;
     }
+
+    let fty = tcx.mk_fn_ptr(ty::Binder(tcx.mk_fn_sig(
+        inputs.into_iter(),
+        output,
+        false,
+        hir::Unsafety::Unsafe,
+        abi
+    )));
+    let cause = ObligationCause::new(it.span, it.id, ObligationCauseCode::IntrinsicType);
+    require_same_types(tcx, &cause, tcx.mk_fn_ptr(tcx.fn_sig(def_id)), fty);
 }
 
 /// Remember to add all intrinsics here, in librustc_trans/trans/intrinsic.rs,
@@ -101,7 +104,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             op => {
                 struct_span_err!(tcx.sess, it.span, E0092,
                       "unrecognized atomic operation function: `{}`", op)
-                  .span_label(it.span, &format!("unrecognized atomic operation"))
+                  .span_label(it.span, "unrecognized atomic operation")
                   .emit();
                 return;
             }
@@ -124,7 +127,6 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             "rustc_peek" => (1, vec![param(0)], param(0)),
             "init" => (1, Vec::new(), param(0)),
             "uninit" => (1, Vec::new(), param(0)),
-            "forget" => (1, vec![ param(0) ], tcx.mk_nil()),
             "transmute" => (2, vec![ param(0) ], param(1)),
             "move_val_init" => {
                 (1,
@@ -133,6 +135,14 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                     param(0)
                   ],
                tcx.mk_nil())
+            }
+            "prefetch_read_data" | "prefetch_write_data" |
+            "prefetch_read_instruction" | "prefetch_write_instruction" => {
+                (1, vec![tcx.mk_ptr(ty::TypeAndMut {
+                          ty: param(0),
+                          mutbl: hir::MutImmutable
+                         }), tcx.types.i32],
+                    tcx.mk_nil())
             }
             "drop_in_place" => {
                 (1, vec![tcx.mk_mut_ptr(param(0))], tcx.mk_nil())
@@ -265,7 +275,8 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             "volatile_store" =>
                 (1, vec![ tcx.mk_mut_ptr(param(0)), param(0) ], tcx.mk_nil()),
 
-            "ctpop" | "ctlz" | "cttz" | "bswap" => (1, vec![param(0)], param(0)),
+            "ctpop" | "ctlz" | "ctlz_nonzero" | "cttz" | "cttz_nonzero" | "bswap" =>
+                (1, vec![param(0)], param(0)),
 
             "add_with_overflow" | "sub_with_overflow"  | "mul_with_overflow" =>
                 (1, vec![param(0), param(0)],
@@ -302,11 +313,16 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 (0, vec![tcx.mk_fn_ptr(fn_ty), mut_u8, mut_u8], tcx.types.i32)
             }
 
+            "align_offset" => {
+                let ptr_ty = tcx.mk_imm_ptr(tcx.mk_nil());
+                (0, vec![ptr_ty, tcx.types.usize], tcx.types.usize)
+            },
+
             ref other => {
                 struct_span_err!(tcx.sess, it.span, E0093,
                                 "unrecognized intrinsic function: `{}`",
                                 *other)
-                                .span_label(it.span, &format!("unrecognized intrinsic"))
+                                .span_label(it.span, "unrecognized intrinsic")
                                 .emit();
                 return;
             }
@@ -325,7 +341,7 @@ pub fn check_platform_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     };
 
     let def_id = tcx.hir.local_def_id(it.id);
-    let i_n_tps = tcx.item_generics(def_id).types.len();
+    let i_n_tps = tcx.generics_of(def_id).types.len();
     let name = it.name.as_str();
 
     let (n_tps, inputs, output) = match &*name {
@@ -344,7 +360,7 @@ pub fn check_platform_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             match name["simd_shuffle".len()..].parse() {
                 Ok(n) => {
                     let params = vec![param(0), param(0),
-                                      tcx.mk_ty(ty::TyArray(tcx.types.u32, n))];
+                                      tcx.mk_array(tcx.types.u32, n)];
                     (2, params, param(1))
                 }
                 Err(_) => {
@@ -368,7 +384,7 @@ pub fn check_platform_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
                     let mut structural_to_nomimal = FxHashMap();
 
-                    let sig = tcx.item_type(def_id).fn_sig();
+                    let sig = tcx.fn_sig(def_id);
                     let sig = tcx.no_late_bound_regions(&sig).unwrap();
                     if intr.inputs.len() != sig.inputs().len() {
                         span_err!(tcx.sess, it.span, E0444,
@@ -407,8 +423,8 @@ fn match_intrinsic_type_to_type<'a, 'tcx>(
         tcx: TyCtxt<'a, 'tcx, 'tcx>,
         position: &str,
         span: Span,
-        structural_to_nominal: &mut FxHashMap<&'a intrinsics::Type, ty::Ty<'tcx>>,
-        expected: &'a intrinsics::Type, t: ty::Ty<'tcx>)
+        structural_to_nominal: &mut FxHashMap<&'a intrinsics::Type, Ty<'tcx>>,
+        expected: &'a intrinsics::Type, t: Ty<'tcx>)
 {
     use intrinsics::Type::*;
 
@@ -506,7 +522,7 @@ fn match_intrinsic_type_to_type<'a, 'tcx>(
                     }
                 }
                 _ => simple_error(&format!("`{}`", t),
-                                  &format!("tuple")),
+                                  "tuple"),
             }
         }
     }

@@ -191,10 +191,13 @@
 //! {
 //!     let result = match IntoIterator::into_iter(values) {
 //!         mut iter => loop {
+//!             let next;
 //!             match iter.next() {
-//!                 Some(x) => { println!("{}", x); },
+//!                 Some(val) => next = val,
 //!                 None => break,
-//!             }
+//!             };
+//!             let x = next;
+//!             let () = { println!("{}", x); };
 //!         },
 //!     };
 //!     result
@@ -208,7 +211,7 @@
 //! There's one more subtle bit here: the standard library contains an
 //! interesting implementation of [`IntoIterator`]:
 //!
-//! ```ignore
+//! ```ignore (only-for-syntax-highlight)
 //! impl<I: Iterator> IntoIterator for I
 //! ```
 //!
@@ -309,11 +312,8 @@ pub use self::iterator::Iterator;
 
 #[unstable(feature = "step_trait",
            reason = "likely to be replaced by finer-grained traits",
-           issue = "27741")]
+           issue = "42168")]
 pub use self::range::Step;
-#[unstable(feature = "step_by", reason = "recent addition",
-           issue = "27741")]
-pub use self::range::StepBy;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::sources::{Repeat, repeat};
@@ -358,12 +358,44 @@ impl<I> Iterator for Rev<I> where I: DoubleEndedIterator {
     fn next(&mut self) -> Option<<I as Iterator>::Item> { self.iter.next_back() }
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) { self.iter.size_hint() }
+
+    fn fold<Acc, F>(self, init: Acc, f: F) -> Acc
+        where F: FnMut(Acc, Self::Item) -> Acc,
+    {
+        self.iter.rfold(init, f)
+    }
+
+    #[inline]
+    fn find<P>(&mut self, predicate: P) -> Option<Self::Item>
+        where P: FnMut(&Self::Item) -> bool
+    {
+        self.iter.rfind(predicate)
+    }
+
+    #[inline]
+    fn rposition<P>(&mut self, predicate: P) -> Option<usize> where
+        P: FnMut(Self::Item) -> bool
+    {
+        self.iter.position(predicate)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<I> DoubleEndedIterator for Rev<I> where I: DoubleEndedIterator {
     #[inline]
     fn next_back(&mut self) -> Option<<I as Iterator>::Item> { self.iter.next() }
+
+    fn rfold<Acc, F>(self, init: Acc, f: F) -> Acc
+        where F: FnMut(Acc, Self::Item) -> Acc,
+    {
+        self.iter.fold(init, f)
+    }
+
+    fn rfind<P>(&mut self, predicate: P) -> Option<Self::Item>
+        where P: FnMut(&Self::Item) -> bool
+    {
+        self.iter.find(predicate)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -428,6 +460,12 @@ impl<'a, I, T: 'a> DoubleEndedIterator for Cloned<I>
 {
     fn next_back(&mut self) -> Option<T> {
         self.it.next_back().cloned()
+    }
+
+    fn rfold<Acc, F>(self, init: Acc, mut f: F) -> Acc
+        where F: FnMut(Acc, Self::Item) -> Acc,
+    {
+        self.it.rfold(init, move |acc, elt| f(acc, elt.clone()))
     }
 }
 
@@ -507,6 +545,60 @@ impl<I> Iterator for Cycle<I> where I: Clone + Iterator {
 
 #[unstable(feature = "fused", issue = "35602")]
 impl<I> FusedIterator for Cycle<I> where I: Clone + Iterator {}
+
+/// An adapter for stepping iterators by a custom amount.
+///
+/// This `struct` is created by the [`step_by`] method on [`Iterator`]. See
+/// its documentation for more.
+///
+/// [`step_by`]: trait.Iterator.html#method.step_by
+/// [`Iterator`]: trait.Iterator.html
+#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[unstable(feature = "iterator_step_by",
+           reason = "unstable replacement of Range::step_by",
+           issue = "27741")]
+#[derive(Clone, Debug)]
+pub struct StepBy<I> {
+    iter: I,
+    step: usize,
+    first_take: bool,
+}
+
+#[unstable(feature = "iterator_step_by",
+           reason = "unstable replacement of Range::step_by",
+           issue = "27741")]
+impl<I> Iterator for StepBy<I> where I: Iterator {
+    type Item = I::Item;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.first_take {
+            self.first_take = false;
+            self.iter.next()
+        } else {
+            self.iter.nth(self.step)
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let inner_hint = self.iter.size_hint();
+
+        if self.first_take {
+            let f = |n| if n == 0 { 0 } else { 1 + (n-1)/(self.step+1) };
+            (f(inner_hint.0), inner_hint.1.map(f))
+        } else {
+            let f = |n| n / (self.step+1);
+            (f(inner_hint.0), inner_hint.1.map(f))
+        }
+    }
+}
+
+// StepBy can only make the iterator shorter, so the len will still fit.
+#[unstable(feature = "iterator_step_by",
+           reason = "unstable replacement of Range::step_by",
+           issue = "27741")]
+impl<I> ExactSizeIterator for StepBy<I> where I: ExactSizeIterator {}
 
 /// An iterator that strings two iterators together.
 ///
@@ -687,6 +779,26 @@ impl<A, B> DoubleEndedIterator for Chain<A, B> where
             ChainState::Back => self.b.next_back(),
         }
     }
+
+    fn rfold<Acc, F>(self, init: Acc, mut f: F) -> Acc
+        where F: FnMut(Acc, Self::Item) -> Acc,
+    {
+        let mut accum = init;
+        match self.state {
+            ChainState::Both | ChainState::Back => {
+                accum = self.b.rfold(accum, &mut f);
+            }
+            _ => { }
+        }
+        match self.state {
+            ChainState::Both | ChainState::Front => {
+                accum = self.a.rfold(accum, &mut f);
+            }
+            _ => { }
+        }
+        accum
+    }
+
 }
 
 // Note: *both* must be fused to handle double-ended iterators.
@@ -766,8 +878,8 @@ impl<A, B> ZipImpl<A, B> for Zip<A, B>
     type Item = (A::Item, B::Item);
     default fn new(a: A, b: B) -> Self {
         Zip {
-            a: a,
-            b: b,
+            a,
+            b,
             index: 0, // unused
             len: 0, // unused
         }
@@ -829,10 +941,10 @@ impl<A, B> ZipImpl<A, B> for Zip<A, B>
     fn new(a: A, b: B) -> Self {
         let len = cmp::min(a.len(), b.len());
         Zip {
-            a: a,
-            b: b,
+            a,
+            b,
             index: 0,
-            len: len,
+            len,
         }
     }
 
@@ -961,7 +1073,7 @@ unsafe impl<A, B> TrustedLen for Zip<A, B>
 /// Now consider this twist where we add a call to `rev`. This version will
 /// print `('c', 1), ('b', 2), ('a', 3)`. Note that the letters are reversed,
 /// but the values of the counter still go in order. This is because `map()` is
-/// still being called lazilly on each item, but we are popping items off the
+/// still being called lazily on each item, but we are popping items off the
 /// back of the vector now, instead of shifting them from the front.
 ///
 /// ```rust
@@ -1019,6 +1131,13 @@ impl<B, I: DoubleEndedIterator, F> DoubleEndedIterator for Map<I, F> where
     #[inline]
     fn next_back(&mut self) -> Option<B> {
         self.iter.next_back().map(&mut self.f)
+    }
+
+    fn rfold<Acc, G>(self, init: Acc, mut g: G) -> Acc
+        where G: FnMut(Acc, Self::Item) -> Acc,
+    {
+        let mut f = self.f;
+        self.iter.rfold(init, move |acc, elt| g(acc, f(elt)))
     }
 }
 
@@ -1643,7 +1762,7 @@ impl<I> Iterator for Skip<I> where I: Iterator {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<I> ExactSizeIterator for Skip<I> where I: ExactSizeIterator {}
 
-#[stable(feature = "double_ended_skip_iterator", since = "1.8.0")]
+#[stable(feature = "double_ended_skip_iterator", since = "1.9.0")]
 impl<I> DoubleEndedIterator for Skip<I> where I: DoubleEndedIterator + ExactSizeIterator {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.len() > 0 {
@@ -1766,10 +1885,6 @@ impl<B, I, St, F> Iterator for Scan<I, St, F> where
     }
 }
 
-#[unstable(feature = "fused", issue = "35602")]
-impl<B, I, St, F> FusedIterator for Scan<I, St, F>
-    where I: FusedIterator, F: FnMut(&mut St, I::Item) -> Option<B> {}
-
 /// An iterator that maps each element to an iterator, and yields the elements
 /// of the produced iterators.
 ///
@@ -1831,6 +1946,16 @@ impl<I: Iterator, U: IntoIterator, F> Iterator for FlatMap<I, U, F>
             ((0, Some(0)), Some(a), Some(b)) => (lo, a.checked_add(b)),
             _ => (lo, None)
         }
+    }
+
+    #[inline]
+    fn fold<Acc, Fold>(self, init: Acc, mut fold: Fold) -> Acc
+        where Fold: FnMut(Acc, Self::Item) -> Acc,
+    {
+        self.frontiter.into_iter()
+            .chain(self.iter.map(self.f).map(U::into_iter))
+            .chain(self.backiter)
+            .fold(init, |acc, iter| iter.fold(acc, &mut fold))
     }
 }
 

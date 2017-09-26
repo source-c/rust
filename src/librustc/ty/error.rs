@@ -10,13 +10,16 @@
 
 use hir::def_id::DefId;
 use infer::type_variable;
+use middle::const_val::ConstVal;
 use ty::{self, BoundRegion, DefIdTree, Region, Ty, TyCtxt};
 
 use std::fmt;
 use syntax::abi;
-use syntax::ast::{self, Name};
+use syntax::ast;
 use errors::DiagnosticBuilder;
 use syntax_pos::Span;
+
+use rustc_const_math::ConstInt;
 
 use hir;
 
@@ -34,20 +37,20 @@ pub enum TypeError<'tcx> {
     AbiMismatch(ExpectedFound<abi::Abi>),
     Mutability,
     TupleSize(ExpectedFound<usize>),
-    FixedArraySize(ExpectedFound<usize>),
+    FixedArraySize(ExpectedFound<u64>),
     ArgCount,
-    RegionsDoesNotOutlive(&'tcx Region, &'tcx Region),
-    RegionsNotSame(&'tcx Region, &'tcx Region),
-    RegionsNoOverlap(&'tcx Region, &'tcx Region),
-    RegionsInsufficientlyPolymorphic(BoundRegion, &'tcx Region),
-    RegionsOverlyPolymorphic(BoundRegion, &'tcx Region),
+
+    RegionsDoesNotOutlive(Region<'tcx>, Region<'tcx>),
+    RegionsInsufficientlyPolymorphic(BoundRegion, Region<'tcx>),
+    RegionsOverlyPolymorphic(BoundRegion, Region<'tcx>),
+
     Sorts(ExpectedFound<Ty<'tcx>>),
     IntMismatch(ExpectedFound<ty::IntVarValue>),
     FloatMismatch(ExpectedFound<ast::FloatTy>),
     Traits(ExpectedFound<DefId>),
     VariadicMismatch(ExpectedFound<bool>),
     CyclicTy,
-    ProjectionNameMismatched(ExpectedFound<Name>),
+    ProjectionMismatched(ExpectedFound<DefId>),
     ProjectionBoundsLength(ExpectedFound<usize>),
     TyParamDefaultMismatch(ExpectedFound<type_variable::Default<'tcx>>),
     ExistentialMismatch(ExpectedFound<&'tcx ty::Slice<ty::ExistentialPredicate<'tcx>>>),
@@ -110,19 +113,17 @@ impl<'tcx> fmt::Display for TypeError<'tcx> {
             RegionsDoesNotOutlive(..) => {
                 write!(f, "lifetime mismatch")
             }
-            RegionsNotSame(..) => {
-                write!(f, "lifetimes are not the same")
-            }
-            RegionsNoOverlap(..) => {
-                write!(f, "lifetimes do not intersect")
-            }
             RegionsInsufficientlyPolymorphic(br, _) => {
-                write!(f, "expected bound lifetime parameter {}, \
-                           found concrete lifetime", br)
+                write!(f,
+                       "expected bound lifetime parameter{}{}, found concrete lifetime",
+                       if br.is_named() { " " } else { "" },
+                       br)
             }
             RegionsOverlyPolymorphic(br, _) => {
-                write!(f, "expected concrete lifetime, \
-                           found bound lifetime parameter {}", br)
+                write!(f,
+                       "expected concrete lifetime, found bound lifetime parameter{}{}",
+                       if br.is_named() { " " } else { "" },
+                       br)
             }
             Sorts(values) => ty::tls::with(|tcx| {
                 report_maybe_different(f, values.expected.sort_string(tcx),
@@ -150,11 +151,11 @@ impl<'tcx> fmt::Display for TypeError<'tcx> {
                        if values.expected { "variadic" } else { "non-variadic" },
                        if values.found { "variadic" } else { "non-variadic" })
             }
-            ProjectionNameMismatched(ref values) => {
+            ProjectionMismatched(ref values) => ty::tls::with(|tcx| {
                 write!(f, "expected {}, found {}",
-                       values.expected,
-                       values.found)
-            }
+                       tcx.item_path_str(values.expected),
+                       tcx.item_path_str(values.found))
+            }),
             ProjectionBoundsLength(ref values) => {
                 write!(f, "expected {} associated type bindings, found {}",
                        values.expected,
@@ -181,7 +182,13 @@ impl<'a, 'gcx, 'lcx, 'tcx> ty::TyS<'tcx> {
             ty::TyTuple(ref tys, _) if tys.is_empty() => self.to_string(),
 
             ty::TyAdt(def, _) => format!("{} `{}`", def.descr(), tcx.item_path_str(def.did)),
-            ty::TyArray(_, n) => format!("array of {} elements", n),
+            ty::TyArray(_, n) => {
+                if let ConstVal::Integral(ConstInt::Usize(n)) = n.val {
+                    format!("array of {} elements", n)
+                } else {
+                    "array".to_string()
+                }
+            }
             ty::TySlice(_) => "slice".to_string(),
             ty::TyRawPtr(_) => "*-ptr".to_string(),
             ty::TyRef(region, tymut) => {
@@ -209,6 +216,7 @@ impl<'a, 'gcx, 'lcx, 'tcx> ty::TyS<'tcx> {
                     |p| format!("trait {}", tcx.item_path_str(p.def_id())))
             }
             ty::TyClosure(..) => "closure".to_string(),
+            ty::TyGenerator(..) => "generator".to_string(),
             ty::TyTuple(..) => "tuple".to_string(),
             ty::TyInfer(ty::TyVar(_)) => "inferred type".to_string(),
             ty::TyInfer(ty::IntVar(_)) => "integral variable".to_string(),
@@ -238,33 +246,6 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         use self::TypeError::*;
 
         match err.clone() {
-            RegionsDoesNotOutlive(subregion, superregion) => {
-                self.note_and_explain_region(db, "", subregion, "...");
-                self.note_and_explain_region(db, "...does not necessarily outlive ",
-                                           superregion, "");
-            }
-            RegionsNotSame(region1, region2) => {
-                self.note_and_explain_region(db, "", region1, "...");
-                self.note_and_explain_region(db, "...is not the same lifetime as ",
-                                           region2, "");
-            }
-            RegionsNoOverlap(region1, region2) => {
-                self.note_and_explain_region(db, "", region1, "...");
-                self.note_and_explain_region(db, "...does not overlap ",
-                                           region2, "");
-            }
-            RegionsInsufficientlyPolymorphic(_, conc_region) => {
-                self.note_and_explain_region(db, "concrete lifetime that was found is ",
-                                           conc_region, "");
-            }
-            RegionsOverlyPolymorphic(_, &ty::ReVar(_)) => {
-                // don't bother to print out the message below for
-                // inference variables, it's not very illuminating.
-            }
-            RegionsOverlyPolymorphic(_, conc_region) => {
-                self.note_and_explain_region(db, "expected concrete lifetime is ",
-                                           conc_region, "");
-            }
             Sorts(values) => {
                 let expected_str = values.expected.sort_string(self);
                 let found_str = values.found.sort_string(self);

@@ -10,22 +10,13 @@
 
 //! Support for serializing the dep-graph and reloading it.
 
-#![crate_name = "rustc_incremental"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
 #![deny(warnings)]
 
-#![feature(rustc_private)]
-#![feature(staged_api)]
 #![feature(rand)]
-#![feature(core_intrinsics)]
 #![feature(conservative_impl_trait)]
-#![cfg_attr(stage0,feature(field_init_shorthand))]
-#![cfg_attr(stage0, feature(pub_restricted))]
 
 extern crate graphviz;
 #[macro_use] extern crate rustc;
@@ -37,17 +28,14 @@ extern crate syntax;
 extern crate syntax_pos;
 
 mod assert_dep_graph;
-mod calculate_svh;
 mod persist;
 
 pub use assert_dep_graph::assert_dep_graph;
-pub use calculate_svh::compute_incremental_hashes_map;
-pub use calculate_svh::IncrementalHashesMap;
-pub use calculate_svh::IchHasher;
 pub use persist::load_dep_graph;
+pub use persist::load_dep_graph_new;
 pub use persist::save_dep_graph;
 pub use persist::save_trans_partition;
 pub use persist::save_work_products;
 pub use persist::in_incr_comp_dir;
+pub use persist::prepare_session_directory;
 pub use persist::finalize_session_directory;
-pub use persist::delete_workproduct_files;

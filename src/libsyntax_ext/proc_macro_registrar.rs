@@ -17,6 +17,7 @@ use syntax::codemap::{ExpnInfo, NameAndSpan, MacroAttribute};
 use syntax::ext::base::ExtCtxt;
 use syntax::ext::build::AstBuilder;
 use syntax::ext::expand::ExpansionConfig;
+use syntax::ext::hygiene::{Mark, SyntaxContext};
 use syntax::fold::Folder;
 use syntax::parse::ParseSess;
 use syntax::ptr::P;
@@ -68,9 +69,9 @@ pub fn modify(sess: &ParseSess,
             attr_macros: Vec::new(),
             bang_macros: Vec::new(),
             in_root: true,
-            handler: handler,
-            is_proc_macro_crate: is_proc_macro_crate,
-            is_test_crate: is_test_crate,
+            handler,
+            is_proc_macro_crate,
+            is_test_crate,
         };
         visit::walk_crate(&mut collect, &krate);
         (collect.derives, collect.attr_macros, collect.bang_macros)
@@ -182,7 +183,7 @@ impl<'a> CollectProcMacros<'a> {
         if self.in_root && item.vis == ast::Visibility::Public {
             self.derives.push(ProcMacroDerive {
                 span: item.span,
-                trait_name: trait_name,
+                trait_name,
                 function_name: item.ident,
                 attrs: proc_attrs,
             });
@@ -328,7 +329,7 @@ impl<'a> Visitor<'a> for CollectProcMacros<'a> {
         visit::walk_item(self, item);
     }
 
-    fn visit_mod(&mut self, m: &'a ast::Mod, _s: Span, id: NodeId) {
+    fn visit_mod(&mut self, m: &'a ast::Mod, _s: Span, _a: &[ast::Attribute], id: NodeId) {
         let mut prev_in_root = self.in_root;
         if id != ast::CRATE_NODE_ID {
             prev_in_root = mem::replace(&mut self.in_root, false);
@@ -360,15 +361,17 @@ fn mk_registrar(cx: &mut ExtCtxt,
                 custom_derives: &[ProcMacroDerive],
                 custom_attrs: &[ProcMacroDef],
                 custom_macros: &[ProcMacroDef]) -> P<ast::Item> {
-    let eid = cx.codemap().record_expansion(ExpnInfo {
+    let mark = Mark::fresh(Mark::root());
+    mark.set_expn_info(ExpnInfo {
         call_site: DUMMY_SP,
         callee: NameAndSpan {
             format: MacroAttribute(Symbol::intern("proc_macro")),
             span: None,
             allow_internal_unstable: true,
+            allow_internal_unsafe: false,
         }
     });
-    let span = Span { expn_id: eid, ..DUMMY_SP };
+    let span = DUMMY_SP.with_ctxt(SyntaxContext::empty().apply_mark(mark));
 
     let proc_macro = Ident::from_str("proc_macro");
     let krate = cx.item(span,

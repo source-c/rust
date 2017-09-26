@@ -36,7 +36,10 @@ pub const LOCAL_CRATE: CrateNum = CrateNum(0);
 
 /// Virtual crate for builtin macros
 // FIXME(jseyfried): this is also used for custom derives until proc-macro crates get `CrateNum`s.
-pub const BUILTIN_MACROS_CRATE: CrateNum = CrateNum(!0);
+pub const BUILTIN_MACROS_CRATE: CrateNum = CrateNum(u32::MAX);
+
+/// A CrateNum value that indicates that something is wrong.
+pub const INVALID_CRATE: CrateNum = CrateNum(u32::MAX - 1);
 
 impl CrateNum {
     pub fn new(x: usize) -> CrateNum {
@@ -55,6 +58,8 @@ impl CrateNum {
     pub fn as_u32(&self) -> u32 {
         self.0
     }
+
+    pub fn as_def_id(&self) -> DefId { DefId { krate: *self, index: CRATE_DEF_INDEX } }
 }
 
 impl fmt::Display for CrateNum {
@@ -88,9 +93,29 @@ impl serialize::UseSpecializedDecodable for CrateNum {
 ///
 /// Since the DefIndex is mostly treated as an opaque ID, you probably
 /// don't have to care about these ranges.
-#[derive(Clone, Debug, Eq, Ord, PartialOrd, PartialEq, RustcEncodable,
+#[derive(Clone, Eq, Ord, PartialOrd, PartialEq, RustcEncodable,
            RustcDecodable, Hash, Copy)]
 pub struct DefIndex(u32);
+
+impl Idx for DefIndex {
+    fn new(value: usize) -> Self {
+        assert!(value < (u32::MAX) as usize);
+        DefIndex(value as u32)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl fmt::Debug for DefIndex {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,
+               "DefIndex({}:{})",
+               self.address_space().index(),
+               self.as_array_index())
+    }
+}
 
 impl DefIndex {
     #[inline]
@@ -130,6 +155,10 @@ impl DefIndex {
     #[inline]
     pub fn as_array_index(&self) -> usize {
         (self.0 & !DEF_INDEX_HI_START.0) as usize
+    }
+
+    pub fn from_array_index(i: usize, address_space: DefIndexAddressSpace) -> DefIndex {
+        DefIndex::new(address_space.start() + i)
     }
 }
 
@@ -184,6 +213,7 @@ impl fmt::Debug for DefId {
 
 
 impl DefId {
+    /// Make a local `DefId` with the given index.
     pub fn local(index: DefIndex) -> DefId {
         DefId { krate: LOCAL_CRATE, index: index }
     }

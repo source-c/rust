@@ -16,9 +16,10 @@ use resolve_imports::ImportResolver;
 use rustc::hir::def_id::{DefId, BUILTIN_MACROS_CRATE, CRATE_DEF_INDEX, DefIndex};
 use rustc::hir::def::{Def, Export};
 use rustc::hir::map::{self, DefCollector};
-use rustc::ty;
+use rustc::{ty, lint};
 use syntax::ast::{self, Name, Ident};
 use syntax::attr::{self, HasAttrs};
+use syntax::codemap::respan;
 use syntax::errors::DiagnosticBuilder;
 use syntax::ext::base::{self, Annotatable, Determinacy, MultiModifier, MultiDecorator};
 use syntax::ext::base::{MacroKind, SyntaxExtension, Resolver as SyntaxResolver};
@@ -76,7 +77,7 @@ pub enum LegacyScope<'a> {
 
 pub struct LegacyBinding<'a> {
     pub parent: Cell<LegacyScope<'a>>,
-    pub name: ast::Name,
+    pub ident: Ident,
     def_id: DefId,
     pub span: Span,
 }
@@ -110,7 +111,7 @@ impl<'a> base::Resolver for Resolver<'a> {
     }
 
     fn get_module_scope(&mut self, id: ast::NodeId) -> Mark {
-        let mark = Mark::fresh();
+        let mark = Mark::fresh(Mark::root());
         let module = self.module_map[&self.definitions.local_def_id(id)];
         self.invocations.insert(mark, self.arenas.alloc_invocation_data(InvocationData {
             module: Cell::new(module),
@@ -123,14 +124,14 @@ impl<'a> base::Resolver for Resolver<'a> {
     }
 
     fn eliminate_crate_var(&mut self, item: P<ast::Item>) -> P<ast::Item> {
-        struct EliminateCrateVar<'b, 'a: 'b>(&'b mut Resolver<'a>);
+        struct EliminateCrateVar<'b, 'a: 'b>(&'b mut Resolver<'a>, Span);
 
         impl<'a, 'b> Folder for EliminateCrateVar<'a, 'b> {
             fn fold_path(&mut self, mut path: ast::Path) -> ast::Path {
                 let ident = path.segments[0].identifier;
-                if ident.name == "$crate" {
+                if ident.name == keywords::DollarCrate.name() {
                     path.segments[0].identifier.name = keywords::CrateRoot.name();
-                    let module = self.0.resolve_crate_var(ident.ctxt);
+                    let module = self.0.resolve_crate_root(ident.ctxt);
                     if !module.is_local() {
                         let span = path.segments[0].span;
                         path.segments.insert(1, match module.kind {
@@ -149,7 +150,7 @@ impl<'a> base::Resolver for Resolver<'a> {
             }
         }
 
-        EliminateCrateVar(self).fold_item(item).expect_one("")
+        EliminateCrateVar(self, item.span).fold_item(item).expect_one("")
     }
 
     fn is_whitelisted_legacy_custom_derive(&self, name: Name) -> bool {
@@ -158,7 +159,7 @@ impl<'a> base::Resolver for Resolver<'a> {
 
     fn visit_expansion(&mut self, mark: Mark, expansion: &Expansion, derives: &[Mark]) {
         let invocation = self.invocations[&mark];
-        self.collect_def_ids(invocation, expansion);
+        self.collect_def_ids(mark, invocation, expansion);
 
         self.current_module = invocation.module.get();
         self.current_module.unresolved_invocations.borrow_mut().remove(&mark);
@@ -172,7 +173,6 @@ impl<'a> base::Resolver for Resolver<'a> {
             expansion: mark,
         };
         expansion.visit_with(&mut visitor);
-        self.current_module.unresolved_invocations.borrow_mut().remove(&mark);
         invocation.expansion.set(visitor.legacy_scope);
     }
 
@@ -223,8 +223,10 @@ impl<'a> base::Resolver for Resolver<'a> {
             let name = unwrap_or!(attrs[i].name(), continue);
 
             if name == "derive" {
-                let result = attrs[i].parse_list(&self.session.parse_sess,
-                                                 |parser| parser.parse_path(PathStyle::Mod));
+                let result = attrs[i].parse_list(&self.session.parse_sess, |parser| {
+                    parser.parse_path_allowing_meta(PathStyle::Mod)
+                });
+
                 let mut traits = match result {
                     Ok(traits) => traits,
                     Err(mut e) => {
@@ -271,7 +273,7 @@ impl<'a> base::Resolver for Resolver<'a> {
                         id: attr::mk_attr_id(),
                         style: ast::AttrStyle::Outer,
                         is_sugared_doc: false,
-                        span: span,
+                        span,
                     });
                 }
             }
@@ -284,18 +286,45 @@ impl<'a> base::Resolver for Resolver<'a> {
                      -> Result<Option<Rc<SyntaxExtension>>, Determinacy> {
         let def = match invoc.kind {
             InvocationKind::Attr { attr: None, .. } => return Ok(None),
-            _ => match self.resolve_invoc_to_def(invoc, scope, force) {
-                Ok(def) => def,
-                Err(determinacy) => return Err(determinacy),
-            },
+            _ => self.resolve_invoc_to_def(invoc, scope, force)?,
         };
+
         self.macro_defs.insert(invoc.expansion_data.mark, def.def_id());
-        Ok(Some(self.get_macro(def)))
+        let normal_module_def_id =
+            self.macro_def_scope(invoc.expansion_data.mark).normal_ancestor_id;
+        self.definitions.add_macro_def_scope(invoc.expansion_data.mark, normal_module_def_id);
+
+        self.unused_macros.remove(&def.def_id());
+        let ext = self.get_macro(def);
+        if ext.is_modern() {
+            invoc.expansion_data.mark.set_modern();
+        }
+        Ok(Some(ext))
     }
 
     fn resolve_macro(&mut self, scope: Mark, path: &ast::Path, kind: MacroKind, force: bool)
                      -> Result<Rc<SyntaxExtension>, Determinacy> {
-        self.resolve_macro_to_def(scope, path, kind, force).map(|def| self.get_macro(def))
+        self.resolve_macro_to_def(scope, path, kind, force).map(|def| {
+            self.unused_macros.remove(&def.def_id());
+            self.get_macro(def)
+        })
+    }
+
+    fn check_unused_macros(&self) {
+        for did in self.unused_macros.iter() {
+            let id_span = match *self.macro_map[did] {
+                SyntaxExtension::NormalTT { def_info, .. } => def_info,
+                SyntaxExtension::DeclMacro(.., osp) => osp,
+                _ => None,
+            };
+            if let Some((id, span)) = id_span {
+                let lint = lint::builtin::UNUSED_MACROS;
+                let msg = "unused macro definition";
+                self.session.buffer_lint(lint, id, span, msg);
+            } else {
+                bug!("attempted to create unused macro error, but span not available");
+            }
+        }
     }
 }
 
@@ -356,18 +385,25 @@ impl<'a> Resolver<'a> {
 
     fn resolve_macro_to_def(&mut self, scope: Mark, path: &ast::Path, kind: MacroKind, force: bool)
                             -> Result<Def, Determinacy> {
-        let ast::Path { ref segments, span } = *path;
-        if segments.iter().any(|segment| segment.parameters.is_some()) {
-            let kind =
-                if segments.last().unwrap().parameters.is_some() { "macro" } else { "module" };
-            let msg = format!("type parameters are not allowed on {}s", kind);
-            self.session.span_err(path.span, &msg);
-            return Err(Determinacy::Determined);
+        let def = self.resolve_macro_to_def_inner(scope, path, kind, force);
+        if def != Err(Determinacy::Undetermined) {
+            // Do not report duplicated errors on every undetermined resolution.
+            path.segments.iter().find(|segment| segment.parameters.is_some()).map(|segment| {
+                self.session.span_err(segment.parameters.as_ref().unwrap().span(),
+                                      "generic arguments in macro path");
+            });
         }
+        def
+    }
 
-        let path: Vec<_> = segments.iter().map(|seg| seg.identifier).collect();
+    fn resolve_macro_to_def_inner(&mut self, scope: Mark, path: &ast::Path,
+                                  kind: MacroKind, force: bool)
+                                  -> Result<Def, Determinacy> {
+        let ast::Path { ref segments, span } = *path;
+        let path: Vec<_> = segments.iter().map(|seg| respan(seg.span, seg.identifier)).collect();
         let invocation = self.invocations[&scope];
-        self.current_module = invocation.module.get();
+        let module = invocation.module.get();
+        self.current_module = if module.is_trait() { module.parent.unwrap() } else { module };
 
         if path.len() > 1 {
             if !self.use_extern_macros && self.gated_errors.insert(span) {
@@ -378,7 +414,7 @@ impl<'a> Resolver<'a> {
                 return Err(Determinacy::Determined);
             }
 
-            let def = match self.resolve_path(&path, Some(MacroNS), None) {
+            let def = match self.resolve_path(&path, Some(MacroNS), false, span) {
                 PathResult::NonModule(path_res) => match path_res.base_def() {
                     Def::Err => Err(Determinacy::Determined),
                     def @ _ => Ok(def),
@@ -390,17 +426,19 @@ impl<'a> Resolver<'a> {
                     Err(Determinacy::Determined)
                 },
             };
-            self.current_module.macro_resolutions.borrow_mut()
+            let path = path.iter().map(|p| p.node).collect::<Vec<_>>();
+            self.current_module.nearest_item_scope().macro_resolutions.borrow_mut()
                 .push((path.into_boxed_slice(), span));
             return def;
         }
 
-        let name = path[0].name;
-        let legacy_resolution = self.resolve_legacy_scope(&invocation.legacy_scope, name, false);
+        let legacy_resolution = self.resolve_legacy_scope(&invocation.legacy_scope,
+                                                          path[0].node,
+                                                          false);
         let result = if let Some(MacroBinding::Legacy(binding)) = legacy_resolution {
             Ok(Def::Macro(binding.def_id, MacroKind::Bang))
         } else {
-            match self.resolve_lexical_macro_path_segment(path[0], MacroNS, None) {
+            match self.resolve_lexical_macro_path_segment(path[0].node, MacroNS, false, span) {
                 Ok(binding) => Ok(binding.binding().def_ignoring_ambiguity()),
                 Err(Determinacy::Undetermined) if !force => return Err(Determinacy::Undetermined),
                 Err(_) => {
@@ -410,45 +448,54 @@ impl<'a> Resolver<'a> {
             }
         };
 
-        self.current_module.legacy_macro_resolutions.borrow_mut()
-            .push((scope, path[0], span, kind));
+        self.current_module.nearest_item_scope().legacy_macro_resolutions.borrow_mut()
+            .push((scope, path[0].node, span, kind));
 
         result
     }
 
     // Resolve the initial segment of a non-global macro path (e.g. `foo` in `foo::bar!();`)
     pub fn resolve_lexical_macro_path_segment(&mut self,
-                                              ident: Ident,
+                                              mut ident: Ident,
                                               ns: Namespace,
-                                              record_used: Option<Span>)
+                                              record_used: bool,
+                                              path_span: Span)
                                               -> Result<MacroBinding<'a>, Determinacy> {
+        ident = ident.modern();
         let mut module = Some(self.current_module);
         let mut potential_illegal_shadower = Err(Determinacy::Determined);
         let determinacy =
-            if record_used.is_some() { Determinacy::Determined } else { Determinacy::Undetermined };
+            if record_used { Determinacy::Determined } else { Determinacy::Undetermined };
         loop {
+            let orig_current_module = self.current_module;
             let result = if let Some(module) = module {
+                self.current_module = module; // Lexical resolutions can never be a privacy error.
                 // Since expanded macros may not shadow the lexical scope and
                 // globs may not shadow global macros (both enforced below),
                 // we resolve with restricted shadowing (indicated by the penultimate argument).
-                self.resolve_ident_in_module(module, ident, ns, true, record_used)
-                    .map(MacroBinding::Modern)
+                self.resolve_ident_in_module_unadjusted(
+                    module, ident, ns, true, record_used, path_span,
+                ).map(MacroBinding::Modern)
             } else {
                 self.global_macros.get(&ident.name).cloned().ok_or(determinacy)
                     .map(MacroBinding::Global)
             };
+            self.current_module = orig_current_module;
 
             match result.map(MacroBinding::binding) {
                 Ok(binding) => {
-                    let span = match record_used {
-                        Some(span) => span,
-                        None => return result,
-                    };
+                    if !record_used {
+                        return result;
+                    }
                     if let Ok(MacroBinding::Modern(shadower)) = potential_illegal_shadower {
                         if shadower.def() != binding.def() {
                             let name = ident.name;
                             self.ambiguity_errors.push(AmbiguityError {
-                                span: span, name: name, b1: shadower, b2: binding, lexical: true,
+                                span: path_span,
+                                name,
+                                b1: shadower,
+                                b2: binding,
+                                lexical: true,
                                 legacy: false,
                             });
                             return potential_illegal_shadower;
@@ -466,10 +513,7 @@ impl<'a> Resolver<'a> {
             }
 
             module = match module {
-                Some(module) => match module.kind {
-                    ModuleKind::Block(..) => module.parent,
-                    ModuleKind::Def(..) => None,
-                },
+                Some(module) => self.hygienic_lexical_parent(module, &mut ident.ctxt),
                 None => return potential_illegal_shadower,
             }
         }
@@ -477,9 +521,10 @@ impl<'a> Resolver<'a> {
 
     pub fn resolve_legacy_scope(&mut self,
                                 mut scope: &'a Cell<LegacyScope<'a>>,
-                                name: Name,
+                                ident: Ident,
                                 record_used: bool)
                                 -> Option<MacroBinding<'a>> {
+        let ident = ident.modern();
         let mut possible_time_travel = None;
         let mut relative_depth: u32 = 0;
         let mut binding = None;
@@ -506,7 +551,7 @@ impl<'a> Resolver<'a> {
                     scope = &invocation.legacy_scope;
                 }
                 LegacyScope::Binding(potential_binding) => {
-                    if potential_binding.name == name {
+                    if potential_binding.ident == ident {
                         if (!self.use_extern_macros || record_used) && relative_depth > 0 {
                             self.disallowed_shadowing.push(potential_binding);
                         }
@@ -520,9 +565,9 @@ impl<'a> Resolver<'a> {
 
         let binding = if let Some(binding) = binding {
             MacroBinding::Legacy(binding)
-        } else if let Some(binding) = self.global_macros.get(&name).cloned() {
+        } else if let Some(binding) = self.global_macros.get(&ident.name).cloned() {
             if !self.use_extern_macros {
-                self.record_use(Ident::with_empty_ctxt(name), MacroNS, binding, DUMMY_SP);
+                self.record_use(ident, MacroNS, binding, DUMMY_SP);
             }
             MacroBinding::Global(binding)
         } else {
@@ -532,7 +577,7 @@ impl<'a> Resolver<'a> {
         if !self.use_extern_macros {
             if let Some(scope) = possible_time_travel {
                 // Check for disallowed shadowing later
-                self.lexical_macro_resolutions.push((name, scope));
+                self.lexical_macro_resolutions.push((ident, scope));
             }
         }
 
@@ -542,9 +587,10 @@ impl<'a> Resolver<'a> {
     pub fn finalize_current_module_macro_resolutions(&mut self) {
         let module = self.current_module;
         for &(ref path, span) in module.macro_resolutions.borrow().iter() {
-            match self.resolve_path(path, Some(MacroNS), Some(span)) {
+            let path = path.iter().map(|p| respan(span, *p)).collect::<Vec<_>>();
+            match self.resolve_path(&path, Some(MacroNS), true, span) {
                 PathResult::NonModule(_) => {},
-                PathResult::Failed(msg, _) => {
+                PathResult::Failed(span, msg, _) => {
                     resolve_error(self, span, ResolutionError::FailedToResolve(&msg));
                 }
                 _ => unreachable!(),
@@ -553,8 +599,8 @@ impl<'a> Resolver<'a> {
 
         for &(mark, ident, span, kind) in module.legacy_macro_resolutions.borrow().iter() {
             let legacy_scope = &self.invocations[&mark].legacy_scope;
-            let legacy_resolution = self.resolve_legacy_scope(legacy_scope, ident.name, true);
-            let resolution = self.resolve_lexical_macro_path_segment(ident, MacroNS, Some(span));
+            let legacy_resolution = self.resolve_legacy_scope(legacy_scope, ident, true);
+            let resolution = self.resolve_lexical_macro_path_segment(ident, MacroNS, true, span);
             match (legacy_resolution, resolution) {
                 (Some(MacroBinding::Legacy(legacy_binding)), Ok(MacroBinding::Modern(binding))) => {
                     let msg1 = format!("`{}` could refer to the macro defined here", ident);
@@ -578,7 +624,7 @@ impl<'a> Resolver<'a> {
                             format!("cannot find derive macro `{}` in this scope", ident),
                     };
                     let mut err = self.session.struct_span_err(span, &msg);
-                    self.suggest_macro_name(&ident.name.as_str(), kind, &mut err);
+                    self.suggest_macro_name(&ident.name.as_str(), kind, &mut err, span);
                     err.emit();
                 },
                 _ => {},
@@ -587,10 +633,10 @@ impl<'a> Resolver<'a> {
     }
 
     fn suggest_macro_name(&mut self, name: &str, kind: MacroKind,
-                          err: &mut DiagnosticBuilder<'a>) {
+                          err: &mut DiagnosticBuilder<'a>, span: Span) {
         // First check if this is a locally-defined bang macro.
         let suggestion = if let MacroKind::Bang = kind {
-            find_best_match_for_name(self.macro_names.iter(), name, None)
+            find_best_match_for_name(self.macro_names.iter().map(|ident| &ident.name), name, None)
         } else {
             None
         // Then check global macros.
@@ -618,23 +664,27 @@ impl<'a> Resolver<'a> {
                 }
             };
             let ident = Ident::from_str(name);
-            self.lookup_typo_candidate(&vec![ident], MacroNS, is_macro)
+            self.lookup_typo_candidate(&vec![respan(span, ident)], MacroNS, is_macro, span)
         });
 
         if let Some(suggestion) = suggestion {
             if suggestion != name {
                 if let MacroKind::Bang = kind {
-                    err.help(&format!("did you mean `{}!`?", suggestion));
+                    err.span_suggestion(span, "you could try the macro",
+                                        format!("{}!", suggestion));
                 } else {
-                    err.help(&format!("did you mean `{}`?", suggestion));
+                    err.span_suggestion(span, "try", suggestion.to_string());
                 }
             } else {
-                err.help(&format!("have you added the `#[macro_use]` on the module/import?"));
+                err.help("have you added the `#[macro_use]` on the module/import?");
             }
         }
     }
 
-    fn collect_def_ids(&mut self, invocation: &'a InvocationData<'a>, expansion: &Expansion) {
+    fn collect_def_ids(&mut self,
+                       mark: Mark,
+                       invocation: &'a InvocationData<'a>,
+                       expansion: &Expansion) {
         let Resolver { ref mut invocations, arenas, graph_root, .. } = *self;
         let InvocationData { def_index, const_expr, .. } = *invocation;
 
@@ -650,7 +700,7 @@ impl<'a> Resolver<'a> {
             });
         };
 
-        let mut def_collector = DefCollector::new(&mut self.definitions);
+        let mut def_collector = DefCollector::new(&mut self.definitions, mark);
         def_collector.visit_macro_invoc = Some(visit_macro_invoc);
         def_collector.with_parent(def_index, |def_collector| {
             if const_expr {
@@ -662,7 +712,10 @@ impl<'a> Resolver<'a> {
         });
     }
 
-    pub fn define_macro(&mut self, item: &ast::Item, legacy_scope: &mut LegacyScope<'a>) {
+    pub fn define_macro(&mut self,
+                        item: &ast::Item,
+                        expansion: Mark,
+                        legacy_scope: &mut LegacyScope<'a>) {
         self.local_macro_def_scopes.insert(item.id, self.current_module);
         let ident = item.ident;
         if ident.name == "macro_rules" {
@@ -670,16 +723,33 @@ impl<'a> Resolver<'a> {
         }
 
         let def_id = self.definitions.local_def_id(item.id);
-        let ext = Rc::new(macro_rules::compile(&self.session.parse_sess, item));
+        let ext = Rc::new(macro_rules::compile(&self.session.parse_sess,
+                                               &self.session.features,
+                                               item));
         self.macro_map.insert(def_id, ext);
-        *legacy_scope = LegacyScope::Binding(self.arenas.alloc_legacy_binding(LegacyBinding {
-            parent: Cell::new(*legacy_scope), name: ident.name, def_id: def_id, span: item.span,
-        }));
-        self.macro_names.insert(ident.name);
 
-        if attr::contains_name(&item.attrs, "macro_export") {
+        let def = match item.node { ast::ItemKind::MacroDef(ref def) => def, _ => unreachable!() };
+        if def.legacy {
+            let ident = ident.modern();
+            self.macro_names.insert(ident);
+            *legacy_scope = LegacyScope::Binding(self.arenas.alloc_legacy_binding(LegacyBinding {
+                parent: Cell::new(*legacy_scope), ident: ident, def_id: def_id, span: item.span,
+            }));
+            if attr::contains_name(&item.attrs, "macro_export") {
+                let def = Def::Macro(def_id, MacroKind::Bang);
+                self.macro_exports
+                    .push(Export { ident: ident.modern(), def: def, span: item.span });
+            } else {
+                self.unused_macros.insert(def_id);
+            }
+        } else {
+            let module = self.current_module;
             let def = Def::Macro(def_id, MacroKind::Bang);
-            self.macro_exports.push(Export { name: ident.name, def: def, span: item.span });
+            let vis = self.resolve_visibility(&item.vis);
+            if vis != ty::Visibility::Public {
+                self.unused_macros.insert(def_id);
+            }
+            self.define(module, ident, MacroNS, (def, vis, item.span, expansion));
         }
     }
 
@@ -708,7 +778,7 @@ impl<'a> Resolver<'a> {
             _ => return,
         };
 
-        let crate_name = self.session.cstore.crate_name(krate);
+        let crate_name = self.cstore.crate_name_untracked(krate);
 
         self.session.struct_span_err(use_span, warn_msg)
             .help(&format!("instead, import the procedural macro like any other item: \

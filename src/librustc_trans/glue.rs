@@ -14,77 +14,36 @@
 
 use std;
 
-use llvm;
-use llvm::{ValueRef};
-use rustc::traits;
-use rustc::ty::{self, Ty, TypeFoldable};
+use builder::Builder;
 use common::*;
-use machine::*;
+use llvm::{ValueRef};
+use llvm;
 use meth;
 use monomorphize;
-use type_of::{sizing_type_of, align_of};
+use rustc::ty::layout::LayoutTyper;
+use rustc::ty::{self, Ty};
 use value::Value;
-use builder::Builder;
-
-pub fn needs_drop_glue<'a, 'tcx>(scx: &SharedCrateContext<'a, 'tcx>, t: Ty<'tcx>) -> bool {
-    assert!(t.is_normalized_for_trans());
-
-    let t = scx.tcx().erase_regions(&t);
-
-    // FIXME (#22815): note that type_needs_drop conservatively
-    // approximates in some cases and may say a type expression
-    // requires drop glue when it actually does not.
-    //
-    // (In this case it is not clear whether any harm is done, i.e.
-    // erroneously returning `true` in some cases where we could have
-    // returned `false` does not appear unsound. The impact on
-    // code quality is unknown at this time.)
-
-    if !scx.type_needs_drop(t) {
-        return false;
-    }
-    match t.sty {
-        ty::TyAdt(def, _) if def.is_box() => {
-            let typ = t.boxed_ty();
-            if !scx.type_needs_drop(typ) && scx.type_is_sized(typ) {
-                scx.tcx().infer_ctxt((), traits::Reveal::All).enter(|infcx| {
-                    let layout = t.layout(&infcx).unwrap();
-                    if layout.size(&scx.tcx().data_layout).bytes() == 0 {
-                        // `Box<ZeroSizeType>` does not allocate.
-                        false
-                    } else {
-                        true
-                    }
-                })
-            } else {
-                true
-            }
-        }
-        _ => true
-    }
-}
 
 pub fn size_and_align_of_dst<'a, 'tcx>(bcx: &Builder<'a, 'tcx>, t: Ty<'tcx>, info: ValueRef)
                                        -> (ValueRef, ValueRef) {
     debug!("calculate size of DST: {}; with lost info: {:?}",
            t, Value(info));
     if bcx.ccx.shared().type_is_sized(t) {
-        let sizing_type = sizing_type_of(bcx.ccx, t);
-        let size = llsize_of_alloc(bcx.ccx, sizing_type);
-        let align = align_of(bcx.ccx, t);
+        let size = bcx.ccx.size_of(t);
+        let align = bcx.ccx.align_of(t);
         debug!("size_and_align_of_dst t={} info={:?} size: {} align: {}",
                t, Value(info), size, align);
-        let size = C_uint(bcx.ccx, size);
-        let align = C_uint(bcx.ccx, align);
+        let size = C_usize(bcx.ccx, size);
+        let align = C_usize(bcx.ccx, align as u64);
         return (size, align);
     }
+    assert!(!info.is_null());
     match t.sty {
-        ty::TyAdt(def, substs) => {
+        ty::TyAdt(..) | ty::TyTuple(..) => {
             let ccx = bcx.ccx;
             // First get the size of all statically known fields.
-            // Don't use type_of::sizing_type_of because that expects t to be sized,
-            // and it also rounds up to alignment, which we want to avoid,
-            // as the unsized field's alignment could be smaller.
+            // Don't use size_of because it also rounds up to alignment, which we
+            // want to avoid, as the unsized field's alignment could be smaller.
             assert!(!t.is_simd());
             let layout = ccx.layout_of(t);
             debug!("DST {} layout: {:?}", t, layout);
@@ -100,13 +59,19 @@ pub fn size_and_align_of_dst<'a, 'tcx>(bcx: &Builder<'a, 'tcx>, t: Ty<'tcx>, inf
             };
             debug!("DST {} statically sized prefix size: {} align: {}",
                    t, sized_size, sized_align);
-            let sized_size = C_uint(ccx, sized_size);
-            let sized_align = C_uint(ccx, sized_align);
+            let sized_size = C_usize(ccx, sized_size);
+            let sized_align = C_usize(ccx, sized_align);
 
             // Recurse to get the size of the dynamically sized field (must be
             // the last field).
-            let last_field = def.struct_variant().fields.last().unwrap();
-            let field_ty = monomorphize::field_ty(bcx.tcx(), substs, last_field);
+            let field_ty = match t.sty {
+                ty::TyAdt(def, substs) => {
+                    let last_field = def.struct_variant().fields.last().unwrap();
+                    monomorphize::field_ty(bcx.tcx(), substs, last_field)
+                },
+                ty::TyTuple(tys, _) => tys.last().unwrap(),
+                _ => unreachable!(),
+            };
             let (unsized_size, unsized_align) = size_and_align_of_dst(bcx, field_ty, info);
 
             // FIXME (#26403, #27023): We should be adding padding
@@ -126,7 +91,7 @@ pub fn size_and_align_of_dst<'a, 'tcx>(bcx: &Builder<'a, 'tcx>, t: Ty<'tcx>, inf
                 (Some(sized_align), Some(unsized_align)) => {
                     // If both alignments are constant, (the sized_align should always be), then
                     // pick the correct alignment statically.
-                    C_uint(ccx, std::cmp::max(sized_align, unsized_align) as u64)
+                    C_usize(ccx, std::cmp::max(sized_align, unsized_align) as u64)
                 }
                 _ => bcx.select(bcx.icmp(llvm::IntUGT, sized_align, unsized_align),
                                 sized_align,
@@ -144,7 +109,7 @@ pub fn size_and_align_of_dst<'a, 'tcx>(bcx: &Builder<'a, 'tcx>, t: Ty<'tcx>, inf
             //
             //   `(size + (align-1)) & -align`
 
-            let addend = bcx.sub(align, C_uint(bcx.ccx, 1_u64));
+            let addend = bcx.sub(align, C_usize(bcx.ccx, 1));
             let size = bcx.and(bcx.add(size, addend), bcx.neg(align));
 
             (size, align)
@@ -154,14 +119,11 @@ pub fn size_and_align_of_dst<'a, 'tcx>(bcx: &Builder<'a, 'tcx>, t: Ty<'tcx>, inf
             (meth::SIZE.get_usize(bcx, info), meth::ALIGN.get_usize(bcx, info))
         }
         ty::TySlice(_) | ty::TyStr => {
-            let unit_ty = t.sequence_element_type(bcx.tcx());
+            let unit = t.sequence_element_type(bcx.tcx());
             // The info in this case is the length of the str, so the size is that
             // times the unit size.
-            let llunit_ty = sizing_type_of(bcx.ccx, unit_ty);
-            let unit_align = llalign_of_min(bcx.ccx, llunit_ty);
-            let unit_size = llsize_of_alloc(bcx.ccx, llunit_ty);
-            (bcx.mul(info, C_uint(bcx.ccx, unit_size)),
-             C_uint(bcx.ccx, unit_align))
+            (bcx.mul(info, C_usize(bcx.ccx, bcx.ccx.size_of(unit))),
+             C_usize(bcx.ccx, bcx.ccx.align_of(unit) as u64))
         }
         _ => bug!("Unexpected unsized type, found {}", t)
     }

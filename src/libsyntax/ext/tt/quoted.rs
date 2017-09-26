@@ -12,7 +12,7 @@ use ast;
 use ext::tt::macro_parser;
 use parse::{ParseSess, token};
 use print::pprust;
-use symbol::{keywords, Symbol};
+use symbol::keywords;
 use syntax_pos::{DUMMY_SP, Span, BytePos};
 use tokenstream;
 
@@ -34,17 +34,19 @@ impl Delimited {
     }
 
     pub fn open_tt(&self, span: Span) -> TokenTree {
-        let open_span = match span {
-            DUMMY_SP => DUMMY_SP,
-            _ => Span { hi: span.lo + BytePos(self.delim.len() as u32), ..span },
+        let open_span = if span == DUMMY_SP {
+            DUMMY_SP
+        } else {
+            span.with_lo(span.lo() + BytePos(self.delim.len() as u32))
         };
         TokenTree::Token(open_span, self.open_token())
     }
 
     pub fn close_tt(&self, span: Span) -> TokenTree {
-        let close_span = match span {
-            DUMMY_SP => DUMMY_SP,
-            _ => Span { lo: span.hi - BytePos(self.delim.len() as u32), ..span },
+        let close_span = if span == DUMMY_SP {
+            DUMMY_SP
+        } else {
+            span.with_lo(span.hi() - BytePos(self.delim.len() as u32))
         };
         TokenTree::Token(close_span, self.close_token())
     }
@@ -76,9 +78,11 @@ pub enum KleeneOp {
 pub enum TokenTree {
     Token(Span, token::Token),
     Delimited(Span, Rc<Delimited>),
-    /// A kleene-style repetition sequence with a span
+    /// A kleene-style repetition sequence
     Sequence(Span, Rc<SequenceRepetition>),
-    /// Matches a nonterminal. This is only used in the left hand side of MBE macros.
+    /// E.g. `$var`
+    MetaVar(Span, ast::Ident),
+    /// E.g. `$var:expr`. This is only used in the left hand side of MBE macros.
     MetaVarDecl(Span, ast::Ident /* name to bind */, ast::Ident /* kind of nonterminal */),
 }
 
@@ -91,6 +95,17 @@ impl TokenTree {
             },
             TokenTree::Sequence(_, ref seq) => seq.tts.len(),
             _ => 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match *self {
+            TokenTree::Delimited(_, ref delimed) => match delimed.delim {
+                token::NoDelim => delimed.tts.is_empty(),
+                _ => false,
+            },
+            TokenTree::Sequence(_, ref seq) => seq.tts.is_empty(),
+            _ => true,
         }
     }
 
@@ -113,10 +128,11 @@ impl TokenTree {
         }
     }
 
-    /// Retrieve the TokenTree's span.
+    /// Retrieve the `TokenTree`'s span.
     pub fn span(&self) -> Span {
         match *self {
             TokenTree::Token(sp, _) |
+            TokenTree::MetaVar(sp, _) |
             TokenTree::MetaVarDecl(sp, _, _) |
             TokenTree::Delimited(sp, _) |
             TokenTree::Sequence(sp, _) => sp,
@@ -131,17 +147,20 @@ pub fn parse(input: tokenstream::TokenStream, expect_matchers: bool, sess: &Pars
     while let Some(tree) = trees.next() {
         let tree = parse_tree(tree, &mut trees, expect_matchers, sess);
         match tree {
-            TokenTree::Token(start_sp, token::SubstNt(ident)) if expect_matchers => {
+            TokenTree::MetaVar(start_sp, ident) if expect_matchers => {
                 let span = match trees.next() {
                     Some(tokenstream::TokenTree::Token(span, token::Colon)) => match trees.next() {
-                        Some(tokenstream::TokenTree::Token(end_sp, token::Ident(kind))) => {
-                            let span = Span { lo: start_sp.lo, ..end_sp };
-                            result.push(TokenTree::MetaVarDecl(span, ident, kind));
-                            continue
-                        }
-                        tree @ _ => tree.as_ref().map(tokenstream::TokenTree::span).unwrap_or(span),
+                        Some(tokenstream::TokenTree::Token(end_sp, ref tok)) => match tok.ident() {
+                            Some(kind) => {
+                                let span = end_sp.with_lo(start_sp.lo());
+                                result.push(TokenTree::MetaVarDecl(span, ident, kind));
+                                continue
+                            }
+                            _ => end_sp,
+                        },
+                        tree => tree.as_ref().map(tokenstream::TokenTree::span).unwrap_or(span),
                     },
-                    tree @ _ => tree.as_ref().map(tokenstream::TokenTree::span).unwrap_or(start_sp),
+                    tree => tree.as_ref().map(tokenstream::TokenTree::span).unwrap_or(start_sp),
                 };
                 sess.missing_fragment_specifiers.borrow_mut().insert(span);
                 result.push(TokenTree::MetaVarDecl(span, ident, keywords::Invalid.ident()));
@@ -172,24 +191,25 @@ fn parse_tree<I>(tree: tokenstream::TokenTree,
                 let name_captures = macro_parser::count_names(&sequence);
                 TokenTree::Sequence(span, Rc::new(SequenceRepetition {
                     tts: sequence,
-                    separator: separator,
-                    op: op,
+                    separator,
+                    op,
                     num_captures: name_captures,
                 }))
             }
-            Some(tokenstream::TokenTree::Token(ident_span, token::Ident(ident))) => {
-                let span = Span { lo: span.lo, ..ident_span };
+            Some(tokenstream::TokenTree::Token(ident_span, ref token)) if token.is_ident() => {
+                let ident = token.ident().unwrap();
+                let span = ident_span.with_lo(span.lo());
                 if ident.name == keywords::Crate.name() {
-                    let ident = ast::Ident { name: Symbol::intern("$crate"), ..ident };
+                    let ident = ast::Ident { name: keywords::DollarCrate.name(), ..ident };
                     TokenTree::Token(span, token::Ident(ident))
                 } else {
-                    TokenTree::Token(span, token::SubstNt(ident))
+                    TokenTree::MetaVar(span, ident)
                 }
             }
             Some(tokenstream::TokenTree::Token(span, tok)) => {
                 let msg = format!("expected identifier, found `{}`", pprust::token_to_string(&tok));
                 sess.span_diagnostic.span_err(span, &msg);
-                TokenTree::Token(span, token::SubstNt(keywords::Invalid.ident()))
+                TokenTree::MetaVar(span, keywords::Invalid.ident())
             }
             None => TokenTree::Token(span, token::Dollar),
         },
@@ -223,10 +243,10 @@ fn parse_sep_and_kleene_op<I>(input: &mut I, span: Span, sess: &ParseSess)
                     Some(op) => return (Some(tok), op),
                     None => span,
                 },
-                tree @ _ => tree.as_ref().map(tokenstream::TokenTree::span).unwrap_or(span),
+                tree => tree.as_ref().map(tokenstream::TokenTree::span).unwrap_or(span),
             }
         },
-        tree @ _ => tree.as_ref().map(tokenstream::TokenTree::span).unwrap_or(span),
+        tree => tree.as_ref().map(tokenstream::TokenTree::span).unwrap_or(span),
     };
 
     sess.span_diagnostic.span_err(span, "expected `*` or `+`");

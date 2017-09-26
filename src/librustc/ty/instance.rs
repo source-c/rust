@@ -8,15 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use dep_graph::DepNode;
 use hir::def_id::DefId;
-use ty::{self, Ty, TypeFoldable, Substs};
+use ty::{self, Ty, TypeFoldable, Substs, TyCtxt};
 use util::ppaux;
 
-use std::borrow::Cow;
 use std::fmt;
-use syntax::ast;
-
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Instance<'tcx> {
@@ -28,15 +24,22 @@ pub struct Instance<'tcx> {
 pub enum InstanceDef<'tcx> {
     Item(DefId),
     Intrinsic(DefId),
-    // <fn() as FnTrait>::call_*
-    // def-id is FnTrait::call_*
+
+    /// <fn() as FnTrait>::call_*
+    /// def-id is FnTrait::call_*
     FnPtrShim(DefId, Ty<'tcx>),
-    // <Trait as Trait>::fn
+
+    /// <Trait as Trait>::fn
     Virtual(DefId, usize),
-    // <[mut closure] as FnOnce>::call_once
+
+    /// <[mut closure] as FnOnce>::call_once
     ClosureOnceShim { call_once: DefId },
-    // drop_in_place::<T>; None for empty drop glue.
+
+    /// drop_in_place::<T>; None for empty drop glue.
     DropGlue(DefId, Option<Ty<'tcx>>),
+
+    ///`<T as Clone>::clone` shim.
+    CloneShim(DefId, Ty<'tcx>),
 }
 
 impl<'tcx> InstanceDef<'tcx> {
@@ -47,40 +50,20 @@ impl<'tcx> InstanceDef<'tcx> {
             InstanceDef::FnPtrShim(def_id, _) |
             InstanceDef::Virtual(def_id, _) |
             InstanceDef::Intrinsic(def_id, ) |
-            InstanceDef::ClosureOnceShim { call_once: def_id }
-                => def_id,
-            InstanceDef::DropGlue(def_id, _) => def_id
+            InstanceDef::ClosureOnceShim { call_once: def_id } |
+            InstanceDef::DropGlue(def_id, _) |
+            InstanceDef::CloneShim(def_id, _) => def_id
         }
     }
 
     #[inline]
-    pub fn def_ty<'a>(&self, tcx: ty::TyCtxt<'a, 'tcx, 'tcx>) -> Ty<'tcx> {
-        tcx.item_type(self.def_id())
+    pub fn def_ty<'a>(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Ty<'tcx> {
+        tcx.type_of(self.def_id())
     }
 
     #[inline]
-    pub fn attrs<'a>(&self, tcx: ty::TyCtxt<'a, 'tcx, 'tcx>) -> Cow<'tcx, [ast::Attribute]> {
+    pub fn attrs<'a>(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> ty::Attributes<'tcx> {
         tcx.get_attrs(self.def_id())
-    }
-
-    pub(crate) fn dep_node(&self) -> DepNode<DefId> {
-        // HACK: def-id binning, project-style; someone replace this with
-        // real on-demand.
-        let ty = match self {
-            &InstanceDef::FnPtrShim(_, ty) => Some(ty),
-            &InstanceDef::DropGlue(_, ty) => ty,
-            _ => None
-        }.into_iter();
-
-        DepNode::MirShim(
-            Some(self.def_id()).into_iter().chain(
-                ty.flat_map(|t| t.walk()).flat_map(|t| match t.sty {
-                   ty::TyAdt(adt_def, _) => Some(adt_def.did),
-                   ty::TyProjection(ref proj) => Some(proj.trait_ref.def_id),
-                   _ => None,
-               })
-            ).collect()
-        )
     }
 }
 
@@ -104,6 +87,9 @@ impl<'tcx> fmt::Display for Instance<'tcx> {
             InstanceDef::DropGlue(_, ty) => {
                 write!(f, " - shim({:?})", ty)
             }
+            InstanceDef::CloneShim(_, ty) => {
+                write!(f, " - shim({:?})", ty)
+            }
         }
     }
 }
@@ -117,7 +103,7 @@ impl<'a, 'b, 'tcx> Instance<'tcx> {
         Instance { def: InstanceDef::Item(def_id), substs: substs }
     }
 
-    pub fn mono(tcx: ty::TyCtxt<'a, 'tcx, 'b>, def_id: DefId) -> Instance<'tcx> {
+    pub fn mono(tcx: TyCtxt<'a, 'tcx, 'b>, def_id: DefId) -> Instance<'tcx> {
         Instance::new(def_id, tcx.global_tcx().empty_substs_for_def_id(def_id))
     }
 

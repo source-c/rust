@@ -154,19 +154,19 @@ token : simple_token | ident | literal | symbol | whitespace token ;
 
 <p id="keyword-table-marker"></p>
 
-|          |          |          |          |         |
-|----------|----------|----------|----------|---------|
-| abstract | alignof  | as       | become   | box     |
-| break    | const    | continue | crate    | do      |
-| else     | enum     | extern   | false    | final   |
-| fn       | for      | if       | impl     | in      |
-| let      | loop     | macro    | match    | mod     |
-| move     | mut      | offsetof | override | priv    |
-| proc     | pub      | pure     | ref      | return  |
-| Self     | self     | sizeof   | static   | struct  |
-| super    | trait    | true     | type     | typeof  |
-| unsafe   | unsized  | use      | virtual  | where   |
-| while    | yield    |          |          |         |
+|          |          |          |          |          |
+|----------|----------|----------|----------|----------|
+| _        | abstract | alignof  | as       | become   |
+| box      | break    | const    | continue | crate    |
+| do       | else     | enum     | extern   | false    |
+| final    | fn       | for      | if       | impl     |
+| in       | let      | loop     | macro    | match    |
+| mod      | move     | mut      | offsetof | override |
+| priv     | proc     | pub      | pure     | ref      |
+| return   | Self     | self     | sizeof   | static   |
+| struct   | super    | trait    | true     | type     |
+| typeof   | unsafe   | unsized  | use      | virtual  |
+| where    | while    | yield    |          |          |
 
 
 Each of these keywords has special meaning in its grammar, and all of them are
@@ -761,8 +761,6 @@ closure_type := [ 'unsafe' ] [ '<' lifetime-list '>' ] '|' arg-list '|'
                 [ ':' bound-list ] [ '->' type ]
 lifetime-list := lifetime | lifetime ',' lifetime-list
 arg-list := ident ':' type | ident ':' type ',' arg-list
-bound-list := bound | bound '+' bound-list
-bound := path | lifetime
 ```
 
 ### Never type
@@ -779,6 +777,16 @@ never_type : "!" ;
 ### Type parameters
 
 **FIXME:** grammar?
+
+### Type parameter bounds
+
+```antlr
+bound-list := bound | bound '+' bound-list '+' ?
+bound := ty_bound | lt_bound
+lt_bound := lifetime
+ty_bound := ty_bound_noparen | (ty_bound_noparen)
+ty_bound_noparen := [?] [ for<lt_param_defs> ] simple_path
+```
 
 ### Self types
 

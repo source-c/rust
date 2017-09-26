@@ -9,13 +9,14 @@
 // except according to those terms.
 
 use llvm::ValueRef;
-use rustc::ty::{self, layout, Ty, TypeFoldable};
+use rustc::ty::{self, Ty, TypeFoldable};
+use rustc::ty::layout::{self, LayoutTyper};
 use rustc::mir;
 use rustc::mir::tcx::LvalueTy;
 use rustc_data_structures::indexed_vec::Idx;
 use adt;
 use builder::Builder;
-use common::{self, CrateContext, C_uint};
+use common::{self, CrateContext, C_usize};
 use consts;
 use machine;
 use type_of;
@@ -96,7 +97,8 @@ impl<'a, 'tcx> LvalueRef<'tcx> {
 
     pub fn alloca(bcx: &Builder<'a, 'tcx>, ty: Ty<'tcx>, name: &str) -> LvalueRef<'tcx> {
         debug!("alloca({:?}: {:?})", name, ty);
-        let tmp = bcx.alloca(type_of::type_of(bcx.ccx, ty), name);
+        let tmp = bcx.alloca(
+            type_of::type_of(bcx.ccx, ty), name, bcx.ccx.over_align_of(ty));
         assert!(!ty.has_param_types());
         Self::new_sized_ty(tmp, ty, Alignment::AbiAligned)
     }
@@ -104,7 +106,9 @@ impl<'a, 'tcx> LvalueRef<'tcx> {
     pub fn len(&self, ccx: &CrateContext<'a, 'tcx>) -> ValueRef {
         let ty = self.ty.to_ty(ccx.tcx());
         match ty.sty {
-            ty::TyArray(_, n) => common::C_uint(ccx, n),
+            ty::TyArray(_, n) => {
+                common::C_usize(ccx, n.val.to_const_int().unwrap().to_u64().unwrap())
+            }
             ty::TySlice(_) | ty::TyStr => {
                 assert!(self.llextra != ptr::null_mut());
                 self.llextra
@@ -130,11 +134,9 @@ impl<'a, 'tcx> LvalueRef<'tcx> {
 
         let alignment = self.alignment | Alignment::from_packed(st.packed);
 
+        let llfields = adt::struct_llfields(ccx, fields, st);
         let ptr_val = if needs_cast {
-            let fields = st.field_index_by_increasing_offset().map(|i| {
-                type_of::in_memory_type_of(ccx, fields[i])
-            }).collect::<Vec<_>>();
-            let real_ty = Type::struct_(ccx, &fields[..], st.packed);
+            let real_ty = Type::struct_(ccx, &llfields[..], st.packed);
             bcx.pointercast(self.llval, real_ty.ptr_to())
         } else {
             self.llval
@@ -146,14 +148,16 @@ impl<'a, 'tcx> LvalueRef<'tcx> {
         //   * Field is sized - pointer is properly aligned already
         if st.offsets[ix] == layout::Size::from_bytes(0) || st.packed ||
             bcx.ccx.shared().type_is_sized(fty) {
-                return (bcx.struct_gep(ptr_val, st.memory_index[ix] as usize), alignment);
+                return (bcx.struct_gep(
+                        ptr_val, adt::struct_llfields_index(st, ix)), alignment);
             }
 
         // If the type of the last field is [T] or str, then we don't need to do
         // any adjusments
         match fty.sty {
             ty::TySlice(..) | ty::TyStr => {
-                return (bcx.struct_gep(ptr_val, st.memory_index[ix] as usize), alignment);
+                return (bcx.struct_gep(
+                        ptr_val, adt::struct_llfields_index(st, ix)), alignment);
             }
             _ => ()
         }
@@ -162,7 +166,7 @@ impl<'a, 'tcx> LvalueRef<'tcx> {
         if !self.has_extra() {
             debug!("Unsized field `{}`, of `{:?}` has no metadata for adjustment",
                 ix, Value(ptr_val));
-            return (bcx.struct_gep(ptr_val, ix), alignment);
+            return (bcx.struct_gep(ptr_val, adt::struct_llfields_index(st, ix)), alignment);
         }
 
         // We need to get the pointer manually now.
@@ -184,7 +188,7 @@ impl<'a, 'tcx> LvalueRef<'tcx> {
 
 
         let offset = st.offsets[ix].bytes();
-        let unaligned_offset = C_uint(bcx.ccx, offset);
+        let unaligned_offset = C_usize(bcx.ccx, offset);
 
         // Get the alignment of the field
         let (_, align) = glue::size_and_align_of_dst(bcx, fty, meta);
@@ -195,7 +199,7 @@ impl<'a, 'tcx> LvalueRef<'tcx> {
         //   (unaligned offset + (align - 1)) & -align
 
         // Calculate offset
-        let align_sub_1 = bcx.sub(align, C_uint(bcx.ccx, 1u64));
+        let align_sub_1 = bcx.sub(align, C_usize(bcx.ccx, 1));
         let offset = bcx.and(bcx.add(unaligned_offset, align_sub_1),
         bcx.neg(align));
 
@@ -274,7 +278,7 @@ impl<'a, 'tcx> LvalueRef<'tcx> {
             // Slices already point to the array element type.
             bcx.inbounds_gep(self.llval, &[llindex])
         } else {
-            let zero = common::C_uint(bcx.ccx, 0u64);
+            let zero = common::C_usize(bcx.ccx, 0);
             bcx.inbounds_gep(self.llval, &[zero, llindex])
         }
     }
@@ -331,7 +335,8 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                         };
                         (tr_base.trans_field_ptr(bcx, field.index()), llextra)
                     }
-                    mir::ProjectionElem::Index(ref index) => {
+                    mir::ProjectionElem::Index(index) => {
+                        let index = &mir::Operand::Consume(mir::Lvalue::Local(index));
                         let index = self.trans_operand(bcx, index);
                         let llindex = self.prepare_index(bcx, index.immediate());
                         ((tr_base.project_index(bcx, llindex), align), ptr::null_mut())
@@ -339,19 +344,19 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                     mir::ProjectionElem::ConstantIndex { offset,
                                                          from_end: false,
                                                          min_length: _ } => {
-                        let lloffset = C_uint(bcx.ccx, offset);
+                        let lloffset = C_usize(bcx.ccx, offset as u64);
                         ((tr_base.project_index(bcx, lloffset), align), ptr::null_mut())
                     }
                     mir::ProjectionElem::ConstantIndex { offset,
                                                          from_end: true,
                                                          min_length: _ } => {
-                        let lloffset = C_uint(bcx.ccx, offset);
+                        let lloffset = C_usize(bcx.ccx, offset as u64);
                         let lllen = tr_base.len(bcx.ccx);
                         let llindex = bcx.sub(lllen, lloffset);
                         ((tr_base.project_index(bcx, llindex), align), ptr::null_mut())
                     }
                     mir::ProjectionElem::Subslice { from, to } => {
-                        let llbase = tr_base.project_index(bcx, C_uint(bcx.ccx, from));
+                        let llbase = tr_base.project_index(bcx, C_usize(bcx.ccx, from as u64));
 
                         let base_ty = tr_base.ty.to_ty(bcx.tcx());
                         match base_ty.sty {
@@ -366,7 +371,7 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                             ty::TySlice(..) => {
                                 assert!(tr_base.llextra != ptr::null_mut());
                                 let lllen = bcx.sub(tr_base.llextra,
-                                                    C_uint(bcx.ccx, from+to));
+                                                    C_usize(bcx.ccx, (from as u64)+(to as u64)));
                                 ((llbase, align), lllen)
                             }
                             _ => bug!("unexpected type {:?} in Subslice", base_ty)
@@ -378,7 +383,7 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
                 };
                 LvalueRef {
                     llval: llprojected,
-                    llextra: llextra,
+                    llextra,
                     ty: projected_ty,
                     alignment: align,
                 }
@@ -394,11 +399,11 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
     /// nmatsakis: is this still necessary? Not sure.
     fn prepare_index(&mut self, bcx: &Builder<'a, 'tcx>, llindex: ValueRef) -> ValueRef {
         let index_size = machine::llbitsize_of_real(bcx.ccx, common::val_ty(llindex));
-        let int_size = machine::llbitsize_of_real(bcx.ccx, bcx.ccx.int_type());
+        let int_size = machine::llbitsize_of_real(bcx.ccx, bcx.ccx.isize_ty());
         if index_size < int_size {
-            bcx.zext(llindex, bcx.ccx.int_type())
+            bcx.zext(llindex, bcx.ccx.isize_ty())
         } else if index_size > int_size {
-            bcx.trunc(llindex, bcx.ccx.int_type())
+            bcx.trunc(llindex, bcx.ccx.isize_ty())
         } else {
             llindex
         }
@@ -406,7 +411,7 @@ impl<'a, 'tcx> MirContext<'a, 'tcx> {
 
     pub fn monomorphized_lvalue_ty(&self, lvalue: &mir::Lvalue<'tcx>) -> Ty<'tcx> {
         let tcx = self.ccx.tcx();
-        let lvalue_ty = lvalue.ty(&self.mir, tcx);
+        let lvalue_ty = lvalue.ty(self.mir, tcx);
         self.monomorphize(&lvalue_ty.to_ty(tcx))
     }
 }

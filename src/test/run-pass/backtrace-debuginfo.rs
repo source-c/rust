@@ -10,7 +10,7 @@
 
 // We disable tail merging here because it can't preserve debuginfo and thus
 // potentially breaks the backtraces. Also, subtle changes can decide whether
-// tail merging suceeds, so the test might work today but fail tomorrow due to a
+// tail merging succeeds, so the test might work today but fail tomorrow due to a
 // seemingly completely unrelated change.
 // Unfortunately, LLVM has no "disable" option for this, so we have to set
 // "enable" to 0 instead.
@@ -33,9 +33,7 @@ macro_rules! dump_and_die {
     ($($pos:expr),*) => ({
         // FIXME(#18285): we cannot include the current position because
         // the macro span takes over the last frame's file/line.
-        if cfg!(any(target_os = "macos",
-                    target_os = "ios",
-                    target_os = "android",
+        if cfg!(any(target_os = "android",
                     all(target_os = "linux", target_arch = "arm"),
                     target_os = "freebsd",
                     target_os = "dragonfly",
@@ -88,7 +86,7 @@ fn inner(counter: &mut i32, main_pos: Pos, outer_pos: Pos) {
 }
 
 // LLVM does not yet output the required debug info to support showing inlined
-// function calls in backtraces when targetting MSVC, so disable inlining in
+// function calls in backtraces when targeting MSVC, so disable inlining in
 // this case.
 #[cfg_attr(not(target_env = "msvc"), inline(always))]
 #[cfg_attr(target_env = "msvc", inline(never))]

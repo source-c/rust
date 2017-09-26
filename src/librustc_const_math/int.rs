@@ -211,48 +211,6 @@ impl ConstInt {
         }
     }
 
-    pub fn to_f32(self) -> f32 {
-        match self {
-            I8(i) => i as f32,
-            I16(i) => i as f32,
-            I32(i) => i as f32,
-            I64(i) => i as f32,
-            I128(i) => i as f32,
-            Isize(Is16(i)) => i as f32,
-            Isize(Is32(i)) => i as f32,
-            Isize(Is64(i)) => i as f32,
-            U8(i) => i as f32,
-            U16(i) => i as f32,
-            U32(i) => i as f32,
-            U64(i) => i as f32,
-            U128(i) => i as f32,
-            Usize(Us16(i)) => i as f32,
-            Usize(Us32(i)) => i as f32,
-            Usize(Us64(i)) => i as f32,
-        }
-    }
-
-    pub fn to_f64(self) -> f64 {
-        match self {
-            I8(i) => i as f64,
-            I16(i) => i as f64,
-            I32(i) => i as f64,
-            I64(i) => i as f64,
-            I128(i) => i as f64,
-            Isize(Is16(i)) => i as f64,
-            Isize(Is32(i)) => i as f64,
-            Isize(Is64(i)) => i as f64,
-            U8(i) => i as f64,
-            U16(i) => i as f64,
-            U32(i) => i as f64,
-            U64(i) => i as f64,
-            U128(i) => i as f64,
-            Usize(Us16(i)) => i as f64,
-            Usize(Us32(i)) => i as f64,
-            Usize(Us64(i)) => i as f64,
-        }
-    }
-
     pub fn is_negative(&self) -> bool {
         match *self {
             I8(v) => v < 0,
@@ -353,17 +311,13 @@ impl ::std::fmt::Display for ConstInt {
             I32(i) => write!(fmt, "{}i32", i),
             I64(i) => write!(fmt, "{}i64", i),
             I128(i) => write!(fmt, "{}i128", i),
-            Isize(ConstIsize::Is64(i)) => write!(fmt, "{}isize", i),
-            Isize(ConstIsize::Is32(i)) => write!(fmt, "{}isize", i),
-            Isize(ConstIsize::Is16(i)) => write!(fmt, "{}isize", i),
+            Isize(i) => write!(fmt, "{}isize", i),
             U8(i) => write!(fmt, "{}u8", i),
             U16(i) => write!(fmt, "{}u16", i),
             U32(i) => write!(fmt, "{}u32", i),
             U64(i) => write!(fmt, "{}u64", i),
             U128(i) => write!(fmt, "{}u128", i),
-            Usize(ConstUsize::Us64(i)) => write!(fmt, "{}usize", i),
-            Usize(ConstUsize::Us32(i)) => write!(fmt, "{}usize", i),
-            Usize(ConstUsize::Us16(i)) => write!(fmt, "{}usize", i),
+            Usize(i) => write!(fmt, "{}usize", i),
         }
     }
 }

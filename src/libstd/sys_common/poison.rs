@@ -73,7 +73,9 @@ pub struct PoisonError<T> {
 }
 
 /// An enumeration of possible errors which can occur while calling the
-/// `try_lock` method.
+/// [`try_lock`] method.
+///
+/// [`try_lock`]: struct.Mutex.html#method.try_lock
 #[stable(feature = "rust1", since = "1.0.0")]
 pub enum TryLockError<T> {
     /// The lock could not be acquired because another thread failed while holding
@@ -96,7 +98,7 @@ pub enum TryLockError<T> {
 ///
 /// [`Ok`]: ../../std/result/enum.Result.html#variant.Ok
 /// [`Err`]: ../../std/result/enum.Result.html#variant.Err
-/// [`into_inner`]: ../../std/sync/struct.Mutex.html#method.into_inner
+/// [`into_inner`]: ../../std/sync/struct.PoisonError.html#method.into_inner
 #[stable(feature = "rust1", since = "1.0.0")]
 pub type LockResult<Guard> = Result<Guard, PoisonError<Guard>>;
 

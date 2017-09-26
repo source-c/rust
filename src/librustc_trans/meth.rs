@@ -17,9 +17,8 @@ use consts;
 use machine;
 use monomorphize;
 use type_::Type;
-use type_of::*;
 use value::Value;
-use rustc::ty;
+use rustc::ty::{self, Ty};
 
 #[derive(Copy, Clone, Debug)]
 pub struct VirtualIndex(usize);
@@ -47,7 +46,7 @@ impl<'a, 'tcx> VirtualIndex {
         // Load the data pointer from the object.
         debug!("get_int({:?}, {:?})", Value(llvtable), self);
 
-        let llvtable = bcx.pointercast(llvtable, Type::int(bcx.ccx).ptr_to());
+        let llvtable = bcx.pointercast(llvtable, Type::isize(bcx.ccx).ptr_to());
         let ptr = bcx.load(bcx.gepi(llvtable, &[self.0]), None);
         // Vtable loads are invariant
         bcx.set_invariant_load(ptr);
@@ -64,7 +63,7 @@ impl<'a, 'tcx> VirtualIndex {
 /// making an object `Foo<Trait>` from a value of type `Foo<T>`, then
 /// `trait_ref` would map `T:Trait`.
 pub fn get_vtable<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
-                            ty: ty::Ty<'tcx>,
+                            ty: Ty<'tcx>,
                             trait_ref: Option<ty::PolyExistentialTraitRef<'tcx>>)
                             -> ValueRef
 {
@@ -80,14 +79,10 @@ pub fn get_vtable<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
     // Not in the cache. Build it.
     let nullptr = C_null(Type::nil(ccx).ptr_to());
 
-    let size_ty = sizing_type_of(ccx, ty);
-    let size = machine::llsize_of_alloc(ccx, size_ty);
-    let align = align_of(ccx, ty);
-
     let mut components: Vec<_> = [
-        callee::get_fn(ccx, monomorphize::resolve_drop_in_place(ccx.shared(), ty)),
-        C_uint(ccx, size),
-        C_uint(ccx, align)
+        callee::get_fn(ccx, monomorphize::resolve_drop_in_place(ccx.tcx(), ty)),
+        C_usize(ccx, ccx.size_of(ty)),
+        C_usize(ccx, ccx.align_of(ty) as u64)
     ].iter().cloned().collect();
 
     if let Some(trait_ref) = trait_ref {

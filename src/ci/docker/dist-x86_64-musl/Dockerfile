@@ -17,21 +17,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   pkg-config
 
 WORKDIR /build/
-COPY build-musl.sh /build/
+COPY dist-x86_64-musl/build-musl.sh /build/
 RUN sh /build/build-musl.sh && rm -rf /build
 
-RUN curl -OL https://github.com/Yelp/dumb-init/releases/download/v1.2.0/dumb-init_1.2.0_amd64.deb && \
-    dpkg -i dumb-init_*.deb && \
-    rm dumb-init_*.deb
-ENTRYPOINT ["/usr/bin/dumb-init", "--"]
-
-RUN curl -o /usr/local/bin/sccache \
-      https://s3.amazonaws.com/rust-lang-ci/rust-ci-mirror/2017-03-24-sccache-x86_64-unknown-linux-musl && \
-      chmod +x /usr/local/bin/sccache
+COPY scripts/sccache.sh /scripts/
+RUN sh /scripts/sccache.sh
 
 ENV RUST_CONFIGURE_ARGS \
       --target=x86_64-unknown-linux-musl \
-      --musl-root-x86_64=/musl-x86_64
+      --musl-root-x86_64=/musl-x86_64 \
+      --enable-extended
 
 # Newer binutils broke things on some vms/distros (i.e., linking against
 # unknown relocs disabled by the following flag), so we need to go out of our

@@ -27,11 +27,19 @@
 //! for more details.
 //!
 //! Note: it is an important invariant that the default visitor walks
-//! the body of a function in "execution order" (more concretely,
-//! reverse post-order with respect to the CFG implied by the AST),
-//! meaning that if AST node A may execute before AST node B, then A
-//! is visited first.  The borrow checker in particular relies on this
-//! property.
+//! the body of a function in "execution order" - more concretely, if
+//! we consider the reverse post-order (RPO) of the CFG implied by the HIR,
+//! then a pre-order traversal of the HIR is consistent with the CFG RPO
+//! on the *initial CFG point* of each HIR node, while a post-order traversal
+//! of the HIR is consistent with the CFG RPO on each *final CFG point* of
+//! each CFG node.
+//!
+//! One thing that follows is that if HIR node A always starts/ends executing
+//! before HIR node B, then A appears in traversal pre/postorder before B,
+//! respectively. (This follows from RPO respecting CFG domination).
+//!
+//! This order consistency is required in a few places in rustc, for
+//! example generator inference, and possibly also HIR borrowck.
 
 use syntax::abi::Abi;
 use syntax::ast::{NodeId, CRATE_NODE_ID, Name, Attribute};
@@ -39,7 +47,7 @@ use syntax::codemap::Spanned;
 use syntax_pos::Span;
 use hir::*;
 use hir::def::Def;
-use hir::map::Map;
+use hir::map::{self, Map};
 use super::itemlikevisit::DeepVisitor;
 
 use std::cmp;
@@ -87,8 +95,8 @@ pub enum NestedVisitorMap<'this, 'tcx: 'this> {
     /// Do not visit nested item-like things, but visit nested things
     /// that are inside of an item-like.
     ///
-    /// **This is the most common choice.** A very commmon pattern is
-    /// to use `tcx.visit_all_item_likes_in_krate()` as an outer loop,
+    /// **This is the most common choice.** A very common pattern is
+    /// to use `visit_all_item_likes()` as an outer loop,
     /// and to have the visitor that visits the contents of each item
     /// using this setting.
     OnlyBodies(&'this Map<'tcx>),
@@ -403,15 +411,23 @@ pub fn walk_body<'v, V: Visitor<'v>>(visitor: &mut V, body: &'v Body) {
 }
 
 pub fn walk_local<'v, V: Visitor<'v>>(visitor: &mut V, local: &'v Local) {
+    // Intentionally visiting the expr first - the initialization expr
+    // dominates the local's definition.
+    walk_list!(visitor, visit_expr, &local.init);
+
     visitor.visit_id(local.id);
     visitor.visit_pat(&local.pat);
     walk_list!(visitor, visit_ty, &local.ty);
-    walk_list!(visitor, visit_expr, &local.init);
 }
 
 pub fn walk_lifetime<'v, V: Visitor<'v>>(visitor: &mut V, lifetime: &'v Lifetime) {
     visitor.visit_id(lifetime.id);
-    visitor.visit_name(lifetime.span, lifetime.name);
+    match lifetime.name {
+        LifetimeName::Name(name) => {
+            visitor.visit_name(lifetime.span, name);
+        }
+        LifetimeName::Static | LifetimeName::Implicit | LifetimeName::Underscore => {}
+    }
 }
 
 pub fn walk_lifetime_def<'v, V: Visitor<'v>>(visitor: &mut V, lifetime_def: &'v LifetimeDef) {
@@ -473,6 +489,9 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item) {
         ItemForeignMod(ref foreign_module) => {
             visitor.visit_id(item.id);
             walk_list!(visitor, visit_foreign_item, &foreign_module.items);
+        }
+        ItemGlobalAsm(_) => {
+            visitor.visit_id(item.id);
         }
         ItemTy(ref typ, ref type_parameters) => {
             visitor.visit_id(item.id);
@@ -578,7 +597,7 @@ pub fn walk_ty<'v, V: Visitor<'v>>(visitor: &mut V, typ: &'v Ty) {
         TyTypeof(expression) => {
             visitor.visit_nested_body(expression)
         }
-        TyInfer => {}
+        TyInfer | TyErr => {}
     }
 }
 
@@ -608,23 +627,17 @@ pub fn walk_path_segment<'v, V: Visitor<'v>>(visitor: &mut V,
                                              path_span: Span,
                                              segment: &'v PathSegment) {
     visitor.visit_name(path_span, segment.name);
-    visitor.visit_path_parameters(path_span, &segment.parameters);
+    if let Some(ref parameters) = segment.parameters {
+        visitor.visit_path_parameters(path_span, parameters);
+    }
 }
 
 pub fn walk_path_parameters<'v, V: Visitor<'v>>(visitor: &mut V,
                                                 _path_span: Span,
                                                 path_parameters: &'v PathParameters) {
-    match *path_parameters {
-        AngleBracketedParameters(ref data) => {
-            walk_list!(visitor, visit_ty, &data.types);
-            walk_list!(visitor, visit_lifetime, &data.lifetimes);
-            walk_list!(visitor, visit_assoc_type_binding, &data.bindings);
-        }
-        ParenthesizedParameters(ref data) => {
-            walk_list!(visitor, visit_ty, &data.inputs);
-            walk_list!(visitor, visit_ty, &data.output);
-        }
-    }
+    walk_list!(visitor, visit_lifetime, &path_parameters.lifetimes);
+    walk_list!(visitor, visit_ty, &path_parameters.types);
+    walk_list!(visitor, visit_assoc_type_binding, &path_parameters.bindings);
 }
 
 pub fn walk_assoc_type_binding<'v, V: Visitor<'v>>(visitor: &mut V,
@@ -658,8 +671,8 @@ pub fn walk_pat<'v, V: Visitor<'v>>(visitor: &mut V, pattern: &'v Pat) {
         PatKind::Ref(ref subpattern, _) => {
             visitor.visit_pat(subpattern)
         }
-        PatKind::Binding(_, def_id, ref pth1, ref optional_subpattern) => {
-            visitor.visit_def_mention(Def::Local(def_id));
+        PatKind::Binding(_, canonical_id, ref pth1, ref optional_subpattern) => {
+            visitor.visit_def_mention(Def::Local(canonical_id));
             visitor.visit_name(pth1.span, pth1.node);
             walk_list!(visitor, visit_pat, optional_subpattern);
         }
@@ -832,7 +845,16 @@ pub fn walk_trait_item_ref<'v, V: Visitor<'v>>(visitor: &mut V, trait_item_ref: 
 
 pub fn walk_impl_item<'v, V: Visitor<'v>>(visitor: &mut V, impl_item: &'v ImplItem) {
     // NB: Deliberately force a compilation error if/when new fields are added.
-    let ImplItem { id: _, name, ref vis, ref defaultness, ref attrs, ref node, span } = *impl_item;
+    let ImplItem {
+        id: _,
+        hir_id: _,
+        name,
+        ref vis,
+        ref defaultness,
+        ref attrs,
+        ref node,
+        span
+    } = *impl_item;
 
     visitor.visit_name(span, name);
     visitor.visit_vis(vis);
@@ -941,10 +963,9 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr) {
             walk_list!(visitor, visit_expr, arguments);
             visitor.visit_expr(callee_expression)
         }
-        ExprMethodCall(ref name, ref types, ref arguments) => {
-            visitor.visit_name(name.span, name.node);
+        ExprMethodCall(ref segment, _, ref arguments) => {
+            visitor.visit_path_segment(expression.span, segment);
             walk_list!(visitor, visit_expr, arguments);
-            walk_list!(visitor, visit_ty, types);
         }
         ExprBinary(_, ref left_expression, ref right_expression) => {
             visitor.visit_expr(left_expression);
@@ -960,7 +981,7 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr) {
         }
         ExprIf(ref head_expression, ref if_block, ref optional_else) => {
             visitor.visit_expr(head_expression);
-            visitor.visit_block(if_block);
+            visitor.visit_expr(if_block);
             walk_list!(visitor, visit_expr, optional_else);
         }
         ExprWhile(ref subexpression, ref block, ref opt_sp_name) => {
@@ -976,7 +997,7 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr) {
             visitor.visit_expr(subexpression);
             walk_list!(visitor, visit_arm, arms);
         }
-        ExprClosure(_, ref function_declaration, body, _fn_decl_span) => {
+        ExprClosure(_, ref function_declaration, body, _fn_decl_span, _gen) => {
             visitor.visit_fn(FnKind::Closure(&expression.attrs),
                              function_declaration,
                              body,
@@ -1039,6 +1060,9 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr) {
             for input in inputs {
                 visitor.visit_expr(input)
             }
+        }
+        ExprYield(ref subexpression) => {
+            visitor.visit_expr(subexpression);
         }
     }
 }

@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use ast;
+use ast::{self, NodeId};
 use codemap::{DUMMY_SP, dummy_spanned};
 use ext::base::ExtCtxt;
 use ext::expand::{Expansion, ExpansionKind};
@@ -35,7 +35,7 @@ pub fn placeholder(kind: ExpansionKind, id: ast::NodeId) -> Expansion {
     let vis = ast::Visibility::Inherited;
     let span = DUMMY_SP;
     let expr_placeholder = || P(ast::Expr {
-        id: id, span: span,
+        id, span,
         attrs: ast::ThinVec::new(),
         node: ast::ExprKind::Mac(mac_placeholder()),
     });
@@ -44,27 +44,30 @@ pub fn placeholder(kind: ExpansionKind, id: ast::NodeId) -> Expansion {
         ExpansionKind::Expr => Expansion::Expr(expr_placeholder()),
         ExpansionKind::OptExpr => Expansion::OptExpr(Some(expr_placeholder())),
         ExpansionKind::Items => Expansion::Items(SmallVector::one(P(ast::Item {
-            id: id, span: span, ident: ident, vis: vis, attrs: attrs,
+            id, span, ident, vis, attrs,
             node: ast::ItemKind::Mac(mac_placeholder()),
+            tokens: None,
         }))),
         ExpansionKind::TraitItems => Expansion::TraitItems(SmallVector::one(ast::TraitItem {
-            id: id, span: span, ident: ident, attrs: attrs,
+            id, span, ident, attrs,
             node: ast::TraitItemKind::Macro(mac_placeholder()),
+            tokens: None,
         })),
         ExpansionKind::ImplItems => Expansion::ImplItems(SmallVector::one(ast::ImplItem {
-            id: id, span: span, ident: ident, vis: vis, attrs: attrs,
+            id, span, ident, vis, attrs,
             node: ast::ImplItemKind::Macro(mac_placeholder()),
             defaultness: ast::Defaultness::Final,
+            tokens: None,
         })),
         ExpansionKind::Pat => Expansion::Pat(P(ast::Pat {
-            id: id, span: span, node: ast::PatKind::Mac(mac_placeholder()),
+            id, span, node: ast::PatKind::Mac(mac_placeholder()),
         })),
         ExpansionKind::Ty => Expansion::Ty(P(ast::Ty {
-            id: id, span: span, node: ast::TyKind::Mac(mac_placeholder()),
+            id, span, node: ast::TyKind::Mac(mac_placeholder()),
         })),
         ExpansionKind::Stmts => Expansion::Stmts(SmallVector::one({
             let mac = P((mac_placeholder(), ast::MacStmtStyle::Braces, ast::ThinVec::new()));
-            ast::Stmt { id: id, span: span, node: ast::StmtKind::Mac(mac) }
+            ast::Stmt { id, span, node: ast::StmtKind::Mac(mac) }
         })),
     }
 }
@@ -78,9 +81,9 @@ pub struct PlaceholderExpander<'a, 'b: 'a> {
 impl<'a, 'b> PlaceholderExpander<'a, 'b> {
     pub fn new(cx: &'a mut ExtCtxt<'b>, monotonic: bool) -> Self {
         PlaceholderExpander {
-            cx: cx,
+            cx,
             expansions: HashMap::new(),
-            monotonic: monotonic,
+            monotonic,
         }
     }
 
@@ -88,7 +91,7 @@ impl<'a, 'b> PlaceholderExpander<'a, 'b> {
         let mut expansion = expansion.fold_with(self);
         if let Expansion::Items(mut items) = expansion {
             for derive in derives {
-                match self.remove(derive.as_placeholder_id()) {
+                match self.remove(NodeId::placeholder_from_mark(derive)) {
                     Expansion::Items(derived_items) => items.extend(derived_items),
                     _ => unreachable!(),
                 }
@@ -106,8 +109,8 @@ impl<'a, 'b> PlaceholderExpander<'a, 'b> {
 impl<'a, 'b> Folder for PlaceholderExpander<'a, 'b> {
     fn fold_item(&mut self, item: P<ast::Item>) -> SmallVector<P<ast::Item>> {
         match item.node {
-            ast::ItemKind::Mac(ref mac) if !mac.node.path.segments.is_empty() => {}
             ast::ItemKind::Mac(_) => return self.remove(item.id).make_items(),
+            ast::ItemKind::MacroDef(_) => return SmallVector::one(item),
             _ => {}
         }
 

@@ -38,7 +38,10 @@ static ENV_LOCK: Mutex = Mutex::new();
 
 extern {
     #[cfg(not(target_os = "dragonfly"))]
-    #[cfg_attr(any(target_os = "linux", target_os = "emscripten", target_os = "fuchsia"),
+    #[cfg_attr(any(target_os = "linux",
+                   target_os = "emscripten",
+                   target_os = "fuchsia",
+                   target_os = "l4re"),
                link_name = "__errno_location")]
     #[cfg_attr(any(target_os = "bitrig",
                    target_os = "netbsd",
@@ -253,7 +256,12 @@ pub fn current_exe() -> io::Result<PathBuf> {
 
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "emscripten"))]
 pub fn current_exe() -> io::Result<PathBuf> {
-    ::fs::read_link("/proc/self/exe")
+    let selfexe = PathBuf::from("/proc/self/exe");
+    if selfexe.exists() {
+        ::fs::read_link(selfexe)
+    } else {
+        Err(io::Error::new(io::ErrorKind::Other, "no /proc/self/exe available. Is /proc mounted?"))
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -341,10 +349,10 @@ pub fn current_exe() -> io::Result<PathBuf> {
     }
 }
 
-#[cfg(target_os = "fuchsia")]
+#[cfg(any(target_os = "fuchsia", target_os = "l4re"))]
 pub fn current_exe() -> io::Result<PathBuf> {
     use io::ErrorKind;
-    Err(io::Error::new(ErrorKind::Other, "Not yet implemented on fuchsia"))
+    Err(io::Error::new(ErrorKind::Other, "Not yet implemented!"))
 }
 
 pub struct Env {

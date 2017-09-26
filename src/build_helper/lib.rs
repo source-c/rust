@@ -13,7 +13,6 @@
 extern crate filetime;
 
 use std::fs::File;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{fs, env};
@@ -36,41 +35,97 @@ macro_rules! t {
     })
 }
 
-pub fn run(cmd: &mut Command) {
-    println!("running: {:?}", cmd);
-    run_silent(cmd);
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum BuildExpectation {
+    Succeeding,
+    Failing,
+    None,
 }
 
-pub fn run_silent(cmd: &mut Command) {
+pub fn run(cmd: &mut Command, expect: BuildExpectation) {
+    println!("running: {:?}", cmd);
+    run_silent(cmd, expect);
+}
+
+pub fn run_silent(cmd: &mut Command, expect: BuildExpectation) {
+    if !try_run_silent(cmd, expect) {
+        std::process::exit(1);
+    }
+}
+
+pub fn try_run_silent(cmd: &mut Command, expect: BuildExpectation) -> bool {
     let status = match cmd.status() {
         Ok(status) => status,
         Err(e) => fail(&format!("failed to execute command: {:?}\nerror: {}",
                                 cmd, e)),
     };
-    if !status.success() {
-        fail(&format!("command did not execute successfully: {:?}\n\
-                       expected success, got: {}",
-                      cmd,
-                      status));
+    process_status(
+        cmd,
+        status.success(),
+        expect,
+        || println!("\n\ncommand did not execute successfully: {:?}\n\
+                    expected success, got: {}\n\n",
+                    cmd,
+                    status))
+}
+
+fn process_status<F: FnOnce()>(
+    cmd: &Command,
+    success: bool,
+    expect: BuildExpectation,
+    f: F,
+) -> bool {
+    use BuildExpectation::*;
+    match (expect, success) {
+        (None, false) => { f(); false },
+        // Non-tool build succeeds, everything is good
+        (None, true) => true,
+        // Tool expected to work and is working
+        (Succeeding, true) => true,
+        // Tool expected to fail and is failing
+        (Failing, false) => {
+            println!("This failure is expected (see `src/tools/toolstate.toml`)");
+            true
+        },
+        // Tool expected to work, but is failing
+        (Succeeding, false) => {
+            f();
+            println!("You can disable the tool in `src/tools/toolstate.toml`");
+            false
+        },
+        // Tool expected to fail, but is working
+        (Failing, true) => {
+            println!("Expected `{:?}` to fail, but it succeeded.\n\
+                     Please adjust `src/tools/toolstate.toml` accordingly", cmd);
+            false
+        }
     }
 }
 
-pub fn run_suppressed(cmd: &mut Command) {
+pub fn run_suppressed(cmd: &mut Command, expect: BuildExpectation) {
+    if !try_run_suppressed(cmd, expect) {
+        std::process::exit(1);
+    }
+}
+
+pub fn try_run_suppressed(cmd: &mut Command, expect: BuildExpectation) -> bool {
     let output = match cmd.output() {
         Ok(status) => status,
         Err(e) => fail(&format!("failed to execute command: {:?}\nerror: {}",
                                 cmd, e)),
     };
-    if !output.status.success() {
-        fail(&format!("command did not execute successfully: {:?}\n\
-                       expected success, got: {}\n\n\
-                       stdout ----\n{}\n\
-                       stderr ----\n{}\n",
-                      cmd,
-                      output.status,
-                      String::from_utf8_lossy(&output.stdout),
-                      String::from_utf8_lossy(&output.stderr)));
-    }
+    process_status(
+        cmd,
+        output.status.success(),
+        expect,
+        || println!("\n\ncommand did not execute successfully: {:?}\n\
+                  expected success, got: {}\n\n\
+                  stdout ----\n{}\n\
+                  stderr ----\n{}\n\n",
+                 cmd,
+                 output.status,
+                 String::from_utf8_lossy(&output.stdout),
+                 String::from_utf8_lossy(&output.stderr)))
 }
 
 pub fn gnu_target(target: &str) -> String {
@@ -197,8 +252,12 @@ pub fn native_lib_boilerplate(src_name: &str,
 
     let out_dir = env::var_os("RUSTBUILD_NATIVE_DIR").unwrap_or(env::var_os("OUT_DIR").unwrap());
     let out_dir = PathBuf::from(out_dir).join(out_name);
-    t!(create_dir_racy(&out_dir));
-    println!("cargo:rustc-link-lib=static={}", link_name);
+    t!(fs::create_dir_all(&out_dir));
+    if link_name.contains('=') {
+        println!("cargo:rustc-link-lib={}", link_name);
+    } else {
+        println!("cargo:rustc-link-lib=static={}", link_name);
+    }
     println!("cargo:rustc-link-search=native={}", out_dir.join(search_subdir).display());
 
     let timestamp = out_dir.join("rustbuild.timestamp");
@@ -207,6 +266,24 @@ pub fn native_lib_boilerplate(src_name: &str,
     } else {
         Err(())
     }
+}
+
+pub fn sanitizer_lib_boilerplate(sanitizer_name: &str) -> Result<NativeLibBoilerplate, ()> {
+    let (link_name, search_path) = match &*env::var("TARGET").unwrap() {
+        "x86_64-unknown-linux-gnu" => (
+            format!("clang_rt.{}-x86_64", sanitizer_name),
+            "build/lib/linux",
+        ),
+        "x86_64-apple-darwin" => (
+            format!("dylib=clang_rt.{}_osx_dynamic", sanitizer_name),
+            "build/lib/darwin",
+        ),
+        _ => return Err(()),
+    };
+    native_lib_boilerplate("libcompiler_builtins/compiler-rt",
+                           sanitizer_name,
+                           &link_name,
+                           search_path)
 }
 
 fn dir_up_to_date(src: &Path, threshold: &FileTime) -> bool {
@@ -223,22 +300,4 @@ fn dir_up_to_date(src: &Path, threshold: &FileTime) -> bool {
 fn fail(s: &str) -> ! {
     println!("\n\n{}\n\n", s);
     std::process::exit(1);
-}
-
-fn create_dir_racy(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Ok(()) => return Ok(()),
-        Err(ref e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
-        Err(ref e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    match path.parent() {
-        Some(p) => try!(create_dir_racy(p)),
-        None => return Err(io::Error::new(io::ErrorKind::Other, "failed to create whole tree")),
-    }
-    match fs::create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(ref e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e),
-    }
 }

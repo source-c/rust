@@ -41,15 +41,15 @@ use rustc_data_structures::bitvec::BitVector;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 use rustc::ty::TyCtxt;
 use rustc::mir::*;
-use rustc::mir::transform::{MirPass, MirSource, Pass};
+use rustc::mir::transform::{MirPass, MirSource};
 use rustc::mir::visit::{MutVisitor, Visitor, LvalueContext};
-use std::fmt;
+use std::borrow::Cow;
 
-pub struct SimplifyCfg<'a> { label: &'a str }
+pub struct SimplifyCfg { label: String }
 
-impl<'a> SimplifyCfg<'a> {
-    pub fn new(label: &'a str) -> Self {
-        SimplifyCfg { label: label }
+impl SimplifyCfg {
+    pub fn new(label: &str) -> Self {
+        SimplifyCfg { label: format!("SimplifyCfg-{}", label) }
     }
 }
 
@@ -61,20 +61,18 @@ pub fn simplify_cfg(mir: &mut Mir) {
     mir.basic_blocks_mut().raw.shrink_to_fit();
 }
 
-impl<'l, 'tcx> MirPass<'tcx> for SimplifyCfg<'l> {
-    fn run_pass<'a>(&mut self, _tcx: TyCtxt<'a, 'tcx, 'tcx>, _src: MirSource, mir: &mut Mir<'tcx>) {
+impl MirPass for SimplifyCfg {
+    fn name<'a>(&'a self) -> Cow<'a, str> {
+        Cow::Borrowed(&self.label)
+    }
+
+    fn run_pass<'a, 'tcx>(&self,
+                          _tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                          _src: MirSource,
+                          mir: &mut Mir<'tcx>) {
         debug!("SimplifyCfg({:?}) - simplifying {:?}", self.label, mir);
         simplify_cfg(mir);
     }
-}
-
-impl<'l> Pass for SimplifyCfg<'l> {
-    fn disambiguator<'a>(&'a self) -> Option<Box<fmt::Display+'a>> {
-        Some(Box::new(self.label))
-    }
-
-    // avoid calling `type_name` - it contains `<'static>`
-    fn name(&self) -> ::std::borrow::Cow<'static, str> { "SimplifyCfg".into() }
 }
 
 pub struct CfgSimplifier<'a, 'tcx: 'a> {
@@ -101,12 +99,14 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
         let basic_blocks = mir.basic_blocks_mut();
 
         CfgSimplifier {
-            basic_blocks: basic_blocks,
-            pred_count: pred_count
+            basic_blocks,
+            pred_count,
         }
     }
 
     pub fn simplify(mut self) {
+        self.strip_nops();
+
         loop {
             let mut changed = false;
 
@@ -123,6 +123,8 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
                 for successor in terminator.successors_mut() {
                     self.collapse_goto_chain(successor, &mut changed);
                 }
+
+                changed |= self.simplify_unwind(&mut terminator);
 
                 let mut new_stmts = vec![];
                 let mut inner_changed = true;
@@ -141,8 +143,6 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
 
             if !changed { break }
         }
-
-        self.strip_nops()
     }
 
     // Collapse a goto chain starting from `start`
@@ -238,6 +238,38 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
         true
     }
 
+    // turn an unwind branch to a resume block into a None
+    fn simplify_unwind(&mut self, terminator: &mut Terminator<'tcx>) -> bool {
+        let unwind = match terminator.kind {
+            TerminatorKind::Drop { ref mut unwind, .. } |
+            TerminatorKind::DropAndReplace { ref mut unwind, .. } |
+            TerminatorKind::Call { cleanup: ref mut unwind, .. } |
+            TerminatorKind::Assert { cleanup: ref mut unwind, .. } =>
+                unwind,
+            _ => return false
+        };
+
+        if let &mut Some(unwind_block) = unwind {
+            let is_resume_block = match self.basic_blocks[unwind_block] {
+                BasicBlockData {
+                    ref statements,
+                    terminator: Some(Terminator {
+                        kind: TerminatorKind::Resume, ..
+                    }), ..
+                } if statements.is_empty() => true,
+                _ => false
+            };
+            if is_resume_block {
+                debug!("simplifying unwind to {:?} from {:?}",
+                       unwind_block, terminator.source_info);
+                *unwind = None;
+            }
+            return is_resume_block;
+        }
+
+        false
+    }
+
     fn strip_nops(&mut self) {
         for blk in self.basic_blocks.iter_mut() {
             blk.statements.retain(|stmt| if let StatementKind::Nop = stmt.kind {
@@ -281,12 +313,11 @@ pub fn remove_dead_blocks(mir: &mut Mir) {
 
 pub struct SimplifyLocals;
 
-impl Pass for SimplifyLocals {
-    fn name(&self) -> ::std::borrow::Cow<'static, str> { "SimplifyLocals".into() }
-}
-
-impl<'tcx> MirPass<'tcx> for SimplifyLocals {
-    fn run_pass<'a>(&mut self, _: TyCtxt<'a, 'tcx, 'tcx>, _: MirSource, mir: &mut Mir<'tcx>) {
+impl MirPass for SimplifyLocals {
+    fn run_pass<'a, 'tcx>(&self,
+                          _: TyCtxt<'a, 'tcx, 'tcx>,
+                          _: MirSource,
+                          mir: &mut Mir<'tcx>) {
         let mut marker = DeclMarker { locals: BitVector::new(mir.local_decls.len()) };
         marker.visit_mir(mir);
         // Return pointer and arguments are always live
@@ -321,15 +352,11 @@ struct DeclMarker {
 }
 
 impl<'tcx> Visitor<'tcx> for DeclMarker {
-    fn visit_lvalue(&mut self, lval: &Lvalue<'tcx>, ctx: LvalueContext<'tcx>, loc: Location) {
-        if ctx == LvalueContext::StorageLive || ctx == LvalueContext::StorageDead {
-            // ignore these altogether, they get removed along with their otherwise unused decls.
-            return;
+    fn visit_local(&mut self, local: &Local, ctx: LvalueContext<'tcx>, _: Location) {
+        // ignore these altogether, they get removed along with their otherwise unused decls.
+        if ctx != LvalueContext::StorageLive && ctx != LvalueContext::StorageDead {
+            self.locals.insert(local.index());
         }
-        if let Lvalue::Local(ref v) = *lval {
-            self.locals.insert(v.index());
-        }
-        self.super_lvalue(lval, ctx, loc);
     }
 }
 
@@ -342,22 +369,15 @@ impl<'tcx> MutVisitor<'tcx> for LocalUpdater {
         // Remove unnecessary StorageLive and StorageDead annotations.
         data.statements.retain(|stmt| {
             match stmt.kind {
-                StatementKind::StorageLive(ref lval) | StatementKind::StorageDead(ref lval) => {
-                    match *lval {
-                        Lvalue::Local(l) => self.map[l.index()] != !0,
-                        _ => true
-                    }
+                StatementKind::StorageLive(l) | StatementKind::StorageDead(l) => {
+                    self.map[l.index()] != !0
                 }
                 _ => true
             }
         });
         self.super_basic_block_data(block, data);
     }
-    fn visit_lvalue(&mut self, lval: &mut Lvalue<'tcx>, ctx: LvalueContext<'tcx>, loc: Location) {
-        match *lval {
-            Lvalue::Local(ref mut l) => *l = Local::new(self.map[l.index()]),
-            _ => (),
-        };
-        self.super_lvalue(lval, ctx, loc);
+    fn visit_local(&mut self, l: &mut Local, _: LvalueContext<'tcx>, _: Location) {
+        *l = Local::new(self.map[l.index()]);
     }
 }

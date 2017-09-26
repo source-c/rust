@@ -10,7 +10,6 @@
 
 use io::{self, Error, ErrorKind};
 use libc::{self, c_int, gid_t, pid_t, uid_t};
-use mem;
 use ptr;
 
 use sys::cvt;
@@ -161,20 +160,22 @@ impl Command {
             t!(cvt_r(|| libc::dup2(fd, libc::STDERR_FILENO)));
         }
 
-        if let Some(u) = self.get_gid() {
-            t!(cvt(libc::setgid(u as gid_t)));
-        }
-        if let Some(u) = self.get_uid() {
-            // When dropping privileges from root, the `setgroups` call
-            // will remove any extraneous groups. If we don't call this,
-            // then even though our uid has dropped, we may still have
-            // groups that enable us to do super-user things. This will
-            // fail if we aren't root, so don't bother checking the
-            // return value, this is just done as an optimistic
-            // privilege dropping function.
-            let _ = libc::setgroups(0, ptr::null());
+        if cfg!(not(any(target_os = "l4re"))) {
+            if let Some(u) = self.get_gid() {
+                t!(cvt(libc::setgid(u as gid_t)));
+            }
+            if let Some(u) = self.get_uid() {
+                // When dropping privileges from root, the `setgroups` call
+                // will remove any extraneous groups. If we don't call this,
+                // then even though our uid has dropped, we may still have
+                // groups that enable us to do super-user things. This will
+                // fail if we aren't root, so don't bother checking the
+                // return value, this is just done as an optimistic
+                // privilege dropping function.
+                let _ = libc::setgroups(0, ptr::null());
 
-            t!(cvt(libc::setuid(u as uid_t)));
+                t!(cvt(libc::setuid(u as uid_t)));
+            }
         }
         if let Some(ref cwd) = *self.get_cwd() {
             t!(cvt(libc::chdir(cwd.as_ptr())));
@@ -184,7 +185,9 @@ impl Command {
         }
 
         // NaCl has no signal support.
-        if cfg!(not(any(target_os = "nacl", target_os = "emscripten"))) {
+        #[cfg(not(any(target_os = "nacl", target_os = "emscripten")))]
+        {
+            use mem;
             // Reset signal handling so the child process starts in a
             // standardized state. libstd ignores SIGPIPE, and signal-handling
             // libraries often set a mask. Child processes inherit ignored
@@ -193,7 +196,16 @@ impl Command {
             // need to clean things up now to avoid confusing the program
             // we're about to run.
             let mut set: libc::sigset_t = mem::uninitialized();
-            t!(cvt(libc::sigemptyset(&mut set)));
+            if cfg!(target_os = "android") {
+                // Implementing sigemptyset allow us to support older Android
+                // versions. See the comment about Android and sig* functions in
+                // process_common.rs
+                libc::memset(&mut set as *mut _ as *mut _,
+                             0,
+                             mem::size_of::<libc::sigset_t>());
+            } else {
+                t!(cvt(libc::sigemptyset(&mut set)));
+            }
             t!(cvt(libc::pthread_sigmask(libc::SIG_SETMASK, &set,
                                          ptr::null_mut())));
             let ret = sys::signal(libc::SIGPIPE, libc::SIG_DFL);

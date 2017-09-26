@@ -9,8 +9,11 @@
 // except according to those terms.
 
 use std::fmt;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::rc::Rc;
+
+use rustc_data_structures::stable_hasher::{StableHasher, StableHasherResult,
+                                           HashStable};
 
 #[derive(Clone)]
 pub struct RcSlice<T> {
@@ -27,6 +30,14 @@ impl<T> RcSlice<T> {
             data: Rc::new(vec.into_boxed_slice()),
         }
     }
+
+    pub fn sub_slice(&self, range: Range<usize>) -> Self {
+        RcSlice {
+            data: self.data.clone(),
+            offset: self.offset + range.start as u32,
+            len: (range.end - range.start) as u32,
+        }
+    }
 }
 
 impl<T> Deref for RcSlice<T> {
@@ -39,5 +50,15 @@ impl<T> Deref for RcSlice<T> {
 impl<T: fmt::Debug> fmt::Debug for RcSlice<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(self.deref(), f)
+    }
+}
+
+impl<CTX, T> HashStable<CTX> for RcSlice<T>
+    where T: HashStable<CTX>
+{
+    fn hash_stable<W: StableHasherResult>(&self,
+                                          hcx: &mut CTX,
+                                          hasher: &mut StableHasher<W>) {
+        (**self).hash_stable(hcx, hasher);
     }
 }

@@ -38,6 +38,8 @@ use tables::{conversions, derived_property, general_category, property};
 pub use core::char::{MAX, from_digit, from_u32, from_u32_unchecked};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::char::{EscapeDebug, EscapeDefault, EscapeUnicode};
+#[stable(feature = "char_from_str", since = "1.20.0")]
+pub use core::char::ParseCharError;
 
 // unstable reexports
 #[unstable(feature = "try_from", issue = "33417")]
@@ -45,7 +47,7 @@ pub use core::char::CharTryFromError;
 #[unstable(feature = "decode_utf8", issue = "33906")]
 pub use core::char::{DecodeUtf8, decode_utf8};
 #[unstable(feature = "unicode", issue = "27783")]
-pub use tables::UNICODE_VERSION;
+pub use tables::{UnicodeVersion, UNICODE_VERSION};
 
 /// Returns an iterator that yields the lowercase equivalent of a `char`.
 ///
@@ -324,7 +326,6 @@ impl char {
     /// As an iterator:
     ///
     /// ```
-    /// # #![feature(char_escape_debug)]
     /// for c in '\n'.escape_debug() {
     ///     print!("{}", c);
     /// }
@@ -334,7 +335,6 @@ impl char {
     /// Using `println!` directly:
     ///
     /// ```
-    /// # #![feature(char_escape_debug)]
     /// println!("{}", '\n'.escape_debug());
     /// ```
     ///
@@ -347,10 +347,9 @@ impl char {
     /// Using `to_string`:
     ///
     /// ```
-    /// # #![feature(char_escape_debug)]
     /// assert_eq!('\n'.escape_debug().to_string(), "\\n");
     /// ```
-    #[unstable(feature = "char_escape_debug", issue = "35068")]
+    #[stable(feature = "char_escape_debug", since = "1.20.0")]
     #[inline]
     pub fn escape_debug(self) -> EscapeDebug {
         C::escape_debug(self)
@@ -599,9 +598,9 @@ impl char {
     /// 'XID_Start' is a Unicode Derived Property specified in
     /// [UAX #31](http://unicode.org/reports/tr31/#NFKC_Modifications),
     /// mostly similar to `ID_Start` but modified for closure under `NFKx`.
-    #[unstable(feature = "unicode",
+    #[unstable(feature = "rustc_private",
                reason = "mainly needed for compiler internals",
-               issue = "0")]
+               issue = "27812")]
     #[inline]
     pub fn is_xid_start(self) -> bool {
         derived_property::XID_Start(self)
@@ -613,9 +612,9 @@ impl char {
     /// 'XID_Continue' is a Unicode Derived Property specified in
     /// [UAX #31](http://unicode.org/reports/tr31/#NFKC_Modifications),
     /// mostly similar to 'ID_Continue' but modified for closure under NFKx.
-    #[unstable(feature = "unicode",
+    #[unstable(feature = "rustc_private",
                reason = "mainly needed for compiler internals",
-               issue = "0")]
+               issue = "27812")]
     #[inline]
     pub fn is_xid_continue(self) -> bool {
         derived_property::XID_Continue(self)
@@ -842,11 +841,11 @@ impl char {
     /// Returns an iterator that yields the uppercase equivalent of a `char`
     /// as one or more `char`s.
     ///
-    /// If a character does not have a uppercase equivalent, the same character
+    /// If a character does not have an uppercase equivalent, the same character
     /// will be returned back by the iterator.
     ///
     /// This performs complex unconditional mappings with no tailoring: it maps
-    /// one Unicode character to its lowercase equivalent according to the
+    /// one Unicode character to its uppercase equivalent according to the
     /// [Unicode database] and the additional complex mappings
     /// [`SpecialCasing.txt`]. Conditional mappings (based on context or
     /// language) are not considered here.

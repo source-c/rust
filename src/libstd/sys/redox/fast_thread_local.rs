@@ -12,8 +12,9 @@
 #![unstable(feature = "thread_local_internals", issue = "0")]
 
 use cell::{Cell, UnsafeCell};
-use intrinsics;
+use mem;
 use ptr;
+
 
 pub struct Key<T> {
     inner: UnsafeCell<Option<T>>,
@@ -37,7 +38,7 @@ impl<T> Key<T> {
 
     pub fn get(&'static self) -> Option<&'static UnsafeCell<Option<T>>> {
         unsafe {
-            if intrinsics::needs_drop::<T>() && self.dtor_running.get() {
+            if mem::needs_drop::<T>() && self.dtor_running.get() {
                 return None
             }
             self.register_dtor();
@@ -46,7 +47,7 @@ impl<T> Key<T> {
     }
 
     unsafe fn register_dtor(&self) {
-        if !intrinsics::needs_drop::<T>() || self.dtor_registered.get() {
+        if !mem::needs_drop::<T>() || self.dtor_registered.get() {
             return
         }
 
@@ -56,7 +57,7 @@ impl<T> Key<T> {
     }
 }
 
-unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern fn(*mut u8)) {
+pub unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern fn(*mut u8)) {
     // The fallback implementation uses a vanilla OS-based TLS key to track
     // the list of destructors that need to be run for this thread. The key
     // then has its own destructor which runs all the other destructors.
@@ -113,4 +114,8 @@ pub unsafe extern fn destroy_value<T>(ptr: *mut u8) {
     } else {
         ptr::drop_in_place((*ptr).inner.get());
     }
+}
+
+pub fn requires_move_before_drop() -> bool {
+    false
 }

@@ -14,30 +14,23 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![crate_name = "syntax"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
        test(attr(deny(warnings))))]
 #![deny(warnings)]
 
-#![feature(associated_consts)]
-#![feature(const_fn)]
-#![feature(optin_builtin_traits)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
-#![feature(str_escape)]
 #![feature(unicode)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(specialization)]
 #![feature(i128_type)]
 
+// See librustc_cratesio_shim/Cargo.toml for a comment explaining this.
+#[allow(unused_extern_crates)]
+extern crate rustc_cratesio_shim;
+
+#[macro_use] extern crate bitflags;
 extern crate serialize;
 #[macro_use] extern crate log;
-#[macro_use] #[no_link] extern crate rustc_bitflags;
 extern crate std_unicode;
 pub extern crate rustc_errors as errors;
 extern crate syntax_pos;
@@ -125,7 +118,7 @@ pub mod ptr;
 pub mod show_span;
 pub mod std_inject;
 pub mod str;
-pub mod symbol;
+pub use syntax_pos::symbol;
 pub mod test;
 pub mod tokenstream;
 pub mod visit;
@@ -136,12 +129,12 @@ pub mod print {
 }
 
 pub mod ext {
+    pub use syntax_pos::hygiene;
     pub mod base;
     pub mod build;
     pub mod derive;
     pub mod expand;
     pub mod placeholders;
-    pub mod hygiene;
     pub mod quote;
     pub mod source_util;
 
@@ -156,4 +149,4 @@ pub mod ext {
 #[cfg(test)]
 mod test_snippet;
 
-// __build_diagnostic_array! { libsyntax, DIAGNOSTICS }
+__build_diagnostic_array! { libsyntax, DIAGNOSTICS }

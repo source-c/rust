@@ -9,9 +9,11 @@
 // except according to those terms.
 
 extern crate toml;
-extern crate rustc_serialize;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -81,6 +83,7 @@ static TARGETS: &'static [&'static str] = &[
     "s390x-unknown-linux-gnu",
     "sparc64-unknown-linux-gnu",
     "wasm32-unknown-emscripten",
+    "x86_64-linux-android",
     "x86_64-apple-darwin",
     "x86_64-apple-ios",
     "x86_64-pc-windows-gnu",
@@ -91,6 +94,7 @@ static TARGETS: &'static [&'static str] = &[
     "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
     "x86_64-unknown-netbsd",
+    "x86_64-unknown-redox",
 ];
 
 static MINGW: &'static [&'static str] = &[
@@ -98,28 +102,47 @@ static MINGW: &'static [&'static str] = &[
     "x86_64-pc-windows-gnu",
 ];
 
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
 struct Manifest {
     manifest_version: String,
     date: String,
-    pkg: HashMap<String, Package>,
+    pkg: BTreeMap<String, Package>,
 }
 
-#[derive(RustcEncodable)]
+#[derive(Serialize)]
 struct Package {
     version: String,
-    target: HashMap<String, Target>,
+    git_commit_hash: Option<String>,
+    target: BTreeMap<String, Target>,
 }
 
-#[derive(RustcEncodable)]
+#[derive(Serialize)]
 struct Target {
     available: bool,
     url: Option<String>,
     hash: Option<String>,
+    xz_url: Option<String>,
+    xz_hash: Option<String>,
     components: Option<Vec<Component>>,
     extensions: Option<Vec<Component>>,
 }
 
-#[derive(RustcEncodable)]
+impl Target {
+    fn unavailable() -> Target {
+        Target {
+            available: false,
+            url: None,
+            hash: None,
+            xz_url: None,
+            xz_hash: None,
+            components: None,
+            extensions: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct Component {
     pkg: String,
     target: String,
@@ -135,14 +158,19 @@ macro_rules! t {
 struct Builder {
     rust_release: String,
     cargo_release: String,
+    rls_release: String,
     input: PathBuf,
     output: PathBuf,
     gpg_passphrase: String,
-    digests: HashMap<String, String>,
+    digests: BTreeMap<String, String>,
     s3_address: String,
     date: String,
     rust_version: String,
     cargo_version: String,
+    rls_version: String,
+    rust_git_commit_hash: Option<String>,
+    cargo_git_commit_hash: Option<String>,
+    rls_git_commit_hash: Option<String>,
 }
 
 fn main() {
@@ -152,21 +180,27 @@ fn main() {
     let date = args.next().unwrap();
     let rust_release = args.next().unwrap();
     let cargo_release = args.next().unwrap();
+    let rls_release = args.next().unwrap();
     let s3_address = args.next().unwrap();
     let mut passphrase = String::new();
     t!(io::stdin().read_to_string(&mut passphrase));
 
     Builder {
-        rust_release: rust_release,
-        cargo_release: cargo_release,
-        input: input,
-        output: output,
+        rust_release,
+        cargo_release,
+        rls_release,
+        input,
+        output,
         gpg_passphrase: passphrase,
-        digests: HashMap::new(),
-        s3_address: s3_address,
-        date: date,
+        digests: BTreeMap::new(),
+        s3_address,
+        date,
         rust_version: String::new(),
         cargo_version: String::new(),
+        rls_version: String::new(),
+        rust_git_commit_hash: None,
+        cargo_git_commit_hash: None,
+        rls_git_commit_hash: None,
     }.build();
 }
 
@@ -174,30 +208,17 @@ impl Builder {
     fn build(&mut self) {
         self.rust_version = self.version("rust", "x86_64-unknown-linux-gnu");
         self.cargo_version = self.version("cargo", "x86_64-unknown-linux-gnu");
+        self.rls_version = self.version("rls", "x86_64-unknown-linux-gnu");
+        self.rust_git_commit_hash = self.git_commit_hash("rust", "x86_64-unknown-linux-gnu");
+        self.cargo_git_commit_hash = self.git_commit_hash("cargo", "x86_64-unknown-linux-gnu");
+        self.rls_git_commit_hash = self.git_commit_hash("rls", "x86_64-unknown-linux-gnu");
 
         self.digest_and_sign();
-        let Manifest { manifest_version, date, pkg } = self.build_manifest();
-
-        // Unfortunately we can't use derive(RustcEncodable) here because the
-        // version field is called `manifest-version`, not `manifest_version`.
-        // In lieu of that just create the table directly here with a `BTreeMap`
-        // and wrap it up in a `Value::Table`.
-        let mut manifest = BTreeMap::new();
-        manifest.insert("manifest-version".to_string(),
-                        toml::Value::String(manifest_version));
-        manifest.insert("date".to_string(), toml::Value::String(date.clone()));
-        manifest.insert("pkg".to_string(), toml::encode(&pkg));
-        let manifest = toml::Value::Table(manifest).to_string();
-
-        let filename = format!("channel-rust-{}.toml", self.rust_release);
-        self.write_manifest(&manifest, &filename);
-
-        let filename = format!("channel-rust-{}-date.txt", self.rust_release);
-        self.write_date_stamp(&date, &filename);
+        let manifest = self.build_manifest();
+        self.write_channel_files(&self.rust_release, &manifest);
 
         if self.rust_release != "beta" && self.rust_release != "nightly" {
-            self.write_manifest(&manifest, "channel-rust-stable.toml");
-            self.write_date_stamp(&date, "channel-rust-stable-date.txt");
+            self.write_channel_files("stable", &manifest);
         }
     }
 
@@ -214,7 +235,7 @@ impl Builder {
         let mut manifest = Manifest {
             manifest_version: "2".to_string(),
             date: self.date.to_string(),
-            pkg: HashMap::new(),
+            pkg: BTreeMap::new(),
         };
 
         self.package("rustc", &mut manifest.pkg, HOSTS);
@@ -223,30 +244,30 @@ impl Builder {
         self.package("rust-std", &mut manifest.pkg, TARGETS);
         self.package("rust-docs", &mut manifest.pkg, TARGETS);
         self.package("rust-src", &mut manifest.pkg, &["*"]);
-
-        if self.rust_release == "nightly" {
-            self.package("rust-analysis", &mut manifest.pkg, TARGETS);
-        }
+        let rls_package_name = if self.rust_release == "nightly" {
+            "rls"
+        } else {
+            "rls-preview"
+        };
+        self.package(rls_package_name, &mut manifest.pkg, HOSTS);
+        self.package("rust-analysis", &mut manifest.pkg, TARGETS);
 
         let mut pkg = Package {
             version: self.cached_version("rust").to_string(),
-            target: HashMap::new(),
+            git_commit_hash: self.cached_git_commit_hash("rust").clone(),
+            target: BTreeMap::new(),
         };
         for host in HOSTS {
             let filename = self.filename("rust", host);
             let digest = match self.digests.remove(&filename) {
                 Some(digest) => digest,
                 None => {
-                    pkg.target.insert(host.to_string(), Target {
-                        available: false,
-                        url: None,
-                        hash: None,
-                        components: None,
-                        extensions: None,
-                    });
+                    pkg.target.insert(host.to_string(), Target::unavailable());
                     continue
                 }
             };
+            let xz_filename = filename.replace(".tar.gz", ".tar.xz");
+            let xz_digest = self.digests.remove(&xz_filename);
             let mut components = Vec::new();
             let mut extensions = Vec::new();
 
@@ -265,16 +286,18 @@ impl Builder {
                 });
             }
 
+            extensions.push(Component {
+                pkg: rls_package_name.to_string(),
+                target: host.to_string(),
+            });
+            extensions.push(Component {
+                pkg: "rust-analysis".to_string(),
+                target: host.to_string(),
+            });
             for target in TARGETS {
                 if target != host {
                     extensions.push(Component {
                         pkg: "rust-std".to_string(),
-                        target: target.to_string(),
-                    });
-                }
-                if self.rust_release == "nightly" {
-                    extensions.push(Component {
-                        pkg: "rust-analysis".to_string(),
                         target: target.to_string(),
                     });
                 }
@@ -286,8 +309,10 @@ impl Builder {
 
             pkg.target.insert(host.to_string(), Target {
                 available: true,
-                url: Some(self.url("rust", host)),
+                url: Some(self.url(&filename)),
                 hash: Some(digest),
+                xz_url: xz_digest.as_ref().map(|_| self.url(&xz_filename)),
+                xz_hash: xz_digest,
                 components: Some(components),
                 extensions: Some(extensions),
             });
@@ -299,27 +324,23 @@ impl Builder {
 
     fn package(&mut self,
                pkgname: &str,
-               dst: &mut HashMap<String, Package>,
+               dst: &mut BTreeMap<String, Package>,
                targets: &[&str]) {
         let targets = targets.iter().map(|name| {
             let filename = self.filename(pkgname, name);
             let digest = match self.digests.remove(&filename) {
                 Some(digest) => digest,
-                None => {
-                    return (name.to_string(), Target {
-                        available: false,
-                        url: None,
-                        hash: None,
-                        components: None,
-                        extensions: None,
-                    })
-                }
+                None => return (name.to_string(), Target::unavailable()),
             };
+            let xz_filename = filename.replace(".tar.gz", ".tar.xz");
+            let xz_digest = self.digests.remove(&xz_filename);
 
             (name.to_string(), Target {
                 available: true,
-                url: Some(self.url(pkgname, name)),
+                url: Some(self.url(&filename)),
                 hash: Some(digest),
+                xz_url: xz_digest.as_ref().map(|_| self.url(&xz_filename)),
+                xz_hash: xz_digest,
                 components: None,
                 extensions: None,
             })
@@ -327,15 +348,16 @@ impl Builder {
 
         dst.insert(pkgname.to_string(), Package {
             version: self.cached_version(pkgname).to_string(),
+            git_commit_hash: self.cached_git_commit_hash(pkgname).clone(),
             target: targets,
         });
     }
 
-    fn url(&self, component: &str, target: &str) -> String {
+    fn url(&self, filename: &str) -> String {
         format!("{}/{}/{}",
                 self.s3_address,
                 self.date,
-                self.filename(component, target))
+                filename)
     }
 
     fn filename(&self, component: &str, target: &str) -> String {
@@ -343,6 +365,8 @@ impl Builder {
             format!("rust-src-{}.tar.gz", self.rust_release)
         } else if component == "cargo" {
             format!("cargo-{}-{}.tar.gz", self.cargo_release, target)
+        } else if component == "rls" || component == "rls-preview" {
+            format!("rls-{}-{}.tar.gz", self.rls_release, target)
         } else {
             format!("{}-{}-{}.tar.gz", component, self.rust_release, target)
         }
@@ -351,8 +375,20 @@ impl Builder {
     fn cached_version(&self, component: &str) -> &str {
         if component == "cargo" {
             &self.cargo_version
+        } else if component == "rls" || component == "rls-preview" {
+            &self.rls_version
         } else {
             &self.rust_version
+        }
+    }
+
+    fn cached_git_commit_hash(&self, component: &str) -> &Option<String> {
+        if component == "cargo" {
+            &self.cargo_git_commit_hash
+        } else if component == "rls" || component == "rls-preview" {
+            &self.rls_git_commit_hash
+        } else {
+            &self.rust_git_commit_hash
         }
     }
 
@@ -363,14 +399,33 @@ impl Builder {
            .arg(self.input.join(&filename))
            .arg(format!("{}/version", filename.replace(".tar.gz", "")))
            .arg("-O");
-        let version = t!(cmd.output());
-        if !version.status.success() {
+        let output = t!(cmd.output());
+        if !output.status.success() {
             panic!("failed to learn version:\n\n{:?}\n\n{}\n\n{}",
                    cmd,
-                   String::from_utf8_lossy(&version.stdout),
-                   String::from_utf8_lossy(&version.stderr));
+                   String::from_utf8_lossy(&output.stdout),
+                   String::from_utf8_lossy(&output.stderr));
         }
-        String::from_utf8_lossy(&version.stdout).trim().to_string()
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn git_commit_hash(&self, component: &str, target: &str) -> Option<String> {
+        let mut cmd = Command::new("tar");
+        let filename = self.filename(component, target);
+        cmd.arg("xf")
+           .arg(self.input.join(&filename))
+           .arg(format!("{}/git-commit-hash", filename.replace(".tar.gz", "")))
+           .arg("-O");
+        let output = t!(cmd.output());
+        if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            // This is always called after `.version()`.
+            // So if that didn’t fail but this does,
+            // that’s very probably because the tarball is valid
+            // but does not contain a `git-commit-hash` file.
+            None
+        }
     }
 
     fn hash(&self, path: &Path) -> String {
@@ -397,6 +452,7 @@ impl Builder {
         cmd.arg("--no-tty")
             .arg("--yes")
             .arg("--passphrase-fd").arg("0")
+            .arg("--personal-digest-preferences").arg("SHA512")
             .arg("--armor")
             .arg("--output").arg(&asc)
             .arg("--detach-sign").arg(path)
@@ -406,16 +462,16 @@ impl Builder {
         assert!(t!(child.wait()).success());
     }
 
-    fn write_manifest(&self, manifest: &str, name: &str) {
-        let dst = self.output.join(name);
-        t!(t!(File::create(&dst)).write_all(manifest.as_bytes()));
-        self.hash(&dst);
-        self.sign(&dst);
+    fn write_channel_files(&self, channel_name: &str, manifest: &Manifest) {
+        self.write(&toml::to_string(&manifest).unwrap(), channel_name, ".toml");
+        self.write(&manifest.date, channel_name, "-date.txt");
+        self.write(manifest.pkg["rust"].git_commit_hash.as_ref().unwrap(),
+                   channel_name, "-git-commit-hash.txt");
     }
 
-    fn write_date_stamp(&self, date: &str, name: &str) {
-        let dst = self.output.join(name);
-        t!(t!(File::create(&dst)).write_all(date.as_bytes()));
+    fn write(&self, contents: &str, channel_name: &str, suffix: &str) {
+        let dst = self.output.join(format!("channel-rust-{}{}", channel_name, suffix));
+        t!(t!(File::create(&dst)).write_all(contents.as_bytes()));
         self.hash(&dst);
         self.sign(&dst);
     }

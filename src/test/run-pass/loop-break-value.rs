@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(loop_break_value)]
 #![feature(never_type)]
 
 #[allow(unused)]
@@ -138,4 +137,10 @@ pub fn main() {
         panic!("from outer");
     };
     assert_eq!(break_from_while_to_outer, 567);
+
+    let rust = true;
+    let value = loop {
+        break rust;
+    };
+    assert!(value);
 }

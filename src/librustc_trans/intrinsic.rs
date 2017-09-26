@@ -16,7 +16,7 @@ use llvm;
 use llvm::{ValueRef};
 use abi::{Abi, FnType};
 use adt;
-use mir::lvalue::LvalueRef;
+use mir::lvalue::{LvalueRef, Alignment};
 use base::*;
 use common::*;
 use declare;
@@ -35,8 +35,6 @@ use syntax_pos::Span;
 
 use std::cmp::Ordering;
 use std::iter;
-
-use mir::lvalue::Alignment;
 
 fn get_simple_intrinsic(ccx: &CrateContext, name: &str) -> Option<ValueRef> {
     let llvm_name = match name {
@@ -97,15 +95,16 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
     let ccx = bcx.ccx;
     let tcx = ccx.tcx();
 
-    let (def_id, substs, sig) = match callee_ty.sty {
-        ty::TyFnDef(def_id, substs, sig) => (def_id, substs, sig),
+    let (def_id, substs) = match callee_ty.sty {
+        ty::TyFnDef(def_id, substs) => (def_id, substs),
         _ => bug!("expected fn item type, found {}", callee_ty)
     };
 
+    let sig = callee_ty.fn_sig(tcx);
     let sig = tcx.erase_late_bound_regions_and_normalize(&sig);
     let arg_tys = sig.inputs();
     let ret_ty = sig.output();
-    let name = &*tcx.item_name(def_id).as_str();
+    let name = &*tcx.item_name(def_id);
 
     let llret_ty = type_of::type_of(ccx, ret_ty);
 
@@ -136,7 +135,7 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
         "size_of" => {
             let tp_ty = substs.type_at(0);
             let lltp_ty = type_of::type_of(ccx, tp_ty);
-            C_uint(ccx, machine::llsize_of_alloc(ccx, lltp_ty))
+            C_usize(ccx, machine::llsize_of_alloc(ccx, lltp_ty))
         }
         "size_of_val" => {
             let tp_ty = substs.type_at(0);
@@ -146,12 +145,12 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
                 llsize
             } else {
                 let lltp_ty = type_of::type_of(ccx, tp_ty);
-                C_uint(ccx, machine::llsize_of_alloc(ccx, lltp_ty))
+                C_usize(ccx, machine::llsize_of_alloc(ccx, lltp_ty))
             }
         }
         "min_align_of" => {
             let tp_ty = substs.type_at(0);
-            C_uint(ccx, type_of::align_of(ccx, tp_ty))
+            C_usize(ccx, ccx.align_of(tp_ty) as u64)
         }
         "min_align_of_val" => {
             let tp_ty = substs.type_at(0);
@@ -160,13 +159,13 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
                     glue::size_and_align_of_dst(bcx, tp_ty, llargs[1]);
                 llalign
             } else {
-                C_uint(ccx, type_of::align_of(ccx, tp_ty))
+                C_usize(ccx, ccx.align_of(tp_ty) as u64)
             }
         }
         "pref_align_of" => {
             let tp_ty = substs.type_at(0);
             let lltp_ty = type_of::type_of(ccx, tp_ty);
-            C_uint(ccx, machine::llalign_of_pref(ccx, lltp_ty))
+            C_usize(ccx, machine::llalign_of_pref(ccx, lltp_ty) as u64)
         }
         "type_name" => {
             let tp_ty = substs.type_at(0);
@@ -183,12 +182,12 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
                 // If we store a zero constant, LLVM will drown in vreg allocation for large data
                 // structures, and the generated code will be awful. (A telltale sign of this is
                 // large quantities of `mov [byte ptr foo],0` in the generated code.)
-                memset_intrinsic(bcx, false, ty, llresult, C_u8(ccx, 0), C_uint(ccx, 1usize));
+                memset_intrinsic(bcx, false, ty, llresult, C_u8(ccx, 0), C_usize(ccx, 1));
             }
             C_nil(ccx)
         }
         // Effectively no-ops
-        "uninit" | "forget" => {
+        "uninit" => {
             C_nil(ccx)
         }
         "needs_drop" => {
@@ -234,7 +233,7 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
             }
             let load = bcx.volatile_load(ptr);
             unsafe {
-                llvm::LLVMSetAlignment(load, type_of::align_of(ccx, tp_ty));
+                llvm::LLVMSetAlignment(load, ccx.align_of(tp_ty));
             }
             to_immediate(bcx, load, tp_ty)
         },
@@ -247,18 +246,33 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
                 let val = if fn_ty.args[1].is_indirect() {
                     bcx.load(llargs[1], None)
                 } else {
-                    from_immediate(bcx, llargs[1])
+                    if !type_is_zero_size(ccx, tp_ty) {
+                        from_immediate(bcx, llargs[1])
+                    } else {
+                        C_nil(ccx)
+                    }
                 };
                 let ptr = bcx.pointercast(llargs[0], val_ty(val).ptr_to());
                 let store = bcx.volatile_store(val, ptr);
                 unsafe {
-                    llvm::LLVMSetAlignment(store, type_of::align_of(ccx, tp_ty));
+                    llvm::LLVMSetAlignment(store, ccx.align_of(tp_ty));
                 }
             }
             C_nil(ccx)
         },
-
-        "ctlz" | "cttz" | "ctpop" | "bswap" |
+        "prefetch_read_data" | "prefetch_write_data" |
+        "prefetch_read_instruction" | "prefetch_write_instruction" => {
+            let expect = ccx.get_intrinsic(&("llvm.prefetch"));
+            let (rw, cache_type) = match name {
+                "prefetch_read_data" => (0, 1),
+                "prefetch_write_data" => (1, 1),
+                "prefetch_read_instruction" => (0, 0),
+                "prefetch_write_instruction" => (1, 0),
+                _ => bug!()
+            };
+            bcx.call(expect, &[llargs[0], C_i32(ccx, rw), llargs[1], C_i32(ccx, cache_type)], None)
+        },
+        "ctlz" | "ctlz_nonzero" | "cttz" | "cttz_nonzero" | "ctpop" | "bswap" |
         "add_with_overflow" | "sub_with_overflow" | "mul_with_overflow" |
         "overflowing_add" | "overflowing_sub" | "overflowing_mul" |
         "unchecked_div" | "unchecked_rem" | "unchecked_shl" | "unchecked_shr" => {
@@ -269,6 +283,12 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
                         "ctlz" | "cttz" => {
                             let y = C_bool(bcx.ccx, false);
                             let llfn = ccx.get_intrinsic(&format!("llvm.{}.i{}", name, width));
+                            bcx.call(llfn, &[llargs[0], y], None)
+                        }
+                        "ctlz_nonzero" | "cttz_nonzero" => {
+                            let y = C_bool(bcx.ccx, true);
+                            let llvm_name = &format!("llvm.{}.i{}", &name[..4], width);
+                            let llfn = ccx.get_intrinsic(llvm_name);
                             bcx.call(llfn, &[llargs[0], y], None)
                         }
                         "ctpop" => bcx.call(ccx.get_intrinsic(&format!("llvm.ctpop.i{}", width)),
@@ -362,6 +382,18 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
                 }
                 _ => C_null(llret_ty)
             }
+        }
+
+        "align_offset" => {
+            // `ptr as usize`
+            let ptr_val = bcx.ptrtoint(llargs[0], bcx.ccx.isize_ty());
+            // `ptr_val % align`
+            let offset = bcx.urem(ptr_val, llargs[1]);
+            let zero = C_null(bcx.ccx.isize_ty());
+            // `offset == 0`
+            let is_zero = bcx.icmp(llvm::IntPredicate::IntEQ, offset, zero);
+            // `if offset == 0 { 0 } else { offset - align }`
+            bcx.select(is_zero, zero, bcx.sub(offset, llargs[1]))
         }
         name if name.starts_with("simd_") => {
             generic_simd_intrinsic(bcx, name,
@@ -622,7 +654,10 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
 
                     for i in 0..elems.len() {
                         let val = bcx.extract_value(val, i);
-                        bcx.store(val, bcx.struct_gep(llresult, i), None);
+                        let lval = LvalueRef::new_sized_ty(llresult, ret_ty,
+                                                           Alignment::AbiAligned);
+                        let (dest, align) = lval.trans_field_ptr(bcx, i);
+                        bcx.store(val, dest, align.to_align());
                     }
                     C_nil(ccx)
                 }
@@ -634,7 +669,7 @@ pub fn trans_intrinsic_call<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
     if val_ty(llval) != Type::void(ccx) && machine::llsize_of_alloc(ccx, val_ty(llval)) != 0 {
         if let Some(ty) = fn_ty.ret.cast {
             let ptr = bcx.pointercast(llresult, ty.ptr_to());
-            bcx.store(llval, ptr, Some(type_of::align_of(ccx, ret_ty)));
+            bcx.store(llval, ptr, Some(ccx.align_of(ret_ty)));
         } else {
             store_ty(bcx, llval, llresult, Alignment::AbiAligned, ret_ty);
         }
@@ -651,9 +686,9 @@ fn copy_intrinsic<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
                             -> ValueRef {
     let ccx = bcx.ccx;
     let lltp_ty = type_of::type_of(ccx, tp_ty);
-    let align = C_i32(ccx, type_of::align_of(ccx, tp_ty) as i32);
+    let align = C_i32(ccx, ccx.align_of(tp_ty) as i32);
     let size = machine::llsize_of(ccx, lltp_ty);
-    let int_size = machine::llbitsize_of_real(ccx, ccx.int_type());
+    let int_size = machine::llbitsize_of_real(ccx, ccx.isize_ty());
 
     let operation = if allow_overlap {
         "memmove"
@@ -685,7 +720,7 @@ fn memset_intrinsic<'a, 'tcx>(
     count: ValueRef
 ) -> ValueRef {
     let ccx = bcx.ccx;
-    let align = C_i32(ccx, type_of::align_of(ccx, ty) as i32);
+    let align = C_i32(ccx, ccx.align_of(ty) as i32);
     let lltp_ty = type_of::type_of(ccx, ty);
     let size = machine::llsize_of(ccx, lltp_ty);
     let dst = bcx.pointercast(dst, Type::i8p(ccx));
@@ -777,7 +812,7 @@ fn trans_msvc_try<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
         //
         // More information can be found in libstd's seh.rs implementation.
         let i64p = Type::i64(ccx).ptr_to();
-        let slot = bcx.alloca(i64p, "slot");
+        let slot = bcx.alloca(i64p, "slot", None);
         bcx.invoke(func, &[data], normal.llbb(), catchswitch.llbb(),
             None);
 
@@ -787,7 +822,7 @@ fn trans_msvc_try<'a, 'tcx>(bcx: &Builder<'a, 'tcx>,
         catchswitch.add_handler(cs, catchpad.llbb());
 
         let tcx = ccx.tcx();
-        let tydesc = match tcx.lang_items.msvc_try_filter() {
+        let tydesc = match tcx.lang_items().msvc_try_filter() {
             Some(did) => ::consts::get_static(ccx, did),
             None => bug!("msvc_try_filter not defined"),
         };
@@ -968,7 +1003,7 @@ fn generic_simd_intrinsic<'a, 'tcx>(
 
 
     let tcx = bcx.tcx();
-    let sig = tcx.erase_late_bound_regions_and_normalize(&callee_ty.fn_sig());
+    let sig = tcx.erase_late_bound_regions_and_normalize(&callee_ty.fn_sig(tcx));
     let arg_tys = sig.inputs();
 
     // every intrinsic takes a SIMD vector as its first argument

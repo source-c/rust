@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Global initialization and retreival of command line arguments.
+//! Global initialization and retrieval of command line arguments.
 //!
 //! On some platforms these are stored during runtime startup,
 //! and on some they are retrieved from the system on demand.
@@ -35,6 +35,12 @@ pub struct Args {
     _dont_send_or_sync_me: PhantomData<*mut ()>,
 }
 
+impl Args {
+    pub fn inner_debug(&self) -> &[OsString] {
+        self.iter.as_slice()
+    }
+}
+
 impl Iterator for Args {
     type Item = OsString;
     fn next(&mut self) -> Option<OsString> { self.iter.next() }
@@ -59,6 +65,7 @@ impl DoubleEndedIterator for Args {
           target_os = "solaris",
           target_os = "emscripten",
           target_os = "haiku",
+          target_os = "l4re",
           target_os = "fuchsia"))]
 mod imp {
     use os::unix::prelude::*;

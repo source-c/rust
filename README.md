@@ -7,9 +7,9 @@ standard library, and documentation.
 
 ## Quick Start
 
-Read ["Installing Rust"] from [The Book].
+Read ["Installation"] from [The Book].
 
-["Installing Rust"]: https://doc.rust-lang.org/book/getting-started.html#installing-rust
+["Installation"]: https://doc.rust-lang.org/book/second-edition/ch01-01-installation.html
 [The Book]: https://doc.rust-lang.org/book/index.html
 
 ## Building from Source
@@ -35,15 +35,16 @@ Read ["Installing Rust"] from [The Book].
 3. Build and install:
 
     ```sh
-    $ ./x.py build && sudo ./x.py dist --install
+    $ ./x.py build && sudo ./x.py install
     ```
 
     > ***Note:*** Install locations can be adjusted by copying the config file
-    > from `./src/bootstrap/config.toml.example` to `./config.toml`, and
-    > adjusting the `prefix` option under `[install]`. Various other options are
-    > also supported, and are documented in the config file.
+    > from `./config.toml.example` to `./config.toml`, and
+    > adjusting the `prefix` option under `[install]`. Various other options, such
+    > as enabling debug information, are also supported, and are documented in
+    > the config file.
 
-    When complete, `sudo ./x.py dist --install` will place several programs into
+    When complete, `sudo ./x.py install` will place several programs into
     `/usr/local/bin`: `rustc`, the Rust compiler, and `rustdoc`, the
     API-documentation tool. This install does not include [Cargo],
     Rust's package manager, which you may also want to build.
@@ -96,7 +97,7 @@ build.
 4. Navigate to Rust's source code (or clone it), then build it:
 
    ```sh
-   $ ./x.py build && ./x.py dist --install
+   $ ./x.py build && ./x.py install
    ```
 
 #### MSVC
@@ -134,7 +135,7 @@ Windows build triples are:
     - `i686-pc-windows-msvc`
     - `x86_64-pc-windows-msvc`
 
-The build triple can be specified by either specifying `--build=ABI` when
+The build triple can be specified by either specifying `--build=<triple>` when
 invoking `x.py` commands, or by copying the `config.toml` file (as described
 in Building From Source), and modifying the `build` option under the `[build]`
 section.
@@ -198,8 +199,8 @@ The Rust community congregates in a few places:
 * [users.rust-lang.org] - General discussion and broader questions.
 * [/r/rust] - News and general discussion.
 
-[Stack Overflow]: http://stackoverflow.com/questions/tagged/rust
-[/r/rust]: http://reddit.com/r/rust
+[Stack Overflow]: https://stackoverflow.com/questions/tagged/rust
+[/r/rust]: https://reddit.com/r/rust
 [users.rust-lang.org]: https://users.rust-lang.org/
 
 ## Contributing
