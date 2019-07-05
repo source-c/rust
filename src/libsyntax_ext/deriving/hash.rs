@@ -1,30 +1,21 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use deriving;
-use deriving::generic::*;
-use deriving::generic::ty::*;
+use crate::deriving::{self, pathvec_std, path_std};
+use crate::deriving::generic::*;
+use crate::deriving::generic::ty::*;
 
 use syntax::ast::{Expr, MetaItem, Mutability};
 use syntax::ext::base::{Annotatable, ExtCtxt};
 use syntax::ext::build::AstBuilder;
 use syntax::ptr::P;
+use syntax::symbol::sym;
 use syntax_pos::Span;
 
-pub fn expand_deriving_hash(cx: &mut ExtCtxt,
+pub fn expand_deriving_hash(cx: &mut ExtCtxt<'_>,
                             span: Span,
                             mitem: &MetaItem,
                             item: &Annotatable,
-                            push: &mut FnMut(Annotatable)) {
+                            push: &mut dyn FnMut(Annotatable)) {
 
-    let path = Path::new_(pathvec_std!(cx, core::hash::Hash), None, vec![], true);
+    let path = Path::new_(pathvec_std!(cx, hash::Hash), None, vec![], PathKind::Std);
 
     let typaram = &*deriving::hygienic_type_parameter(item, "__H");
 
@@ -41,11 +32,11 @@ pub fn expand_deriving_hash(cx: &mut ExtCtxt,
                           name: "hash",
                           generics: LifetimeBounds {
                               lifetimes: Vec::new(),
-                              bounds: vec![(typaram, vec![path_std!(cx, core::hash::Hasher)])],
+                              bounds: vec![(typaram, vec![path_std!(cx, hash::Hasher)])],
                           },
                           explicit_self: borrowed_explicit_self(),
-                          args: vec![Ptr(Box::new(Literal(arg)),
-                                         Borrowed(None, Mutability::Mutable))],
+                          args: vec![(Ptr(Box::new(Literal(arg)),
+                                         Borrowed(None, Mutability::Mutable)), "state")],
                           ret_ty: nil_ty(),
                           attributes: vec![],
                           is_unsafe: false,
@@ -60,9 +51,9 @@ pub fn expand_deriving_hash(cx: &mut ExtCtxt,
     hash_trait_def.expand(cx, mitem, item, push);
 }
 
-fn hash_substructure(cx: &mut ExtCtxt, trait_span: Span, substr: &Substructure) -> P<Expr> {
-    let state_expr = match (substr.nonself_args.len(), substr.nonself_args.get(0)) {
-        (1, Some(o_f)) => o_f,
+fn hash_substructure(cx: &mut ExtCtxt<'_>, trait_span: Span, substr: &Substructure<'_>) -> P<Expr> {
+    let state_expr = match &substr.nonself_args {
+        &[o_f] => o_f,
         _ => {
             cx.span_bug(trait_span,
                         "incorrect number of arguments in `derive(Hash)`")
@@ -70,7 +61,7 @@ fn hash_substructure(cx: &mut ExtCtxt, trait_span: Span, substr: &Substructure) 
     };
     let call_hash = |span, thing_expr| {
         let hash_path = {
-            let strs = cx.std_path(&["hash", "Hash", "hash"]);
+            let strs = cx.std_path(&[sym::hash, sym::Hash, sym::hash]);
 
             cx.expr_path(cx.path_global(span, strs))
         };
@@ -95,9 +86,8 @@ fn hash_substructure(cx: &mut ExtCtxt, trait_span: Span, substr: &Substructure) 
         _ => cx.span_bug(trait_span, "impossible substructure in `derive(Hash)`"),
     };
 
-    for &FieldInfo { ref self_, span, .. } in fields {
-        stmts.push(call_hash(span, self_.clone()));
-    }
+    stmts.extend(fields.iter().map(|FieldInfo { ref self_, span, .. }|
+        call_hash(*span, self_.clone())));
 
     cx.expr_block(cx.block(trait_span, stmts))
 }

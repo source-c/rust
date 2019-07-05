@@ -1,42 +1,32 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use build::Builder;
-use build::matches::MatchPair;
-use hair::*;
+use crate::build::Builder;
+use crate::build::matches::MatchPair;
+use crate::hair::*;
 use rustc::mir::*;
 use std::u32;
+use std::convert::TryInto;
 
-impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
+impl<'a, 'tcx> Builder<'a, 'tcx> {
     pub fn field_match_pairs<'pat>(&mut self,
-                                   lvalue: Lvalue<'tcx>,
+                                   place: Place<'tcx>,
                                    subpatterns: &'pat [FieldPattern<'tcx>])
                                    -> Vec<MatchPair<'pat, 'tcx>> {
         subpatterns.iter()
                    .map(|fieldpat| {
-                       let lvalue = lvalue.clone().field(fieldpat.field,
-                                                         fieldpat.pattern.ty);
-                       MatchPair::new(lvalue, &fieldpat.pattern)
+                       let place = place.clone().field(fieldpat.field,
+                                                       fieldpat.pattern.ty);
+                       MatchPair::new(place, &fieldpat.pattern)
                    })
                    .collect()
     }
 
     pub fn prefix_slice_suffix<'pat>(&mut self,
                                      match_pairs: &mut Vec<MatchPair<'pat, 'tcx>>,
-                                     lvalue: &Lvalue<'tcx>,
+                                     place: &Place<'tcx>,
                                      prefix: &'pat [Pattern<'tcx>],
                                      opt_slice: Option<&'pat Pattern<'tcx>>,
                                      suffix: &'pat [Pattern<'tcx>]) {
         let min_length = prefix.len() + suffix.len();
-        assert!(min_length < u32::MAX as usize);
-        let min_length = min_length as u32;
+        let min_length = min_length.try_into().unwrap();
 
         match_pairs.extend(
             prefix.iter()
@@ -47,13 +37,13 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                           min_length,
                           from_end: false,
                       };
-                      let lvalue = lvalue.clone().elem(elem);
-                      MatchPair::new(lvalue, subpattern)
+                      let place = place.clone().elem(elem);
+                      MatchPair::new(place, subpattern)
                   })
         );
 
         if let Some(subslice_pat) = opt_slice {
-            let subslice = lvalue.clone().elem(ProjectionElem::Subslice {
+            let subslice = place.clone().elem(ProjectionElem::Subslice {
                 from: prefix.len() as u32,
                 to: suffix.len() as u32
             });
@@ -70,19 +60,51 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                           min_length,
                           from_end: true,
                       };
-                      let lvalue = lvalue.clone().elem(elem);
-                      MatchPair::new(lvalue, subpattern)
+                      let place = place.clone().elem(elem);
+                      MatchPair::new(place, subpattern)
                   })
         );
+    }
+
+    /// Creates a false edge to `imaginary_target` and a real edge to
+    /// real_target. If `imaginary_target` is none, or is the same as the real
+    /// target, a Goto is generated instead to simplify the generated MIR.
+    pub fn false_edges(
+        &mut self,
+        from_block: BasicBlock,
+        real_target: BasicBlock,
+        imaginary_target: Option<BasicBlock>,
+        source_info: SourceInfo,
+    )  {
+        match imaginary_target {
+            Some(target) if target != real_target => {
+                self.cfg.terminate(
+                    from_block,
+                    source_info,
+                    TerminatorKind::FalseEdges {
+                        real_target,
+                        imaginary_target: target,
+                    },
+                );
+            }
+            _ => {
+                self.cfg.terminate(
+                    from_block,
+                    source_info,
+                    TerminatorKind::Goto {
+                        target: real_target
+                    }
+                );
+            }
+        }
     }
 }
 
 impl<'pat, 'tcx> MatchPair<'pat, 'tcx> {
-    pub fn new(lvalue: Lvalue<'tcx>, pattern: &'pat Pattern<'tcx>) -> MatchPair<'pat, 'tcx> {
+    pub fn new(place: Place<'tcx>, pattern: &'pat Pattern<'tcx>) -> MatchPair<'pat, 'tcx> {
         MatchPair {
-            lvalue,
+            place,
             pattern,
-            slice_len_checked: false,
         }
     }
 }

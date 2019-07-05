@@ -1,31 +1,27 @@
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::ast::{self, Ident};
+use crate::source_map::FilePathMapping;
+use crate::parse::{ParseSess, PResult, source_file_to_stream};
+use crate::parse::{lexer, new_parser_from_source_str};
+use crate::parse::parser::Parser;
+use crate::ptr::P;
+use crate::tokenstream::TokenStream;
 
-use ast::{self, Ident};
-use codemap::FilePathMapping;
-use parse::{ParseSess, PResult, filemap_to_stream};
-use parse::{lexer, new_parser_from_source_str};
-use parse::parser::Parser;
-use ptr::P;
-use tokenstream::TokenStream;
 use std::iter::Peekable;
+use std::path::PathBuf;
 
 /// Map a string to tts, using a made-up filename:
 pub fn string_to_stream(source_str: String) -> TokenStream {
     let ps = ParseSess::new(FilePathMapping::empty());
-    filemap_to_stream(&ps, ps.codemap().new_filemap("bogofile".to_string(), source_str), None)
+    source_file_to_stream(
+        &ps,
+        ps.source_map().new_source_file(PathBuf::from("bogofile").into(),
+        source_str,
+    ), None).0
 }
 
 /// Map string to parser (via tts)
-pub fn string_to_parser<'a>(ps: &'a ParseSess, source_str: String) -> Parser<'a> {
-    new_parser_from_source_str(ps, "bogofile".to_string(), source_str)
+pub fn string_to_parser(ps: &ParseSess, source_str: String) -> Parser<'_> {
+    new_parser_from_source_str(ps, PathBuf::from("bogofile").into(), source_str)
 }
 
 fn with_error_checking_parse<'a, T, F>(s: String, ps: &'a ParseSess, f: F) -> T where
@@ -33,7 +29,7 @@ fn with_error_checking_parse<'a, T, F>(s: String, ps: &'a ParseSess, f: F) -> T 
 {
     let mut p = string_to_parser(&ps, s);
     let x = panictry!(f(&mut p));
-    p.abort_if_errors();
+    p.sess.span_diagnostic.abort_if_errors();
     x
 }
 
@@ -61,24 +57,16 @@ pub fn string_to_item (source_str : String) -> Option<P<ast::Item>> {
     })
 }
 
-/// Parse a string, return a stmt
-pub fn string_to_stmt(source_str : String) -> Option<ast::Stmt> {
-    let ps = ParseSess::new(FilePathMapping::empty());
-    with_error_checking_parse(source_str, &ps, |p| {
-        p.parse_stmt()
-    })
-}
-
 /// Parse a string, return a pat. Uses "irrefutable"... which doesn't
 /// (currently) affect parsing.
 pub fn string_to_pat(source_str: String) -> P<ast::Pat> {
     let ps = ParseSess::new(FilePathMapping::empty());
     with_error_checking_parse(source_str, &ps, |p| {
-        p.parse_pat()
+        p.parse_pat(None)
     })
 }
 
-/// Convert a vector of strings to a vector of Ident's
+/// Converts a vector of strings to a vector of Ident's
 pub fn strs_to_idents(ids: Vec<&str> ) -> Vec<Ident> {
     ids.iter().map(|u| Ident::from_str(*u)).collect()
 }

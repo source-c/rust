@@ -1,13 +1,3 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 // Test that all coercions can actually be done using casts (modulo the lints).
 
 #![allow(trivial_casts, trivial_numeric_casts)]
@@ -46,21 +36,21 @@ pub fn main() {
 
     // unsize trait
     let x: &Bar = &Bar;
-    let _ = x as &Foo;
-    let _ = x as *const Foo;
+    let _ = x as &dyn Foo;
+    let _ = x as *const dyn Foo;
 
     let x: &mut Bar = &mut Bar;
-    let _ = x as &mut Foo;
-    let _ = x as *mut Foo;
+    let _ = x as &mut dyn Foo;
+    let _ = x as *mut dyn Foo;
 
     let x: Box<Bar> = Box::new(Bar);
-    let _ = x as Box<Foo>;
+    let _ = x as Box<dyn Foo>;
 
     // functions
     fn baz(_x: i32) {}
-    let _ = &baz as &Fn(i32);
+    let _ = &baz as &dyn Fn(i32);
     let x = |_x: i32| {};
-    let _ = &x as &Fn(i32);
+    let _ = &x as &dyn Fn(i32);
 }
 
 // subtyping

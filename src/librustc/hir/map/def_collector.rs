@@ -1,36 +1,25 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use hir::map::definitions::*;
-use hir::def_id::{CRATE_DEF_INDEX, DefIndex, DefIndexAddressSpace};
+use crate::hir::map::definitions::*;
+use crate::hir::def_id::{CRATE_DEF_INDEX, DefIndex};
+use crate::session::CrateDisambiguator;
 
 use syntax::ast::*;
 use syntax::ext::hygiene::Mark;
 use syntax::visit;
-use syntax::symbol::keywords;
-use syntax::symbol::Symbol;
+use syntax::symbol::{kw, sym};
+use syntax::parse::token::{self, Token};
+use syntax_pos::Span;
 
-use hir::map::{ITEM_LIKE_SPACE, REGULAR_SPACE};
-
-/// Creates def ids for nodes in the AST.
+/// Creates `DefId`s for nodes in the AST.
 pub struct DefCollector<'a> {
     definitions: &'a mut Definitions,
     parent_def: Option<DefIndex>,
     expansion: Mark,
-    pub visit_macro_invoc: Option<&'a mut FnMut(MacroInvocationData)>,
+    pub visit_macro_invoc: Option<&'a mut dyn FnMut(MacroInvocationData)>,
 }
 
 pub struct MacroInvocationData {
     pub mark: Mark,
     pub def_index: DefIndex,
-    pub const_expr: bool,
 }
 
 impl<'a> DefCollector<'a> {
@@ -43,7 +32,9 @@ impl<'a> DefCollector<'a> {
         }
     }
 
-    pub fn collect_root(&mut self, crate_name: &str, crate_disambiguator: &str) {
+    pub fn collect_root(&mut self,
+                        crate_name: &str,
+                        crate_disambiguator: CrateDisambiguator) {
         let root = self.definitions.create_root_def(crate_name,
                                                     crate_disambiguator);
         assert_eq!(root, CRATE_DEF_INDEX);
@@ -53,12 +44,12 @@ impl<'a> DefCollector<'a> {
     fn create_def(&mut self,
                   node_id: NodeId,
                   data: DefPathData,
-                  address_space: DefIndexAddressSpace)
+                  span: Span)
                   -> DefIndex {
         let parent_def = self.parent_def.unwrap();
         debug!("create_def(node_id={:?}, data={:?}, parent_def={:?})", node_id, data, parent_def);
         self.definitions
-            .create_def_with_parent(parent_def, node_id, data, address_space, self.expansion)
+            .create_def_with_parent(parent_def, node_id, data, self.expansion, span)
     }
 
     pub fn with_parent<F: FnOnce(&mut Self)>(&mut self, parent_def: DefIndex, f: F) {
@@ -68,25 +59,47 @@ impl<'a> DefCollector<'a> {
         self.parent_def = parent;
     }
 
-    pub fn visit_const_expr(&mut self, expr: &Expr) {
-        match expr.node {
-            // Find the node which will be used after lowering.
-            ExprKind::Paren(ref inner) => return self.visit_const_expr(inner),
-            ExprKind::Mac(..) => return self.visit_macro_invoc(expr.id, true),
-            // FIXME(eddyb) Closures should have separate
-            // function definition IDs and expression IDs.
-            ExprKind::Closure(..) => return,
-            _ => {}
-        }
+    fn visit_async_fn(
+        &mut self,
+        id: NodeId,
+        name: Name,
+        span: Span,
+        header: &FnHeader,
+        generics: &'a Generics,
+        decl: &'a FnDecl,
+        body: &'a Block,
+    ) {
+        let (closure_id, return_impl_trait_id) = match header.asyncness.node {
+            IsAsync::Async {
+                closure_id,
+                return_impl_trait_id,
+            } => (closure_id, return_impl_trait_id),
+            _ => unreachable!(),
+        };
 
-        self.create_def(expr.id, DefPathData::Initializer, REGULAR_SPACE);
+        // For async functions, we need to create their inner defs inside of a
+        // closure to match their desugared representation.
+        let fn_def_data = DefPathData::ValueNs(name.as_interned_str());
+        let fn_def = self.create_def(id, fn_def_data, span);
+        return self.with_parent(fn_def, |this| {
+            this.create_def(return_impl_trait_id, DefPathData::ImplTrait, span);
+
+            visit::walk_generics(this, generics);
+            visit::walk_fn_decl(this, decl);
+
+            let closure_def = this.create_def(
+                closure_id, DefPathData::ClosureExpr, span,
+            );
+            this.with_parent(closure_def, |this| {
+                visit::walk_block(this, body);
+            })
+        })
     }
 
-    fn visit_macro_invoc(&mut self, id: NodeId, const_expr: bool) {
+    fn visit_macro_invoc(&mut self, id: NodeId) {
         if let Some(ref mut visit) = self.visit_macro_invoc {
             visit(MacroInvocationData {
                 mark: id.placeholder_to_mark(),
-                const_expr,
                 def_index: self.parent_def.unwrap(),
             })
         }
@@ -98,76 +111,49 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
         debug!("visit_item: {:?}", i);
 
         // Pick the def data. This need not be unique, but the more
-        // information we encapsulate into
+        // information we encapsulate into, the better
         let def_data = match i.node {
-            ItemKind::DefaultImpl(..) | ItemKind::Impl(..) =>
-                DefPathData::Impl,
-            ItemKind::Enum(..) | ItemKind::Struct(..) | ItemKind::Union(..) | ItemKind::Trait(..) |
-            ItemKind::ExternCrate(..) | ItemKind::ForeignMod(..) | ItemKind::Ty(..) =>
-                DefPathData::TypeNs(i.ident.name.as_str()),
-            ItemKind::Mod(..) if i.ident == keywords::Invalid.ident() => {
+            ItemKind::Impl(..) => DefPathData::Impl,
+            ItemKind::Mod(..) if i.ident.name == kw::Invalid => {
                 return visit::walk_item(self, i);
             }
-            ItemKind::Mod(..) => DefPathData::Module(i.ident.name.as_str()),
+            ItemKind::Mod(..) | ItemKind::Trait(..) | ItemKind::TraitAlias(..) |
+            ItemKind::Enum(..) | ItemKind::Struct(..) | ItemKind::Union(..) |
+            ItemKind::Existential(..) | ItemKind::ExternCrate(..) | ItemKind::ForeignMod(..) |
+            ItemKind::Ty(..) => DefPathData::TypeNs(i.ident.as_interned_str()),
+            ItemKind::Fn(
+                ref decl,
+                ref header,
+                ref generics,
+                ref body,
+            ) if header.asyncness.node.is_async() => {
+                return self.visit_async_fn(
+                    i.id,
+                    i.ident.name,
+                    i.span,
+                    header,
+                    generics,
+                    decl,
+                    body,
+                )
+            }
             ItemKind::Static(..) | ItemKind::Const(..) | ItemKind::Fn(..) =>
-                DefPathData::ValueNs(i.ident.name.as_str()),
-            ItemKind::MacroDef(..) => DefPathData::MacroDef(i.ident.name.as_str()),
-            ItemKind::Mac(..) => return self.visit_macro_invoc(i.id, false),
+                DefPathData::ValueNs(i.ident.as_interned_str()),
+            ItemKind::MacroDef(..) => DefPathData::MacroNs(i.ident.as_interned_str()),
+            ItemKind::Mac(..) => return self.visit_macro_invoc(i.id),
             ItemKind::GlobalAsm(..) => DefPathData::Misc,
-            ItemKind::Use(ref view_path) => {
-                match view_path.node {
-                    ViewPathGlob(..) => {}
-
-                    // FIXME(eddyb) Should use the real name. Which namespace?
-                    ViewPathSimple(..) => {}
-                    ViewPathList(_, ref imports) => {
-                        for import in imports {
-                            self.create_def(import.node.id,
-                                            DefPathData::Misc,
-                                            ITEM_LIKE_SPACE);
-                        }
-                    }
-                }
-                DefPathData::Misc
+            ItemKind::Use(..) => {
+                return visit::walk_item(self, i);
             }
         };
-        let def = self.create_def(i.id, def_data, ITEM_LIKE_SPACE);
+        let def = self.create_def(i.id, def_data, i.span);
 
         self.with_parent(def, |this| {
             match i.node {
-                ItemKind::Enum(ref enum_definition, _) => {
-                    for v in &enum_definition.variants {
-                        let variant_def_index =
-                            this.create_def(v.node.data.id(),
-                                            DefPathData::EnumVariant(v.node.name.name.as_str()),
-                                            REGULAR_SPACE);
-                        this.with_parent(variant_def_index, |this| {
-                            for (index, field) in v.node.data.fields().iter().enumerate() {
-                                let name = field.ident.map(|ident| ident.name)
-                                    .unwrap_or_else(|| Symbol::intern(&index.to_string()));
-                                this.create_def(field.id,
-                                                DefPathData::Field(name.as_str()),
-                                                REGULAR_SPACE);
-                            }
-
-                            if let Some(ref expr) = v.node.disr_expr {
-                                this.visit_const_expr(expr);
-                            }
-                        });
-                    }
-                }
                 ItemKind::Struct(ref struct_def, _) | ItemKind::Union(ref struct_def, _) => {
-                    // If this is a tuple-like struct, register the constructor.
-                    if !struct_def.is_struct() {
-                        this.create_def(struct_def.id(),
-                                        DefPathData::StructCtor,
-                                        REGULAR_SPACE);
-                    }
-
-                    for (index, field) in struct_def.fields().iter().enumerate() {
-                        let name = field.ident.map(|ident| ident.name)
-                            .unwrap_or_else(|| Symbol::intern(&index.to_string()));
-                        this.create_def(field.id, DefPathData::Field(name.as_str()), REGULAR_SPACE);
+                    // If this is a unit or tuple-like struct, register the constructor.
+                    if let Some(ctor_hir_id) = struct_def.ctor_id() {
+                        this.create_def(ctor_hir_id, DefPathData::Ctor, i.span);
                     }
                 }
                 _ => {}
@@ -176,83 +162,146 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
         });
     }
 
+    fn visit_use_tree(&mut self, use_tree: &'a UseTree, id: NodeId, _nested: bool) {
+        self.create_def(id, DefPathData::Misc, use_tree.span);
+        visit::walk_use_tree(self, use_tree, id);
+    }
+
     fn visit_foreign_item(&mut self, foreign_item: &'a ForeignItem) {
+        if let ForeignItemKind::Macro(_) = foreign_item.node {
+            return self.visit_macro_invoc(foreign_item.id);
+        }
+
         let def = self.create_def(foreign_item.id,
-                                  DefPathData::ValueNs(foreign_item.ident.name.as_str()),
-                                  REGULAR_SPACE);
+                                  DefPathData::ValueNs(foreign_item.ident.as_interned_str()),
+                                  foreign_item.span);
 
         self.with_parent(def, |this| {
             visit::walk_foreign_item(this, foreign_item);
         });
     }
 
-    fn visit_generics(&mut self, generics: &'a Generics) {
-        for ty_param in generics.ty_params.iter() {
-            self.create_def(ty_param.id,
-                            DefPathData::TypeParam(ty_param.ident.name.as_str()),
-                            REGULAR_SPACE);
-        }
+    fn visit_variant(&mut self, v: &'a Variant, g: &'a Generics, item_id: NodeId) {
+        let def = self.create_def(v.node.id,
+                                  DefPathData::TypeNs(v.node.ident.as_interned_str()),
+                                  v.span);
+        self.with_parent(def, |this| {
+            if let Some(ctor_hir_id) = v.node.data.ctor_id() {
+                this.create_def(ctor_hir_id, DefPathData::Ctor, v.span);
+            }
+            visit::walk_variant(this, v, g, item_id)
+        });
+    }
 
-        visit::walk_generics(self, generics);
+    fn visit_variant_data(&mut self, data: &'a VariantData, _: Ident,
+                          _: &'a Generics, _: NodeId, _: Span) {
+        for (index, field) in data.fields().iter().enumerate() {
+            let name = field.ident.map(|ident| ident.name)
+                .unwrap_or_else(|| sym::integer(index));
+            let def = self.create_def(field.id,
+                                      DefPathData::ValueNs(name.as_interned_str()),
+                                      field.span);
+            self.with_parent(def, |this| this.visit_struct_field(field));
+        }
+    }
+
+    fn visit_generic_param(&mut self, param: &'a GenericParam) {
+        let name = param.ident.as_interned_str();
+        let def_path_data = match param.kind {
+            GenericParamKind::Lifetime { .. } => DefPathData::LifetimeNs(name),
+            GenericParamKind::Type { .. } => DefPathData::TypeNs(name),
+            GenericParamKind::Const { .. } => DefPathData::ValueNs(name),
+        };
+        self.create_def(param.id, def_path_data, param.ident.span);
+
+        visit::walk_generic_param(self, param);
     }
 
     fn visit_trait_item(&mut self, ti: &'a TraitItem) {
         let def_data = match ti.node {
             TraitItemKind::Method(..) | TraitItemKind::Const(..) =>
-                DefPathData::ValueNs(ti.ident.name.as_str()),
-            TraitItemKind::Type(..) => DefPathData::TypeNs(ti.ident.name.as_str()),
-            TraitItemKind::Macro(..) => return self.visit_macro_invoc(ti.id, false),
+                DefPathData::ValueNs(ti.ident.as_interned_str()),
+            TraitItemKind::Type(..) => {
+                DefPathData::TypeNs(ti.ident.as_interned_str())
+            },
+            TraitItemKind::Macro(..) => return self.visit_macro_invoc(ti.id),
         };
 
-        let def = self.create_def(ti.id, def_data, ITEM_LIKE_SPACE);
-        self.with_parent(def, |this| {
-            if let TraitItemKind::Const(_, Some(ref expr)) = ti.node {
-                this.visit_const_expr(expr);
-            }
-
-            visit::walk_trait_item(this, ti);
-        });
+        let def = self.create_def(ti.id, def_data, ti.span);
+        self.with_parent(def, |this| visit::walk_trait_item(this, ti));
     }
 
     fn visit_impl_item(&mut self, ii: &'a ImplItem) {
         let def_data = match ii.node {
+            ImplItemKind::Method(MethodSig {
+                ref header,
+                ref decl,
+            }, ref body) if header.asyncness.node.is_async() => {
+                return self.visit_async_fn(
+                    ii.id,
+                    ii.ident.name,
+                    ii.span,
+                    header,
+                    &ii.generics,
+                    decl,
+                    body,
+                )
+            }
             ImplItemKind::Method(..) | ImplItemKind::Const(..) =>
-                DefPathData::ValueNs(ii.ident.name.as_str()),
-            ImplItemKind::Type(..) => DefPathData::TypeNs(ii.ident.name.as_str()),
-            ImplItemKind::Macro(..) => return self.visit_macro_invoc(ii.id, false),
+                DefPathData::ValueNs(ii.ident.as_interned_str()),
+            ImplItemKind::Type(..) |
+            ImplItemKind::Existential(..) => {
+                DefPathData::TypeNs(ii.ident.as_interned_str())
+            },
+            ImplItemKind::Macro(..) => return self.visit_macro_invoc(ii.id),
         };
 
-        let def = self.create_def(ii.id, def_data, ITEM_LIKE_SPACE);
-        self.with_parent(def, |this| {
-            if let ImplItemKind::Const(_, ref expr) = ii.node {
-                this.visit_const_expr(expr);
-            }
-
-            visit::walk_impl_item(this, ii);
-        });
+        let def = self.create_def(ii.id, def_data, ii.span);
+        self.with_parent(def, |this| visit::walk_impl_item(this, ii));
     }
 
     fn visit_pat(&mut self, pat: &'a Pat) {
         match pat.node {
-            PatKind::Mac(..) => return self.visit_macro_invoc(pat.id, false),
+            PatKind::Mac(..) => return self.visit_macro_invoc(pat.id),
             _ => visit::walk_pat(self, pat),
         }
+    }
+
+    fn visit_anon_const(&mut self, constant: &'a AnonConst) {
+        let def = self.create_def(constant.id,
+                                  DefPathData::AnonConst,
+                                  constant.value.span);
+        self.with_parent(def, |this| visit::walk_anon_const(this, constant));
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {
         let parent_def = self.parent_def;
 
         match expr.node {
-            ExprKind::Mac(..) => return self.visit_macro_invoc(expr.id, false),
-            ExprKind::Repeat(_, ref count) => self.visit_const_expr(count),
-            ExprKind::Closure(..) => {
-                let def = self.create_def(expr.id,
+            ExprKind::Mac(..) => return self.visit_macro_invoc(expr.id),
+            ExprKind::Closure(_, asyncness, ..) => {
+                let closure_def = self.create_def(expr.id,
                                           DefPathData::ClosureExpr,
-                                          REGULAR_SPACE);
-                self.parent_def = Some(def);
+                                          expr.span);
+                self.parent_def = Some(closure_def);
+
+                // Async closures desugar to closures inside of closures, so
+                // we must create two defs.
+                if let IsAsync::Async { closure_id, .. } = asyncness {
+                    let async_def = self.create_def(closure_id,
+                                                    DefPathData::ClosureExpr,
+                                                    expr.span);
+                    self.parent_def = Some(async_def);
+                }
+            }
+            ExprKind::Async(_, async_id, _) => {
+                let async_def = self.create_def(async_id,
+                                                DefPathData::ClosureExpr,
+                                                expr.span);
+                self.parent_def = Some(async_def);
             }
             _ => {}
-        }
+        };
 
         visit::walk_expr(self, expr);
         self.parent_def = parent_def;
@@ -260,27 +309,29 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
 
     fn visit_ty(&mut self, ty: &'a Ty) {
         match ty.node {
-            TyKind::Mac(..) => return self.visit_macro_invoc(ty.id, false),
-            TyKind::Array(_, ref length) => self.visit_const_expr(length),
-            TyKind::ImplTrait(..) => {
-                self.create_def(ty.id, DefPathData::ImplTrait, REGULAR_SPACE);
+            TyKind::Mac(..) => return self.visit_macro_invoc(ty.id),
+            TyKind::ImplTrait(node_id, _) => {
+                self.create_def(node_id, DefPathData::ImplTrait, ty.span);
             }
-            TyKind::Typeof(ref expr) => self.visit_const_expr(expr),
             _ => {}
         }
         visit::walk_ty(self, ty);
     }
 
-    fn visit_lifetime_def(&mut self, def: &'a LifetimeDef) {
-        self.create_def(def.lifetime.id,
-                        DefPathData::LifetimeDef(def.lifetime.ident.name.as_str()),
-                        REGULAR_SPACE);
-    }
-
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
         match stmt.node {
-            StmtKind::Mac(..) => self.visit_macro_invoc(stmt.id, false),
+            StmtKind::Mac(..) => self.visit_macro_invoc(stmt.id),
             _ => visit::walk_stmt(self, stmt),
+        }
+    }
+
+    fn visit_token(&mut self, t: Token) {
+        if let token::Interpolated(nt) = t.kind {
+            if let token::NtExpr(ref expr) = *nt {
+                if let ExprKind::Mac(..) = expr.node {
+                    self.visit_macro_invoc(expr.id);
+                }
+            }
         }
     }
 }

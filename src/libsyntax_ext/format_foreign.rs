@@ -1,29 +1,11 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-macro_rules! try_opt {
-    ($e:expr) => {
-        match $e {
-            Some(v) => v,
-            None => return None,
-        }
-    };
-}
-
 pub mod printf {
     use super::strcursor::StrCursor as Cur;
+    use syntax_pos::InnerSpan;
 
     /// Represents a single `printf`-style substitution.
-    #[derive(Clone, Eq, PartialEq, Debug)]
+    #[derive(Clone, PartialEq, Debug)]
     pub enum Substitution<'a> {
-        /// A formatted output substitution.
+        /// A formatted output substitution with its internal byte offset.
         Format(Format<'a>),
         /// A literal `%%` escape.
         Escape,
@@ -37,6 +19,23 @@ pub mod printf {
             }
         }
 
+        pub fn position(&self) -> Option<InnerSpan> {
+            match *self {
+                Substitution::Format(ref fmt) => Some(fmt.position),
+                _ => None,
+            }
+        }
+
+        pub fn set_position(&mut self, start: usize, end: usize) {
+            match self {
+                Substitution::Format(ref mut fmt) => {
+                    fmt.position = InnerSpan::new(start, end);
+                }
+                _ => {}
+            }
+        }
+
+
         /// Translate this substitution into an equivalent Rust formatting directive.
         ///
         /// This ignores cases where the substitution does not have an exact equivalent, or where
@@ -49,7 +48,7 @@ pub mod printf {
         }
     }
 
-    #[derive(Clone, Eq, PartialEq, Debug)]
+    #[derive(Clone, PartialEq, Debug)]
     /// A single `printf`-style formatting directive.
     pub struct Format<'a> {
         /// The entire original formatting directive.
@@ -66,9 +65,11 @@ pub mod printf {
         pub length: Option<&'a str>,
         /// Type of parameter being converted.
         pub type_: &'a str,
+        /// Byte offset for the start and end of this formatting directive.
+        pub position: InnerSpan,
     }
 
-    impl<'a> Format<'a> {
+    impl Format<'_> {
         /// Translate this directive into an equivalent Rust formatting directive.
         ///
         /// Returns `None` in cases where the `printf` directive does not have an exact Rust
@@ -173,7 +174,7 @@ pub mod printf {
             s.push_str("{");
 
             if let Some(arg) = self.parameter {
-                try_opt!(write!(s, "{}", try_opt!(arg.checked_sub(1))).ok());
+                write!(s, "{}", arg.checked_sub(1)?).ok()?;
             }
 
             if has_options {
@@ -203,12 +204,12 @@ pub mod printf {
                 }
 
                 if let Some(width) = width {
-                    try_opt!(width.translate(&mut s).ok());
+                    width.translate(&mut s).ok()?;
                 }
 
                 if let Some(precision) = precision {
                     s.push_str(".");
-                    try_opt!(precision.translate(&mut s).ok());
+                    precision.translate(&mut s).ok()?;
                 }
 
                 if let Some(type_) = type_ {
@@ -222,7 +223,7 @@ pub mod printf {
     }
 
     /// A general number used in a `printf` formatting directive.
-    #[derive(Copy, Clone, Eq, PartialEq, Debug)]
+    #[derive(Copy, Clone, PartialEq, Debug)]
     pub enum Num {
         // The range of these values is technically bounded by `NL_ARGMAX`... but, at least for GNU
         // libc, it apparently has no real fixed limit.  A `u16` is used here on the basis that it
@@ -241,20 +242,20 @@ pub mod printf {
     impl Num {
         fn from_str(s: &str, arg: Option<&str>) -> Self {
             if let Some(arg) = arg {
-                Num::Arg(arg.parse().expect(&format!("invalid format arg `{:?}`", arg)))
+                Num::Arg(arg.parse().unwrap_or_else(|_| panic!("invalid format arg `{:?}`", arg)))
             } else if s == "*" {
                 Num::Next
             } else {
-                Num::Num(s.parse().expect(&format!("invalid format num `{:?}`", s)))
+                Num::Num(s.parse().unwrap_or_else(|_| panic!("invalid format num `{:?}`", s)))
             }
         }
 
-        fn translate(&self, s: &mut String) -> ::std::fmt::Result {
+        fn translate(&self, s: &mut String) -> std::fmt::Result {
             use std::fmt::Write;
             match *self {
                 Num::Num(n) => write!(s, "{}", n),
                 Num::Arg(n) => {
-                    let n = try!(n.checked_sub(1).ok_or(::std::fmt::Error));
+                    let n = n.checked_sub(1).ok_or(std::fmt::Error)?;
                     write!(s, "{}$", n)
                 },
                 Num::Next => write!(s, "*"),
@@ -263,27 +264,37 @@ pub mod printf {
     }
 
     /// Returns an iterator over all substitutions in a given string.
-    pub fn iter_subs(s: &str) -> Substitutions {
+    pub fn iter_subs(s: &str, start_pos: usize) -> Substitutions<'_> {
         Substitutions {
             s,
+            pos: start_pos,
         }
     }
 
     /// Iterator over substitutions in a string.
     pub struct Substitutions<'a> {
         s: &'a str,
+        pos: usize,
     }
 
     impl<'a> Iterator for Substitutions<'a> {
         type Item = Substitution<'a>;
         fn next(&mut self) -> Option<Self::Item> {
-            match parse_next_substitution(self.s) {
-                Some((sub, tail)) => {
-                    self.s = tail;
-                    Some(sub)
-                },
-                None => None,
+            let (mut sub, tail) = parse_next_substitution(self.s)?;
+            self.s = tail;
+            match sub {
+                Substitution::Format(_) => if let Some(inner_span) = sub.position() {
+                    sub.set_position(inner_span.start + self.pos, inner_span.end + self.pos);
+                    self.pos += inner_span.end;
+                }
+                Substitution::Escape => self.pos += 2,
             }
+            Some(sub)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            // Substitutions are at least 2 characters long.
+            (0, Some(self.s.len() / 2))
         }
     }
 
@@ -299,18 +310,17 @@ pub mod printf {
     }
 
     /// Parse the next substitution from the input string.
-    pub fn parse_next_substitution(s: &str) -> Option<(Substitution, &str)> {
+    pub fn parse_next_substitution(s: &str) -> Option<(Substitution<'_>, &str)> {
         use self::State::*;
 
         let at = {
-            let start = try_opt!(s.find('%'));
-            match s[start+1..].chars().next() {
-                Some('%') => return Some((Substitution::Escape, &s[start+2..])),
-                Some(_) => {/* fall-through */},
-                None => return None,
+            let start = s.find('%')?;
+            match s[start+1..].chars().next()? {
+                '%' => return Some((Substitution::Escape, &s[start+2..])),
+                _ => {/* fall-through */},
             }
 
-            Cur::new_at_start(&s[start..])
+            Cur::new_at(&s[..], start)
         };
 
         // This is meant to be a translation of the following regex:
@@ -335,16 +345,16 @@ pub mod printf {
         // Used to establish the full span at the end.
         let start = at;
         // The current position within the string.
-        let mut at = try_opt!(at.at_next_cp());
+        let mut at = at.at_next_cp()?;
         // `c` is the next codepoint, `next` is a cursor after it.
-        let (mut c, mut next) = try_opt!(at.next_cp());
+        let (mut c, mut next) = at.next_cp()?;
 
         // Update `at`, `c`, and `next`, exiting if we're out of input.
         macro_rules! move_to {
             ($cur:expr) => {
                 {
                     at = $cur;
-                    let (c_, next_) = try_opt!(at.next_cp());
+                    let (c_, next_) = at.next_cp()?;
                     c = c_;
                     next = next_;
                 }
@@ -364,6 +374,7 @@ pub mod printf {
                     precision: None,
                     length: None,
                     type_: at.slice_between(next).unwrap(),
+                    position: InnerSpan::new(start.at, next.at),
                 }),
                 next.slice_after()
             ));
@@ -379,11 +390,11 @@ pub mod printf {
         let mut precision: Option<Num> = None;
         let mut length: Option<&str> = None;
         let mut type_: &str = "";
-        let end: Cur;
+        let end: Cur<'_>;
 
         if let Start = state {
             match c {
-                '1'...'9' => {
+                '1'..='9' => {
                     let end = at_next_cp_while(next, is_digit);
                     match end.next_cp() {
                         // Yes, this *is* the parameter.
@@ -425,7 +436,7 @@ pub mod printf {
                     state = WidthArg;
                     move_to!(next);
                 },
-                '1' ... '9' => {
+                '1' ..= '9' => {
                     let end = at_next_cp_while(next, is_digit);
                     state = Prec;
                     width = Some(Num::from_str(at.slice_between(end).unwrap(), None));
@@ -486,7 +497,7 @@ pub mod printf {
                         }
                     }
                 },
-                '0' ... '9' => {
+                '0' ..= '9' => {
                     let end = at_next_cp_while(next, is_digit);
                     state = Length;
                     precision = Some(Num::from_str(at.slice_between(end).unwrap(), None));
@@ -550,6 +561,7 @@ pub mod printf {
         drop(next);
 
         end = at;
+        let position = InnerSpan::new(start.at, end.at);
 
         let f = Format {
             span: start.slice_between(end).unwrap(),
@@ -559,11 +571,12 @@ pub mod printf {
             precision,
             length,
             type_,
+            position,
         };
         Some((Substitution::Format(f), end.slice_after()))
     }
 
-    fn at_next_cp_while<F>(mut cur: Cur, mut pred: F) -> Cur
+    fn at_next_cp_while<F>(mut cur: Cur<'_>, mut pred: F) -> Cur<'_>
     where F: FnMut(char) -> bool {
         loop {
             match cur.next_cp() {
@@ -579,7 +592,7 @@ pub mod printf {
 
     fn is_digit(c: char) -> bool {
         match c {
-            '0' ... '9' => true,
+            '0' ..= '9' => true,
             _ => false
         }
     }
@@ -592,244 +605,120 @@ pub mod printf {
     }
 
     #[cfg(test)]
-    mod tests {
-        use super::{
-            Format as F,
-            Num as N,
-            Substitution as S,
-            iter_subs,
-            parse_next_substitution as pns,
-        };
-
-        macro_rules! assert_eq_pnsat {
-            ($lhs:expr, $rhs:expr) => {
-                assert_eq!(
-                    pns($lhs).and_then(|(s, _)| s.translate()),
-                    $rhs.map(<String as From<&str>>::from)
-                )
-            };
-        }
-
-        #[test]
-        fn test_escape() {
-            assert_eq!(pns("has no escapes"), None);
-            assert_eq!(pns("has no escapes, either %"), None);
-            assert_eq!(pns("*so* has a %% escape"), Some((S::Escape," escape")));
-            assert_eq!(pns("%% leading escape"), Some((S::Escape, " leading escape")));
-            assert_eq!(pns("trailing escape %%"), Some((S::Escape, "")));
-        }
-
-        #[test]
-        fn test_parse() {
-            macro_rules! assert_pns_eq_sub {
-                ($in_:expr, {
-                    $param:expr, $flags:expr,
-                    $width:expr, $prec:expr, $len:expr, $type_:expr,
-                }) => {
-                    assert_eq!(
-                        pns(concat!($in_, "!")),
-                        Some((
-                            S::Format(F {
-                                span: $in_,
-                                parameter: $param,
-                                flags: $flags,
-                                width: $width,
-                                precision: $prec,
-                                length: $len,
-                                type_: $type_,
-                            }),
-                            "!"
-                        ))
-                    )
-                };
-            }
-
-            assert_pns_eq_sub!("%!",
-                { None, "", None, None, None, "!", });
-            assert_pns_eq_sub!("%c",
-                { None, "", None, None, None, "c", });
-            assert_pns_eq_sub!("%s",
-                { None, "", None, None, None, "s", });
-            assert_pns_eq_sub!("%06d",
-                { None, "0", Some(N::Num(6)), None, None, "d", });
-            assert_pns_eq_sub!("%4.2f",
-                { None, "", Some(N::Num(4)), Some(N::Num(2)), None, "f", });
-            assert_pns_eq_sub!("%#x",
-                { None, "#", None, None, None, "x", });
-            assert_pns_eq_sub!("%-10s",
-                { None, "-", Some(N::Num(10)), None, None, "s", });
-            assert_pns_eq_sub!("%*s",
-                { None, "", Some(N::Next), None, None, "s", });
-            assert_pns_eq_sub!("%-10.*s",
-                { None, "-", Some(N::Num(10)), Some(N::Next), None, "s", });
-            assert_pns_eq_sub!("%-*.*s",
-                { None, "-", Some(N::Next), Some(N::Next), None, "s", });
-            assert_pns_eq_sub!("%.6i",
-                { None, "", None, Some(N::Num(6)), None, "i", });
-            assert_pns_eq_sub!("%+i",
-                { None, "+", None, None, None, "i", });
-            assert_pns_eq_sub!("%08X",
-                { None, "0", Some(N::Num(8)), None, None, "X", });
-            assert_pns_eq_sub!("%lu",
-                { None, "", None, None, Some("l"), "u", });
-            assert_pns_eq_sub!("%Iu",
-                { None, "", None, None, Some("I"), "u", });
-            assert_pns_eq_sub!("%I32u",
-                { None, "", None, None, Some("I32"), "u", });
-            assert_pns_eq_sub!("%I64u",
-                { None, "", None, None, Some("I64"), "u", });
-            assert_pns_eq_sub!("%'d",
-                { None, "'", None, None, None, "d", });
-            assert_pns_eq_sub!("%10s",
-                { None, "", Some(N::Num(10)), None, None, "s", });
-            assert_pns_eq_sub!("%-10.10s",
-                { None, "-", Some(N::Num(10)), Some(N::Num(10)), None, "s", });
-            assert_pns_eq_sub!("%1$d",
-                { Some(1), "", None, None, None, "d", });
-            assert_pns_eq_sub!("%2$.*3$d",
-                { Some(2), "", None, Some(N::Arg(3)), None, "d", });
-            assert_pns_eq_sub!("%1$*2$.*3$d",
-                { Some(1), "", Some(N::Arg(2)), Some(N::Arg(3)), None, "d", });
-            assert_pns_eq_sub!("%-8ld",
-                { None, "-", Some(N::Num(8)), None, Some("l"), "d", });
-        }
-
-        #[test]
-        fn test_iter() {
-            let s = "The %d'th word %% is: `%.*s` %!\n";
-            let subs: Vec<_> = iter_subs(s).map(|sub| sub.translate()).collect();
-            assert_eq!(
-                subs.iter().map(|ms| ms.as_ref().map(|s| &s[..])).collect::<Vec<_>>(),
-                vec![Some("{}"), None, Some("{:.*}"), None]
-            );
-        }
-
-        /// Check that the translations are what we expect.
-        #[test]
-        fn test_trans() {
-            assert_eq_pnsat!("%c", Some("{}"));
-            assert_eq_pnsat!("%d", Some("{}"));
-            assert_eq_pnsat!("%u", Some("{}"));
-            assert_eq_pnsat!("%x", Some("{:x}"));
-            assert_eq_pnsat!("%X", Some("{:X}"));
-            assert_eq_pnsat!("%e", Some("{:e}"));
-            assert_eq_pnsat!("%E", Some("{:E}"));
-            assert_eq_pnsat!("%f", Some("{}"));
-            assert_eq_pnsat!("%g", Some("{:e}"));
-            assert_eq_pnsat!("%G", Some("{:E}"));
-            assert_eq_pnsat!("%s", Some("{}"));
-            assert_eq_pnsat!("%p", Some("{:p}"));
-
-            assert_eq_pnsat!("%06d",        Some("{:06}"));
-            assert_eq_pnsat!("%4.2f",       Some("{:4.2}"));
-            assert_eq_pnsat!("%#x",         Some("{:#x}"));
-            assert_eq_pnsat!("%-10s",       Some("{:<10}"));
-            assert_eq_pnsat!("%*s",         None);
-            assert_eq_pnsat!("%-10.*s",     Some("{:<10.*}"));
-            assert_eq_pnsat!("%-*.*s",      None);
-            assert_eq_pnsat!("%.6i",        Some("{:06}"));
-            assert_eq_pnsat!("%+i",         Some("{:+}"));
-            assert_eq_pnsat!("%08X",        Some("{:08X}"));
-            assert_eq_pnsat!("%lu",         Some("{}"));
-            assert_eq_pnsat!("%Iu",         Some("{}"));
-            assert_eq_pnsat!("%I32u",       Some("{}"));
-            assert_eq_pnsat!("%I64u",       Some("{}"));
-            assert_eq_pnsat!("%'d",         None);
-            assert_eq_pnsat!("%10s",        Some("{:>10}"));
-            assert_eq_pnsat!("%-10.10s",    Some("{:<10.10}"));
-            assert_eq_pnsat!("%1$d",        Some("{0}"));
-            assert_eq_pnsat!("%2$.*3$d",    Some("{1:02$}"));
-            assert_eq_pnsat!("%1$*2$.*3$s", Some("{0:>1$.2$}"));
-            assert_eq_pnsat!("%-8ld",       Some("{:<8}"));
-        }
-    }
+    mod tests;
 }
 
 pub mod shell {
     use super::strcursor::StrCursor as Cur;
+    use syntax_pos::InnerSpan;
 
-    #[derive(Clone, Eq, PartialEq, Debug)]
+    #[derive(Clone, PartialEq, Debug)]
     pub enum Substitution<'a> {
-        Ordinal(u8),
-        Name(&'a str),
-        Escape,
+        Ordinal(u8, (usize, usize)),
+        Name(&'a str, (usize, usize)),
+        Escape((usize, usize)),
     }
 
-    impl<'a> Substitution<'a> {
+    impl Substitution<'_> {
         pub fn as_str(&self) -> String {
-            match *self {
-                Substitution::Ordinal(n) => format!("${}", n),
-                Substitution::Name(n) => format!("${}", n),
-                Substitution::Escape => "$$".into(),
+            match self {
+                Substitution::Ordinal(n, _) => format!("${}", n),
+                Substitution::Name(n, _) => format!("${}", n),
+                Substitution::Escape(_) => "$$".into(),
+            }
+        }
+
+        pub fn position(&self) -> Option<InnerSpan> {
+            match self {
+                Substitution::Ordinal(_, pos) |
+                Substitution::Name(_, pos) |
+                Substitution::Escape(pos) => Some(InnerSpan::new(pos.0, pos.1)),
+            }
+        }
+
+        pub fn set_position(&mut self, start: usize, end: usize) {
+            match self {
+                Substitution::Ordinal(_, ref mut pos) |
+                Substitution::Name(_, ref mut pos) |
+                Substitution::Escape(ref mut pos) => *pos = (start, end),
             }
         }
 
         pub fn translate(&self) -> Option<String> {
             match *self {
-                Substitution::Ordinal(n) => Some(format!("{{{}}}", n)),
-                Substitution::Name(n) => Some(format!("{{{}}}", n)),
-                Substitution::Escape => None,
+                Substitution::Ordinal(n, _) => Some(format!("{{{}}}", n)),
+                Substitution::Name(n, _) => Some(format!("{{{}}}", n)),
+                Substitution::Escape(_) => None,
             }
         }
     }
 
     /// Returns an iterator over all substitutions in a given string.
-    pub fn iter_subs(s: &str) -> Substitutions {
+    pub fn iter_subs(s: &str, start_pos: usize) -> Substitutions<'_> {
         Substitutions {
             s,
+            pos: start_pos,
         }
     }
 
     /// Iterator over substitutions in a string.
     pub struct Substitutions<'a> {
         s: &'a str,
+        pos: usize,
     }
 
     impl<'a> Iterator for Substitutions<'a> {
         type Item = Substitution<'a>;
         fn next(&mut self) -> Option<Self::Item> {
             match parse_next_substitution(self.s) {
-                Some((sub, tail)) => {
+                Some((mut sub, tail)) => {
                     self.s = tail;
+                    if let Some(InnerSpan { start, end }) = sub.position() {
+                        sub.set_position(start + self.pos, end + self.pos);
+                        self.pos += end;
+                    }
                     Some(sub)
                 },
                 None => None,
             }
         }
-    }
 
-    /// Parse the next substitution from the input string.
-    pub fn parse_next_substitution(s: &str) -> Option<(Substitution, &str)> {
-        let at = {
-            let start = try_opt!(s.find('$'));
-            match s[start+1..].chars().next() {
-                Some('$') => return Some((Substitution::Escape, &s[start+2..])),
-                Some(c @ '0' ... '9') => {
-                    let n = (c as u8) - b'0';
-                    return Some((Substitution::Ordinal(n), &s[start+2..]));
-                },
-                Some(_) => {/* fall-through */},
-                None => return None,
-            }
-
-            Cur::new_at_start(&s[start..])
-        };
-
-        let at = try_opt!(at.at_next_cp());
-        match at.next_cp() {
-            Some((c, inner)) => {
-                if !is_ident_head(c) {
-                    None
-                } else {
-                    let end = at_next_cp_while(inner, is_ident_tail);
-                    Some((Substitution::Name(at.slice_between(end).unwrap()), end.slice_after()))
-                }
-            },
-            _ => None
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (0, Some(self.s.len()))
         }
     }
 
-    fn at_next_cp_while<F>(mut cur: Cur, mut pred: F) -> Cur
+    /// Parse the next substitution from the input string.
+    pub fn parse_next_substitution(s: &str) -> Option<(Substitution<'_>, &str)> {
+        let at = {
+            let start = s.find('$')?;
+            match s[start+1..].chars().next()? {
+                '$' => return Some((Substitution::Escape((start, start+2)), &s[start+2..])),
+                c @ '0' ..= '9' => {
+                    let n = (c as u8) - b'0';
+                    return Some((Substitution::Ordinal(n, (start, start+2)), &s[start+2..]));
+                },
+                _ => {/* fall-through */},
+            }
+
+            Cur::new_at(&s[..], start)
+        };
+
+        let at = at.at_next_cp()?;
+        let (c, inner) = at.next_cp()?;
+
+        if !is_ident_head(c) {
+            None
+        } else {
+            let end = at_next_cp_while(inner, is_ident_tail);
+            let slice = at.slice_between(end).unwrap();
+            let start = at.at - 1;
+            let end_pos = at.at + slice.len();
+            Some((Substitution::Name(slice, (start, end_pos)), end.slice_after()))
+        }
+    }
+
+    fn at_next_cp_while<F>(mut cur: Cur<'_>, mut pred: F) -> Cur<'_>
     where F: FnMut(char) -> bool {
         loop {
             match cur.next_cp() {
@@ -845,96 +734,33 @@ pub mod shell {
 
     fn is_ident_head(c: char) -> bool {
         match c {
-            'a' ... 'z' | 'A' ... 'Z' | '_' => true,
+            'a' ..= 'z' | 'A' ..= 'Z' | '_' => true,
             _ => false
         }
     }
 
     fn is_ident_tail(c: char) -> bool {
         match c {
-            '0' ... '9' => true,
+            '0' ..= '9' => true,
             c => is_ident_head(c)
         }
     }
 
     #[cfg(test)]
-    mod tests {
-        use super::{
-            Substitution as S,
-            parse_next_substitution as pns,
-        };
-
-        macro_rules! assert_eq_pnsat {
-            ($lhs:expr, $rhs:expr) => {
-                assert_eq!(
-                    pns($lhs).and_then(|(f, _)| f.translate()),
-                    $rhs.map(<String as From<&str>>::from)
-                )
-            };
-        }
-
-        #[test]
-        fn test_escape() {
-            assert_eq!(pns("has no escapes"), None);
-            assert_eq!(pns("has no escapes, either $"), None);
-            assert_eq!(pns("*so* has a $$ escape"), Some((S::Escape, " escape")));
-            assert_eq!(pns("$$ leading escape"), Some((S::Escape, " leading escape")));
-            assert_eq!(pns("trailing escape $$"), Some((S::Escape, "")));
-        }
-
-        #[test]
-        fn test_parse() {
-            macro_rules! assert_pns_eq_sub {
-                ($in_:expr, $kind:ident($arg:expr)) => {
-                    assert_eq!(pns(concat!($in_, "!")), Some((S::$kind($arg.into()), "!")))
-                };
-            }
-
-            assert_pns_eq_sub!("$0", Ordinal(0));
-            assert_pns_eq_sub!("$1", Ordinal(1));
-            assert_pns_eq_sub!("$9", Ordinal(9));
-            assert_pns_eq_sub!("$N", Name("N"));
-            assert_pns_eq_sub!("$NAME", Name("NAME"));
-        }
-
-        #[test]
-        fn test_iter() {
-            use super::iter_subs;
-            let s = "The $0'th word $$ is: `$WORD` $!\n";
-            let subs: Vec<_> = iter_subs(s).map(|sub| sub.translate()).collect();
-            assert_eq!(
-                subs.iter().map(|ms| ms.as_ref().map(|s| &s[..])).collect::<Vec<_>>(),
-                vec![Some("{0}"), None, Some("{WORD}")]
-            );
-        }
-
-        #[test]
-        fn test_trans() {
-            assert_eq_pnsat!("$0", Some("{0}"));
-            assert_eq_pnsat!("$9", Some("{9}"));
-            assert_eq_pnsat!("$1", Some("{1}"));
-            assert_eq_pnsat!("$10", Some("{1}"));
-            assert_eq_pnsat!("$stuff", Some("{stuff}"));
-            assert_eq_pnsat!("$NAME", Some("{NAME}"));
-            assert_eq_pnsat!("$PREFIX/bin", Some("{PREFIX}"));
-        }
-
-    }
+    mod tests;
 }
 
 mod strcursor {
-    use std;
-
     pub struct StrCursor<'a> {
         s: &'a str,
-        at: usize,
+        pub at: usize,
     }
 
     impl<'a> StrCursor<'a> {
-        pub fn new_at_start(s: &'a str) -> StrCursor<'a> {
+        pub fn new_at(s: &'a str, at: usize) -> StrCursor<'a> {
             StrCursor {
                 s,
-                at: 0,
+                at,
             }
         }
 
@@ -946,10 +772,7 @@ mod strcursor {
         }
 
         pub fn next_cp(mut self) -> Option<(char, StrCursor<'a>)> {
-            let cp = match self.cp_after() {
-                Some(cp) => cp,
-                None => return None,
-            };
+            let cp = self.cp_after()?;
             self.seek_right(cp.len_utf8());
             Some((cp, self))
         }
@@ -992,7 +815,7 @@ mod strcursor {
         }
     }
 
-    impl<'a> Copy for StrCursor<'a> {}
+    impl Copy for StrCursor<'_> {}
 
     impl<'a> Clone for StrCursor<'a> {
         fn clone(&self) -> StrCursor<'a> {
@@ -1000,8 +823,8 @@ mod strcursor {
         }
     }
 
-    impl<'a> std::fmt::Debug for StrCursor<'a> {
-        fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    impl std::fmt::Debug for StrCursor<'_> {
+        fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(fmt, "StrCursor({:?} | {:?})", self.slice_before(), self.slice_after())
         }
     }

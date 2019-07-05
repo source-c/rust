@@ -1,26 +1,20 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Various utility functions used throughout rustbuild.
 //!
 //! Simple things like testing the various filesystem operations here and there,
 //! not a lot of interesting happenings here unfortunately.
 
 use std::env;
+use std::str;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, Instant};
 
-use filetime::{self, FileTime};
+use build_helper::t;
+
+use crate::config::Config;
+use crate::builder::Builder;
 
 /// Returns the `name` as the filename of a static library for `target`.
 pub fn staticlib(name: &str, target: &str) -> String {
@@ -29,72 +23,6 @@ pub fn staticlib(name: &str, target: &str) -> String {
     } else {
         format!("lib{}.a", name)
     }
-}
-
-/// Copies a file from `src` to `dst`
-pub fn copy(src: &Path, dst: &Path) {
-    let _ = fs::remove_file(&dst);
-    // Attempt to "easy copy" by creating a hard link (symlinks don't work on
-    // windows), but if that fails just fall back to a slow `copy` operation.
-    if let Ok(()) = fs::hard_link(src, dst) {
-        return
-    }
-    if let Err(e) = fs::copy(src, dst) {
-        panic!("failed to copy `{}` to `{}`: {}", src.display(),
-               dst.display(), e)
-    }
-    let metadata = t!(src.metadata());
-    t!(fs::set_permissions(dst, metadata.permissions()));
-    let atime = FileTime::from_last_access_time(&metadata);
-    let mtime = FileTime::from_last_modification_time(&metadata);
-    t!(filetime::set_file_times(dst, atime, mtime));
-}
-
-/// Copies the `src` directory recursively to `dst`. Both are assumed to exist
-/// when this function is called.
-pub fn cp_r(src: &Path, dst: &Path) {
-    for f in t!(fs::read_dir(src)) {
-        let f = t!(f);
-        let path = f.path();
-        let name = path.file_name().unwrap();
-        let dst = dst.join(name);
-        if t!(f.file_type()).is_dir() {
-            t!(fs::create_dir_all(&dst));
-            cp_r(&path, &dst);
-        } else {
-            let _ = fs::remove_file(&dst);
-            copy(&path, &dst);
-        }
-    }
-}
-
-/// Copies the `src` directory recursively to `dst`. Both are assumed to exist
-/// when this function is called. Unwanted files or directories can be skipped
-/// by returning `false` from the filter function.
-pub fn cp_filtered(src: &Path, dst: &Path, filter: &Fn(&Path) -> bool) {
-    // Inner function does the actual work
-    fn recurse(src: &Path, dst: &Path, relative: &Path, filter: &Fn(&Path) -> bool) {
-        for f in t!(fs::read_dir(src)) {
-            let f = t!(f);
-            let path = f.path();
-            let name = path.file_name().unwrap();
-            let dst = dst.join(name);
-            let relative = relative.join(name);
-            // Only copy file or directory if the filter function returns true
-            if filter(&relative) {
-                if t!(f.file_type()).is_dir() {
-                    let _ = fs::remove_dir_all(&dst);
-                    t!(fs::create_dir(&dst));
-                    recurse(&path, &dst, &relative, filter);
-                } else {
-                    let _ = fs::remove_file(&dst);
-                    copy(&path, &dst);
-                }
-            }
-        }
-    }
-    // Immediately recurse with an empty relative path
-    recurse(src, dst, Path::new(""), filter)
 }
 
 /// Given an executable called `name`, return the filename for the
@@ -107,7 +35,7 @@ pub fn exe(name: &str, target: &str) -> String {
     }
 }
 
-/// Returns whether the file name given looks like a dynamic library.
+/// Returns `true` if the file name given looks like a dynamic library.
 pub fn is_dylib(name: &str) -> bool {
     name.ends_with(".dylib") || name.ends_with(".so") || name.ends_with(".dll")
 }
@@ -144,7 +72,11 @@ pub fn dylib_path_var() -> &'static str {
 /// Parses the `dylib_path_var()` environment variable, returning a list of
 /// paths that are members of this lookup path.
 pub fn dylib_path() -> Vec<PathBuf> {
-    env::split_paths(&env::var_os(dylib_path_var()).unwrap_or_default()).collect()
+    let var = match env::var_os(dylib_path_var()) {
+        Some(v) => v,
+        None => return vec![],
+    };
+    env::split_paths(&var).collect()
 }
 
 /// `push` all components to `buf`. On windows, append `.exe` to the last component.
@@ -156,34 +88,34 @@ pub fn push_exe_path(mut buf: PathBuf, components: &[&str]) -> PathBuf {
         file.push_str(".exe");
     }
 
-    for c in components {
-        buf.push(c);
-    }
-
+    buf.extend(components);
     buf.push(file);
 
     buf
 }
 
-pub struct TimeIt(Instant);
+pub struct TimeIt(bool, Instant);
 
 /// Returns an RAII structure that prints out how long it took to drop.
-pub fn timeit() -> TimeIt {
-    TimeIt(Instant::now())
+pub fn timeit(builder: &Builder<'_>) -> TimeIt {
+    TimeIt(builder.config.dry_run, Instant::now())
 }
 
 impl Drop for TimeIt {
     fn drop(&mut self) {
-        let time = self.0.elapsed();
-        println!("\tfinished in {}.{:03}",
-                 time.as_secs(),
-                 time.subsec_nanos() / 1_000_000);
+        let time = self.1.elapsed();
+        if !self.0 {
+            println!("\tfinished in {}.{:03}",
+                    time.as_secs(),
+                    time.subsec_nanos() / 1_000_000);
+        }
     }
 }
 
 /// Symlinks two directories, using junctions on Windows and normal symlinks on
 /// Unix.
-pub fn symlink_dir(src: &Path, dest: &Path) -> io::Result<()> {
+pub fn symlink_dir(config: &Config, src: &Path, dest: &Path) -> io::Result<()> {
+    if config.dry_run { return Ok(()); }
     let _ = fs::remove_dir(dest);
     return symlink_dir_inner(src, dest);
 
@@ -201,7 +133,7 @@ pub fn symlink_dir(src: &Path, dest: &Path) -> io::Result<()> {
     //
     // Copied from std
     #[cfg(windows)]
-    #[allow(bad_style)]
+    #[allow(nonstandard_style)]
     fn symlink_dir_inner(target: &Path, junction: &Path) -> io::Result<()> {
         use std::ptr;
         use std::ffi::OsStr;
@@ -257,6 +189,7 @@ pub fn symlink_dir(src: &Path, dest: &Path) -> io::Result<()> {
                                nOutBufferSize: DWORD,
                                lpBytesReturned: LPDWORD,
                                lpOverlapped: LPOVERLAPPED) -> BOOL;
+            fn CloseHandle(hObject: HANDLE) -> BOOL;
         }
 
         fn to_u16s<S: AsRef<OsStr>>(s: S) -> io::Result<Vec<u16>> {
@@ -266,17 +199,17 @@ pub fn symlink_dir(src: &Path, dest: &Path) -> io::Result<()> {
         // We're using low-level APIs to create the junction, and these are more
         // picky about paths. For example, forward slashes cannot be used as a
         // path separator, so we should try to canonicalize the path first.
-        let target = try!(fs::canonicalize(target));
+        let target = fs::canonicalize(target)?;
 
-        try!(fs::create_dir(junction));
+        fs::create_dir(junction)?;
 
-        let path = try!(to_u16s(junction));
+        let path = to_u16s(junction)?;
 
         unsafe {
             let h = CreateFileW(path.as_ptr(),
                                 GENERIC_WRITE,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                0 as *mut _,
+                                ptr::null_mut(),
                                 OPEN_EXISTING,
                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
                                 ptr::null_mut());
@@ -284,7 +217,7 @@ pub fn symlink_dir(src: &Path, dest: &Path) -> io::Result<()> {
             let mut data = [0u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
             let db = data.as_mut_ptr()
                             as *mut REPARSE_MOUNTPOINT_DATA_BUFFER;
-            let buf = &mut (*db).ReparseTarget as *mut _;
+            let buf = &mut (*db).ReparseTarget as *mut u16;
             let mut i = 0;
             // FIXME: this conversion is very hacky
             let v = br"\??\";
@@ -310,11 +243,13 @@ pub fn symlink_dir(src: &Path, dest: &Path) -> io::Result<()> {
                                       &mut ret,
                                       ptr::null_mut());
 
-            if res == 0 {
+            let out = if res == 0 {
                 Err(io::Error::last_os_error())
             } else {
                 Ok(())
-            }
+            };
+            CloseHandle(h);
+            out
         }
     }
 }
@@ -391,6 +326,8 @@ pub enum CiEnv {
     Travis,
     /// The AppVeyor environment, for Windows builds.
     AppVeyor,
+    /// The Azure Pipelines environment, for Linux (including Docker), Windows, and macOS builds.
+    AzurePipelines,
 }
 
 impl CiEnv {
@@ -400,6 +337,8 @@ impl CiEnv {
             CiEnv::Travis
         } else if env::var("APPVEYOR").ok().map_or(false, |e| &*e == "True") {
             CiEnv::AppVeyor
+        } else if env::var("TF_BUILD").ok().map_or(false, |e| &*e == "True") {
+            CiEnv::AzurePipelines
         } else {
             CiEnv::None
         }
@@ -415,5 +354,21 @@ impl CiEnv {
             // compiling through the Makefile. Very strange.
             cmd.env("TERM", "xterm").args(&["--color", "always"]);
         }
+    }
+}
+
+pub fn forcing_clang_based_tests() -> bool {
+    if let Some(var) = env::var_os("RUSTBUILD_FORCE_CLANG_BASED_TESTS") {
+        match &var.to_string_lossy().to_lowercase()[..] {
+            "1" | "yes" | "on" => true,
+            "0" | "no" | "off" => false,
+            other => {
+                // Let's make sure typos don't go unnoticed
+                panic!("Unrecognized option '{}' set in \
+                        RUSTBUILD_FORCE_CLANG_BASED_TESTS", other)
+            }
+        }
+    } else {
+        false
     }
 }

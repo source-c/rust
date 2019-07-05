@@ -1,16 +1,7 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Port of LLVM's APFloat software floating-point implementation from the
 //! following C++ sources (please update commit hash when backporting):
-//! https://github.com/llvm-mirror/llvm/tree/23efab2bbd424ed13495a420ad8641cb2c6c28f9
+//! <https://github.com/llvm-mirror/llvm/tree/23efab2bbd424ed13495a420ad8641cb2c6c28f9>
+//!
 //! * `include/llvm/ADT/APFloat.h` -> `Float` and `FloatConvert` traits
 //! * `lib/Support/APFloat.cpp` -> `ieee` and `ppc` modules
 //! * `unittests/ADT/APFloatTest.cpp` -> `tests` directory
@@ -25,8 +16,8 @@
 //! Comments have been preserved where possible, only slightly adapted.
 //!
 //! Instead of keeping a pointer to a configuration struct and inspecting it
-//! dynamically on every operation, types (e.g. `ieee::Double`), traits
-//! (e.g. `ieee::Semantics`) and associated constants are employed for
+//! dynamically on every operation, types (e.g., `ieee::Double`), traits
+//! (e.g., `ieee::Semantics`) and associated constants are employed for
 //! increased type safety and performance.
 //!
 //! On-heap bigints are replaced everywhere (except in decimal conversion),
@@ -39,26 +30,14 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
-      html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
-      html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 #![forbid(unsafe_code)]
+#![deny(rust_2018_idioms)]
 
-#![feature(i128_type)]
-#![feature(slice_patterns)]
-#![feature(try_from)]
-
-#![cfg_attr(stage0, feature(const_fn))]
-#![cfg_attr(not(stage0), feature(const_min_value))]
-#![cfg_attr(not(stage0), feature(const_max_value))]
-
+#![feature(nll)]
 // See librustc_cratesio_shim/Cargo.toml for a comment explaining this.
 #[allow(unused_extern_crates)]
 extern crate rustc_cratesio_shim;
-
-#[macro_use]
-extern crate bitflags;
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -66,7 +45,7 @@ use std::ops::{Neg, Add, Sub, Mul, Div, Rem};
 use std::ops::{AddAssign, SubAssign, MulAssign, DivAssign, RemAssign};
 use std::str::FromStr;
 
-bitflags! {
+bitflags::bitflags! {
     /// IEEE-754R 7: Default exception handling.
     ///
     /// UNDERFLOW or OVERFLOW are always returned or-ed with INEXACT.
@@ -98,7 +77,7 @@ impl Status {
 }
 
 impl<T> StatusAnd<T> {
-    fn map<F: FnOnce(T) -> U, U>(self, f: F) -> StatusAnd<U> {
+    pub fn map<F: FnOnce(T) -> U, U>(self, f: F) -> StatusAnd<U> {
         StatusAnd {
             status: self.status,
             value: f(self.value),
@@ -184,7 +163,7 @@ pub struct ParseError(pub &'static str);
 /// implemented operations. Currently implemented operations are add, subtract,
 /// multiply, divide, fused-multiply-add, conversion-to-float,
 /// conversion-to-integer and conversion-from-integer. New rounding modes
-/// (e.g. away from zero) can be added with three or four lines of code.
+/// (e.g., away from zero) can be added with three or four lines of code.
 ///
 /// Four formats are built-in: IEEE single precision, double precision,
 /// quadruple precision, and x87 80-bit extended double (when operating with
@@ -225,8 +204,8 @@ pub struct ParseError(pub &'static str);
 ///
 /// `apfloat` does not provide any exception handling beyond default exception
 /// handling. We represent Signaling NaNs via IEEE-754R 2008 6.2.1 should clause
-/// by encoding Signaling NaNs with the first bit of its trailing significand as
-/// 0.
+/// by encoding Signaling NaNs with the first bit of its trailing significand
+/// as 0.
 ///
 /// Future work
 /// ===========
@@ -263,11 +242,11 @@ pub trait Float
     /// Number of bits in the significand. This includes the integer bit.
     const PRECISION: usize;
 
-    /// The largest E such that 2^E is representable; this matches the
+    /// The largest E such that 2<sup>E</sup> is representable; this matches the
     /// definition of IEEE 754.
     const MAX_EXP: ExpInt;
 
-    /// The smallest E such that 2^E is a normalized number; this
+    /// The smallest E such that 2<sup>E</sup> is a normalized number; this
     /// matches the definition of IEEE 754.
     const MIN_EXP: ExpInt;
 
@@ -380,7 +359,7 @@ pub trait Float
     fn from_bits(input: u128) -> Self;
     fn from_i128_r(input: i128, round: Round) -> StatusAnd<Self> {
         if input < 0 {
-            Self::from_u128_r(-input as u128, -round).map(|r| -r)
+            Self::from_u128_r(input.wrapping_neg() as u128, -round).map(|r| -r)
         } else {
             Self::from_u128_r(input as u128, round)
         }
@@ -395,7 +374,7 @@ pub trait Float
     fn from_str_r(s: &str, round: Round) -> Result<StatusAnd<Self>, ParseError>;
     fn to_bits(self) -> u128;
 
-    /// Convert a floating point number to an integer according to the
+    /// Converts a floating point number to an integer according to the
     /// rounding mode. In case of an invalid operation exception,
     /// deterministic values are returned, namely zero for NaNs and the
     /// minimal or maximal value respectively for underflow or overflow.
@@ -408,7 +387,7 @@ pub trait Float
     ///
     /// The *is_exact output tells whether the result is exact, in the sense
     /// that converting it back to the original floating point type produces
-    /// the original value. This is almost equivalent to result==Status::OK,
+    /// the original value. This is almost equivalent to `result == Status::OK`,
     /// except for negative zeroes.
     fn to_i128_r(self, width: usize, round: Round, is_exact: &mut bool) -> StatusAnd<i128> {
         let status;
@@ -478,13 +457,13 @@ pub trait Float
         }
     }
 
-    /// IEEE-754R isSignMinus: Returns true if and only if the current value is
+    /// IEEE-754R isSignMinus: Returns whether the current value is
     /// negative.
     ///
     /// This applies to zeros and NaNs as well.
     fn is_negative(self) -> bool;
 
-    /// IEEE-754R isNormal: Returns true if and only if the current value is normal.
+    /// IEEE-754R isNormal: Returns whether the current value is normal.
     ///
     /// This implies that the current value of the float is not zero, subnormal,
     /// infinite, or NaN following the definition of normality from IEEE-754R.
@@ -492,7 +471,7 @@ pub trait Float
         !self.is_denormal() && self.is_finite_non_zero()
     }
 
-    /// Returns true if and only if the current value is zero, subnormal, or
+    /// Returns `true` if the current value is zero, subnormal, or
     /// normal.
     ///
     /// This means that the value is not infinite or NaN.
@@ -500,26 +479,26 @@ pub trait Float
         !self.is_nan() && !self.is_infinite()
     }
 
-    /// Returns true if and only if the float is plus or minus zero.
+    /// Returns `true` if the float is plus or minus zero.
     fn is_zero(self) -> bool {
         self.category() == Category::Zero
     }
 
-    /// IEEE-754R isSubnormal(): Returns true if and only if the float is a
+    /// IEEE-754R isSubnormal(): Returns whether the float is a
     /// denormal.
     fn is_denormal(self) -> bool;
 
-    /// IEEE-754R isInfinite(): Returns true if and only if the float is infinity.
+    /// IEEE-754R isInfinite(): Returns whether the float is infinity.
     fn is_infinite(self) -> bool {
         self.category() == Category::Infinity
     }
 
-    /// Returns true if and only if the float is a quiet or signaling NaN.
+    /// Returns `true` if the float is a quiet or signaling NaN.
     fn is_nan(self) -> bool {
         self.category() == Category::NaN
     }
 
-    /// Returns true if and only if the float is a signaling NaN.
+    /// Returns `true` if the float is a signaling NaN.
     fn is_signaling(self) -> bool;
 
     // Simple Queries
@@ -538,19 +517,19 @@ pub trait Float
         self.is_zero() && self.is_negative()
     }
 
-    /// Returns true if and only if the number has the smallest possible non-zero
+    /// Returns `true` if the number has the smallest possible non-zero
     /// magnitude in the current semantics.
     fn is_smallest(self) -> bool {
         Self::SMALLEST.copy_sign(self).bitwise_eq(self)
     }
 
-    /// Returns true if and only if the number has the largest possible finite
+    /// Returns `true` if the number has the largest possible finite
     /// magnitude in the current semantics.
     fn is_largest(self) -> bool {
         Self::largest().copy_sign(self).bitwise_eq(self)
     }
 
-    /// Returns true if and only if the number is an exact integer.
+    /// Returns `true` if the number is an exact integer.
     fn is_integer(self) -> bool {
         // This could be made more efficient; I'm going for obviously correct.
         if !self.is_finite() {
@@ -575,7 +554,7 @@ pub trait Float
     ///
     fn ilogb(self) -> ExpInt;
 
-    /// Returns: self * 2^exp for integral exponents.
+    /// Returns: self * 2<sup>exp</sup> for integral exponents.
     fn scalbn_r(self, exp: ExpInt, round: Round) -> Self;
     fn scalbn(self, exp: ExpInt) -> Self {
         self.scalbn_r(exp, Round::NearestTiesToEven)
@@ -592,11 +571,11 @@ pub trait Float
 }
 
 pub trait FloatConvert<T: Float>: Float {
-    /// Convert a value of one floating point type to another.
+    /// Converts a value of one floating point type to another.
     /// The return value corresponds to the IEEE754 exceptions. *loses_info
-    /// records whether the transformation lost information, i.e. whether
+    /// records whether the transformation lost information, i.e., whether
     /// converting the result back to the original type will produce the
-    /// original value (this is almost the same as return value==Status::OK,
+    /// original value (this is almost the same as return `value == Status::OK`,
     /// but there are edge cases where this is not so).
     fn convert_r(self, round: Round, loses_info: &mut bool) -> StatusAnd<T>;
     fn convert(self, loses_info: &mut bool) -> StatusAnd<T> {

@@ -1,24 +1,17 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::os::unix::prelude::*;
 
-use os::unix::prelude::*;
+use crate::ffi::{OsString, OsStr};
+use crate::fmt;
+use crate::io::{self, Error, SeekFrom, IoSlice, IoSliceMut};
+use crate::path::{Path, PathBuf};
+use crate::sync::Arc;
+use crate::sys::fd::FileDesc;
+use crate::sys::time::SystemTime;
+use crate::sys::{cvt, syscall};
+use crate::sys_common::{AsInner, FromInner};
 
-use ffi::{OsString, OsStr};
-use fmt;
-use io::{self, Error, ErrorKind, SeekFrom};
-use path::{Path, PathBuf};
-use sync::Arc;
-use sys::fd::FileDesc;
-use sys::time::SystemTime;
-use sys::{cvt, syscall};
-use sys_common::{AsInner, FromInner};
+pub use crate::sys_common::fs::copy;
+pub use crate::sys_common::fs::remove_dir_all;
 
 pub struct File(FileDesc);
 
@@ -133,7 +126,7 @@ impl FromInner<u32> for FilePermissions {
 }
 
 impl fmt::Debug for ReadDir {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // This will only be called from std::fs::ReadDir, which will add a "ReadDir()" frame.
         // Thus the result will be e g 'ReadDir("/home")'
         fmt::Debug::fmt(&*self.root, f)
@@ -264,7 +257,7 @@ impl File {
     pub fn file_attr(&self) -> io::Result<FileAttr> {
         let mut stat = syscall::Stat::default();
         cvt(syscall::fstat(self.0.raw(), &mut stat))?;
-        Ok(FileAttr { stat: stat })
+        Ok(FileAttr { stat })
     }
 
     pub fn fsync(&self) -> io::Result<()> {
@@ -285,8 +278,16 @@ impl File {
         self.0.read(buf)
     }
 
+    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        crate::io::default_read_vectored(|buf| self.read(buf), bufs)
+    }
+
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         self.0.write(buf)
+    }
+
+    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        crate::io::default_write_vectored(|buf| self.write(buf), bufs)
     }
 
     pub fn flush(&self) -> io::Result<()> { Ok(()) }
@@ -351,7 +352,7 @@ impl FromInner<usize> for File {
 }
 
 impl fmt::Debug for File {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut b = f.debug_struct("File");
         b.field("fd", &self.0.raw());
         if let Ok(path) = self.path() {
@@ -384,8 +385,11 @@ pub fn unlink(p: &Path) -> io::Result<()> {
 }
 
 pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
-    copy(old, new)?;
-    unlink(old)?;
+    let fd = cvt(syscall::open(old.to_str().unwrap(),
+                               syscall::O_CLOEXEC | syscall::O_STAT | syscall::O_NOFOLLOW))?;
+    let res = cvt(syscall::frename(fd, new.to_str().unwrap()));
+    cvt(syscall::close(fd))?;
+    res?;
     Ok(())
 }
 
@@ -399,46 +403,28 @@ pub fn rmdir(p: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn remove_dir_all(path: &Path) -> io::Result<()> {
-    let filetype = lstat(path)?.file_type();
-    if filetype.is_symlink() {
-        unlink(path)
-    } else {
-        remove_dir_all_recursive(path)
-    }
-}
-
-fn remove_dir_all_recursive(path: &Path) -> io::Result<()> {
-    for child in readdir(path)? {
-        let child = child?;
-        if child.file_type()?.is_dir() {
-            remove_dir_all_recursive(&child.path())?;
-        } else {
-            unlink(&child.path())?;
-        }
-    }
-    rmdir(path)
-}
-
 pub fn readlink(p: &Path) -> io::Result<PathBuf> {
-    let fd = cvt(syscall::open(p.to_str().unwrap(), syscall::O_SYMLINK | syscall::O_RDONLY))?;
+    let fd = cvt(syscall::open(p.to_str().unwrap(),
+                               syscall::O_CLOEXEC | syscall::O_SYMLINK | syscall::O_RDONLY))?;
     let mut buf: [u8; 4096] = [0; 4096];
-    let count = cvt(syscall::read(fd, &mut buf))?;
+    let res = cvt(syscall::read(fd, &mut buf));
     cvt(syscall::close(fd))?;
+    let count = res?;
     Ok(PathBuf::from(unsafe { String::from_utf8_unchecked(Vec::from(&buf[..count])) }))
 }
 
 pub fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
     let fd = cvt(syscall::open(dst.to_str().unwrap(),
-                               syscall::O_SYMLINK | syscall::O_CREAT | syscall::O_WRONLY | 0o777))?;
-    cvt(syscall::write(fd, src.to_str().unwrap().as_bytes()))?;
+                               syscall::O_CLOEXEC | syscall::O_SYMLINK |
+                               syscall::O_CREAT | syscall::O_WRONLY | 0o777))?;
+    let res = cvt(syscall::write(fd, src.to_str().unwrap().as_bytes()));
     cvt(syscall::close(fd))?;
+    res?;
     Ok(())
 }
 
 pub fn link(_src: &Path, _dst: &Path) -> io::Result<()> {
-    ::sys_common::util::dumb_print(format_args!("Link\n"));
-    unimplemented!();
+    Err(Error::from_raw_os_error(syscall::ENOSYS))
 }
 
 pub fn stat(p: &Path) -> io::Result<FileAttr> {
@@ -458,20 +444,4 @@ pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
     let fd = cvt(syscall::open(p.to_str().unwrap(), syscall::O_CLOEXEC | syscall::O_STAT))?;
     let file = File(FileDesc::new(fd));
     file.path()
-}
-
-pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
-    use fs::{File, set_permissions};
-    if !from.is_file() {
-        return Err(Error::new(ErrorKind::InvalidInput,
-                              "the source path is not an existing regular file"))
-    }
-
-    let mut reader = File::open(from)?;
-    let mut writer = File::create(to)?;
-    let perm = reader.metadata()?.permissions();
-
-    let ret = io::copy(&mut reader, &mut writer)?;
-    set_permissions(to, perm)?;
-    Ok(ret)
 }

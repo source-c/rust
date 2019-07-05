@@ -1,48 +1,56 @@
-// Copyright 2012-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! OS-specific functionality.
 
 #![stable(feature = "os", since = "1.0.0")]
-#![allow(missing_docs, bad_style, missing_debug_implementations)]
+#![allow(missing_docs, nonstandard_style, missing_debug_implementations)]
 
-#[cfg(all(not(dox), any(target_os = "redox", unix)))]
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use sys::ext as unix;
-#[cfg(all(not(dox), windows))]
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use sys::ext as windows;
+cfg_if::cfg_if! {
+    if #[cfg(rustdoc)] {
 
-#[cfg(dox)]
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use sys::unix_ext as unix;
-#[cfg(dox)]
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use sys::windows_ext as windows;
+        // When documenting libstd we want to show unix/windows/linux modules as
+        // these are the "main modules" that are used across platforms. This
+        // should help show platform-specific functionality in a hopefully
+        // cross-platform way in the documentation
 
-#[cfg(any(dox, target_os = "linux", target_os = "l4re"))]
-#[doc(cfg(target_os = "linux"))]
-pub mod linux;
+        #[stable(feature = "rust1", since = "1.0.0")]
+        pub use crate::sys::unix_ext as unix;
 
-#[cfg(all(not(dox), target_os = "android"))]    pub mod android;
-#[cfg(all(not(dox), target_os = "bitrig"))]     pub mod bitrig;
-#[cfg(all(not(dox), target_os = "dragonfly"))]  pub mod dragonfly;
-#[cfg(all(not(dox), target_os = "freebsd"))]    pub mod freebsd;
-#[cfg(all(not(dox), target_os = "haiku"))]      pub mod haiku;
-#[cfg(all(not(dox), target_os = "ios"))]        pub mod ios;
-#[cfg(all(not(dox), target_os = "macos"))]      pub mod macos;
-#[cfg(all(not(dox), target_os = "nacl"))]       pub mod nacl;
-#[cfg(all(not(dox), target_os = "netbsd"))]     pub mod netbsd;
-#[cfg(all(not(dox), target_os = "openbsd"))]    pub mod openbsd;
-#[cfg(all(not(dox), target_os = "solaris"))]    pub mod solaris;
-#[cfg(all(not(dox), target_os = "emscripten"))] pub mod emscripten;
-#[cfg(all(not(dox), target_os = "fuchsia"))]    pub mod fuchsia;
+        #[stable(feature = "rust1", since = "1.0.0")]
+        pub use crate::sys::windows_ext as windows;
+
+        #[doc(cfg(target_os = "linux"))]
+        pub mod linux;
+    } else {
+
+        // If we're not documenting libstd then we just expose the main modules
+        // as we otherwise would.
+
+        #[cfg(any(target_os = "redox", unix))]
+        #[stable(feature = "rust1", since = "1.0.0")]
+        pub use crate::sys::ext as unix;
+
+        #[cfg(windows)]
+        #[stable(feature = "rust1", since = "1.0.0")]
+        pub use crate::sys::ext as windows;
+
+        #[cfg(any(target_os = "linux", target_os = "l4re"))]
+        pub mod linux;
+
+    }
+}
+
+#[cfg(target_os = "android")]    pub mod android;
+#[cfg(target_os = "dragonfly")]  pub mod dragonfly;
+#[cfg(target_os = "freebsd")]    pub mod freebsd;
+#[cfg(target_os = "haiku")]      pub mod haiku;
+#[cfg(target_os = "ios")]        pub mod ios;
+#[cfg(target_os = "macos")]      pub mod macos;
+#[cfg(target_os = "netbsd")]     pub mod netbsd;
+#[cfg(target_os = "openbsd")]    pub mod openbsd;
+#[cfg(target_os = "solaris")]    pub mod solaris;
+#[cfg(target_os = "emscripten")] pub mod emscripten;
+#[cfg(target_os = "fuchsia")]    pub mod fuchsia;
+#[cfg(target_os = "hermit")]     pub mod hermit;
+#[cfg(target_os = "wasi")]       pub mod wasi;
+#[cfg(all(target_vendor = "fortanix", target_env = "sgx"))] pub mod fortanix_sgx;
 
 pub mod raw;

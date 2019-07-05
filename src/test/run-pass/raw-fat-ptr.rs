@@ -1,13 +1,3 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 // check raw fat pointer ops
 
 use std::mem;
@@ -88,7 +78,7 @@ fn main() {
     let mut u32_ = (4u32, 5u32);
 
     // check ordering for ptrs
-    let buf: &mut [*const Foo] = &mut [
+    let buf: &mut [*const dyn Foo] = &mut [
         &u8_, &u8_.0,
         &u32_, &u32_.0,
     ];
@@ -100,7 +90,7 @@ fn main() {
     assert_inorder(buf);
 
     // check ordering for mut ptrs
-    let buf: &mut [*mut Foo] = &mut [
+    let buf: &mut [*mut dyn Foo] = &mut [
         &mut u8_, &mut u8_.0,
         &mut u32_, &mut u32_.0,
     ];

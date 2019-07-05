@@ -1,29 +1,20 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::deriving::path_std;
+use crate::deriving::generic::*;
+use crate::deriving::generic::ty::*;
 
-use deriving::generic::*;
-use deriving::generic::ty::*;
-
-use syntax::ast::{self, Expr, Generics, ItemKind, MetaItem, VariantData};
+use syntax::ast::{self, Expr, GenericArg, Generics, ItemKind, MetaItem, VariantData};
 use syntax::attr;
 use syntax::ext::base::{Annotatable, ExtCtxt};
 use syntax::ext::build::AstBuilder;
 use syntax::ptr::P;
-use syntax::symbol::{Symbol, keywords};
+use syntax::symbol::{kw, sym, Symbol};
 use syntax_pos::Span;
 
-pub fn expand_deriving_clone(cx: &mut ExtCtxt,
+pub fn expand_deriving_clone(cx: &mut ExtCtxt<'_>,
                              span: Span,
                              mitem: &MetaItem,
                              item: &Annotatable,
-                             push: &mut FnMut(Annotatable)) {
+                             push: &mut dyn FnMut(Annotatable)) {
     // check if we can use a short form
     //
     // the short form is `fn clone(&self) -> Self { *self }`
@@ -44,18 +35,29 @@ pub fn expand_deriving_clone(cx: &mut ExtCtxt,
     match *item {
         Annotatable::Item(ref annitem) => {
             match annitem.node {
-                ItemKind::Struct(_, Generics { ref ty_params, .. }) |
-                ItemKind::Enum(_, Generics { ref ty_params, .. })
-                        if attr::contains_name(&annitem.attrs, "rustc_copy_clone_marker") &&
-                           ty_params.is_empty() => {
-                    bounds = vec![];
-                    is_shallow = true;
-                    substructure = combine_substructure(Box::new(|c, s, sub| {
-                        cs_clone_shallow("Clone", c, s, sub, false)
-                    }));
+                ItemKind::Struct(_, Generics { ref params, .. }) |
+                ItemKind::Enum(_, Generics { ref params, .. }) => {
+                    if attr::contains_name(&annitem.attrs, sym::rustc_copy_clone_marker) &&
+                        !params.iter().any(|param| match param.kind {
+                            ast::GenericParamKind::Type { .. } => true,
+                            _ => false,
+                        })
+                    {
+                        bounds = vec![];
+                        is_shallow = true;
+                        substructure = combine_substructure(Box::new(|c, s, sub| {
+                            cs_clone_shallow("Clone", c, s, sub, false)
+                        }));
+                    } else {
+                        bounds = vec![];
+                        is_shallow = false;
+                        substructure = combine_substructure(Box::new(|c, s, sub| {
+                            cs_clone("Clone", c, s, sub)
+                        }));
+                    }
                 }
                 ItemKind::Union(..) => {
-                    bounds = vec![Literal(path_std!(cx, core::marker::Copy))];
+                    bounds = vec![Literal(path_std!(cx, marker::Copy))];
                     is_shallow = true;
                     substructure = combine_substructure(Box::new(|c, s, sub| {
                         cs_clone_shallow("Clone", c, s, sub, true)
@@ -74,12 +76,12 @@ pub fn expand_deriving_clone(cx: &mut ExtCtxt,
         _ => cx.span_bug(span, "#[derive(Clone)] on trait item or impl item"),
     }
 
-    let inline = cx.meta_word(span, Symbol::intern("inline"));
+    let inline = cx.meta_word(span, sym::inline);
     let attrs = vec![cx.attribute(span, inline)];
     let trait_def = TraitDef {
         span,
         attributes: Vec::new(),
-        path: path_std!(cx, core::clone::Clone),
+        path: path_std!(cx, clone::Clone),
         additional_bounds: bounds,
         generics: LifetimeBounds::empty(),
         is_unsafe: false,
@@ -102,22 +104,22 @@ pub fn expand_deriving_clone(cx: &mut ExtCtxt,
 }
 
 fn cs_clone_shallow(name: &str,
-                    cx: &mut ExtCtxt,
+                    cx: &mut ExtCtxt<'_>,
                     trait_span: Span,
-                    substr: &Substructure,
+                    substr: &Substructure<'_>,
                     is_union: bool)
                     -> P<Expr> {
-    fn assert_ty_bounds(cx: &mut ExtCtxt, stmts: &mut Vec<ast::Stmt>,
+    fn assert_ty_bounds(cx: &mut ExtCtxt<'_>, stmts: &mut Vec<ast::Stmt>,
                         ty: P<ast::Ty>, span: Span, helper_name: &str) {
         // Generate statement `let _: helper_name<ty>;`,
         // set the expn ID so we can use the unstable struct.
         let span = span.with_ctxt(cx.backtrace());
         let assert_path = cx.path_all(span, true,
-                                        cx.std_path(&["clone", helper_name]),
-                                        vec![], vec![ty], vec![]);
+                                        cx.std_path(&[sym::clone, Symbol::intern(helper_name)]),
+                                        vec![GenericArg::Type(ty)], vec![]);
         stmts.push(cx.stmt_let_type_only(span, cx.ty_path(assert_path)));
     }
-    fn process_variant(cx: &mut ExtCtxt, stmts: &mut Vec<ast::Stmt>, variant: &VariantData) {
+    fn process_variant(cx: &mut ExtCtxt<'_>, stmts: &mut Vec<ast::Stmt>, variant: &VariantData) {
         for field in variant.fields() {
             // let _: AssertParamIsClone<FieldTy>;
             assert_ty_bounds(cx, stmts, field.ty.clone(), field.span, "AssertParamIsClone");
@@ -127,7 +129,8 @@ fn cs_clone_shallow(name: &str,
     let mut stmts = Vec::new();
     if is_union {
         // let _: AssertParamIsCopy<Self>;
-        let self_ty = cx.ty_path(cx.path_ident(trait_span, keywords::SelfType.ident()));
+        let self_ty =
+            cx.ty_path(cx.path_ident(trait_span, ast::Ident::with_empty_ctxt(kw::SelfUpper)));
         assert_ty_bounds(cx, &mut stmts, self_ty, trait_span, "AssertParamIsCopy");
     } else {
         match *substr.fields {
@@ -148,14 +151,14 @@ fn cs_clone_shallow(name: &str,
 }
 
 fn cs_clone(name: &str,
-            cx: &mut ExtCtxt,
+            cx: &mut ExtCtxt<'_>,
             trait_span: Span,
-            substr: &Substructure)
+            substr: &Substructure<'_>)
             -> P<Expr> {
     let ctor_path;
     let all_fields;
-    let fn_path = cx.std_path(&["clone", "Clone", "clone"]);
-    let subcall = |cx: &mut ExtCtxt, field: &FieldInfo| {
+    let fn_path = cx.std_path(&[sym::clone, sym::Clone, sym::clone]);
+    let subcall = |cx: &mut ExtCtxt<'_>, field: &FieldInfo<'_>| {
         let args = vec![cx.expr_addr_of(field.span, field.self_.clone())];
         cx.expr_call_global(field.span, fn_path.clone(), args)
     };
@@ -168,7 +171,7 @@ fn cs_clone(name: &str,
             vdata = vdata_;
         }
         EnumMatching(.., variant, ref af) => {
-            ctor_path = cx.path(trait_span, vec![substr.type_ident, variant.node.name]);
+            ctor_path = cx.path(trait_span, vec![substr.type_ident, variant.node.ident]);
             all_fields = af;
             vdata = &variant.node.data;
         }

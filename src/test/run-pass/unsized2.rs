@@ -1,14 +1,7 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-#![allow(unknown_features)]
+#![allow(unconditional_recursion)]
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 #![feature(box_syntax)]
 
 // Test sized-ness checking in substitution.
@@ -67,26 +60,26 @@ fn f7<X: ?Sized+T3>(x: &X) {
 
 trait T4<X> {
     fn dummy(&self) { }
-    fn m1(&self, x: &T4<X>, y: X);
-    fn m2(&self, x: &T5<X>, y: X);
+    fn m1(&self, x: &dyn T4<X>, y: X);
+    fn m2(&self, x: &dyn T5<X>, y: X);
 }
 trait T5<X: ?Sized> {
     fn dummy(&self) { }
     // not an error (for now)
-    fn m1(&self, x: &T4<X>);
-    fn m2(&self, x: &T5<X>);
+    fn m1(&self, x: &dyn T4<X>);
+    fn m2(&self, x: &dyn T5<X>);
 }
 
 trait T6<X: T> {
     fn dummy(&self) { }
-    fn m1(&self, x: &T4<X>);
-    fn m2(&self, x: &T5<X>);
+    fn m1(&self, x: &dyn T4<X>);
+    fn m2(&self, x: &dyn T5<X>);
 }
 trait T7<X: ?Sized+T> {
     fn dummy(&self) { }
     // not an error (for now)
-    fn m1(&self, x: &T4<X>);
-    fn m2(&self, x: &T5<X>);
+    fn m1(&self, x: &dyn T4<X>);
+    fn m2(&self, x: &dyn T5<X>);
 }
 
 // The last field in a struct may be unsized

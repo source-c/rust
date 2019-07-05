@@ -1,22 +1,19 @@
-// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use std::cmp;
 use std::string::String;
 use std::usize;
 
-use clean::{self, Item};
-use plugins;
-use fold::{self, DocFolder};
+use crate::clean::{self, DocFragment, Item};
+use crate::core::DocContext;
+use crate::fold::{self, DocFolder};
+use crate::passes::Pass;
 
-pub fn unindent_comments(krate: clean::Crate) -> plugins::PluginResult {
+pub const UNINDENT_COMMENTS: Pass = Pass {
+    name: "unindent-comments",
+    pass: unindent_comments,
+    description: "removes excess indentation on comments in order for markdown to like it",
+};
+
+pub fn unindent_comments(krate: clean::Crate, _: &DocContext<'_>) -> clean::Crate {
     CommentCleaner.fold_crate(krate)
 }
 
@@ -31,8 +28,17 @@ impl fold::DocFolder for CommentCleaner {
 
 impl clean::Attributes {
     pub fn unindent_doc_comments(&mut self) {
-        for doc_string in &mut self.doc_strings {
-            *doc_string = unindent(doc_string);
+        unindent_fragments(&mut self.doc_strings);
+    }
+}
+
+fn unindent_fragments(docs: &mut Vec<DocFragment>) {
+    for fragment in docs {
+        match *fragment {
+            DocFragment::SugaredDoc(_, _, ref mut doc_string) |
+            DocFragment::RawDoc(_, _, ref mut doc_string) |
+            DocFragment::Include(_, _, _, ref mut doc_string) =>
+                *doc_string = unindent(doc_string),
         }
     }
 }
@@ -82,7 +88,7 @@ fn unindent(s: &str) -> String {
     });
 
     if !lines.is_empty() {
-        let mut unindented = vec![ lines[0].trim_left().to_string() ];
+        let mut unindented = vec![ lines[0].trim_start().to_string() ];
         unindented.extend_from_slice(&lines[1..].iter().map(|&line| {
             if line.chars().all(|c| c.is_whitespace()) {
                 line.to_string()

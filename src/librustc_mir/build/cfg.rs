@@ -1,22 +1,7 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-
-
-
 //! Routines for manipulating the control-flow graph.
 
-use build::CFG;
-use rustc::middle::region;
+use crate::build::CFG;
 use rustc::mir::*;
-use rustc::ty::TyCtxt;
 
 impl<'tcx> CFG<'tcx> {
     pub fn block_data(&self, blk: BasicBlock) -> &BasicBlockData<'tcx> {
@@ -45,34 +30,21 @@ impl<'tcx> CFG<'tcx> {
         self.block_data_mut(block).statements.push(statement);
     }
 
-    pub fn push_end_region<'a, 'gcx:'a+'tcx>(&mut self,
-                                             tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                                             block: BasicBlock,
-                                             source_info: SourceInfo,
-                                             region_scope: region::Scope) {
-        if tcx.sess.emit_end_regions() {
-            self.push(block, Statement {
-                source_info,
-                kind: StatementKind::EndRegion(region_scope),
-            });
-        }
-    }
-
     pub fn push_assign(&mut self,
                        block: BasicBlock,
                        source_info: SourceInfo,
-                       lvalue: &Lvalue<'tcx>,
+                       place: &Place<'tcx>,
                        rvalue: Rvalue<'tcx>) {
         self.push(block, Statement {
             source_info,
-            kind: StatementKind::Assign(lvalue.clone(), rvalue)
+            kind: StatementKind::Assign(place.clone(), box rvalue)
         });
     }
 
     pub fn push_assign_constant(&mut self,
                                 block: BasicBlock,
                                 source_info: SourceInfo,
-                                temp: &Lvalue<'tcx>,
+                                temp: &Place<'tcx>,
                                 constant: Constant<'tcx>) {
         self.push_assign(block, source_info, temp,
                          Rvalue::Use(Operand::Constant(box constant)));
@@ -81,8 +53,8 @@ impl<'tcx> CFG<'tcx> {
     pub fn push_assign_unit(&mut self,
                             block: BasicBlock,
                             source_info: SourceInfo,
-                            lvalue: &Lvalue<'tcx>) {
-        self.push_assign(block, source_info, lvalue, Rvalue::Aggregate(
+                            place: &Place<'tcx>) {
+        self.push_assign(block, source_info, place, Rvalue::Aggregate(
             box AggregateKind::Tuple, vec![]
         ));
     }

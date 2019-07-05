@@ -1,55 +1,43 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-#![deny(warnings)]
-
+#![feature(bound_cloned)]
 #![feature(box_syntax)]
-#![feature(core_float)]
+#![feature(cell_update)]
 #![feature(core_private_bignum)]
 #![feature(core_private_diy_float)]
 #![feature(dec2flt)]
-#![feature(decode_utf8)]
+#![feature(euclidean_division)]
 #![feature(exact_size_is_empty)]
 #![feature(fixed_size_array)]
 #![feature(flt2dec)]
 #![feature(fmt_internals)]
-#![feature(iterator_step_by)]
-#![feature(i128_type)]
-#![feature(inclusive_range)]
-#![feature(inclusive_range_syntax)]
-#![feature(iter_rfind)]
-#![feature(nonzero)]
-#![feature(rand)]
+#![feature(hashmap_internals)]
+#![feature(is_sorted)]
+#![feature(iter_once_with)]
+#![feature(pattern)]
+#![feature(range_is_empty)]
 #![feature(raw)]
-#![feature(refcell_replace_swap)]
-#![feature(sip_hash_13)]
+#![feature(saturating_neg)]
 #![feature(slice_patterns)]
-#![feature(slice_rotate)]
 #![feature(sort_internals)]
+#![feature(slice_partition_at_index)]
 #![feature(specialization)]
 #![feature(step_trait)]
+#![feature(str_internals)]
 #![feature(test)]
 #![feature(trusted_len)]
-#![feature(try_from)]
-#![feature(unique)]
+#![feature(try_trait)]
+#![feature(inner_deref)]
+#![feature(slice_internals)]
+#![feature(slice_partition_dedup)]
+#![feature(int_error_matching)]
+#![feature(const_fn)]
+#![warn(rust_2018_idioms)]
 
-#![feature(const_atomic_bool_new)]
-#![feature(const_atomic_usize_new)]
-#![feature(const_atomic_isize_new)]
-
-extern crate core;
 extern crate test;
-extern crate rand;
 
+mod alloc;
 mod any;
 mod array;
+mod ascii;
 mod atomic;
 mod cell;
 mod char;
@@ -59,13 +47,17 @@ mod fmt;
 mod hash;
 mod intrinsics;
 mod iter;
+mod manually_drop;
 mod mem;
 mod nonzero;
 mod num;
 mod ops;
 mod option;
+mod pattern;
 mod ptr;
 mod result;
 mod slice;
 mod str;
+mod str_lossy;
+mod time;
 mod tuple;

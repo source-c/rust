@@ -1,19 +1,11 @@
 #!/bin/false
-# Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-# file at the top-level directory of this distribution and at
-# http://rust-lang.org/COPYRIGHT.
-#
-# Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-# http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-# <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-# option. This file may not be copied, modified, or distributed
-# except according to those terms.
 
 # This file is intended to be sourced with `. shared.sh` or
 # `source shared.sh`, hence the invalid shebang and not being
 # marked as an executable file in git.
 
 # See http://unix.stackexchange.com/questions/82598
+# Duplicated in docker/dist-various-2/shared.sh
 function retry {
   echo "Attempting with retry:" "$@"
   local n=1
@@ -21,14 +13,33 @@ function retry {
   while true; do
     "$@" && break || {
       if [[ $n -lt $max ]]; then
+        sleep $n  # don't retry immediately
         ((n++))
         echo "Command failed. Attempt $n/$max:"
       else
         echo "The command has failed after $n attempts."
-        exit 1
+        return 1
       fi
     }
   done
+}
+
+function isCI {
+  [ "$CI" = "true" ] || [ "$TRAVIS" = "true" ] || [ "$TF_BUILD" = "True" ]
+}
+
+function isOSX {
+  [ "$TRAVIS_OS_NAME" = "osx" ] || [ "$AGENT_OS" = "Darwin" ]
+}
+
+function getCIBranch {
+  if [ "$TRAVIS" = "true" ]; then
+    echo "$TRAVIS_BRANCH"
+  elif [ "$APPVEYOR" = "True" ]; then
+    echo "$APPVEYOR_REPO_BRANCH"
+  else
+    echo "$BUILD_SOURCEBRANCHNAME"
+  fi;
 }
 
 if ! declare -F travis_fold; then

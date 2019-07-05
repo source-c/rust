@@ -1,13 +1,3 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Overloadable operators.
 //!
 //! Implementing these traits allows you to overload certain operators.
@@ -27,7 +17,7 @@
 //! should have some resemblance to multiplication (and share expected
 //! properties like associativity).
 //!
-//! Note that the `&&` and `||` operators short-circuit, i.e. they only
+//! Note that the `&&` and `||` operators short-circuit, i.e., they only
 //! evaluate their second operand if it contributes to the result. Since this
 //! behavior is not enforceable by traits, `&&` and `||` are not supported as
 //! overloadable operators.
@@ -150,7 +140,7 @@
 //! [`Sub`]: trait.Sub.html
 //! [`Mul`]: trait.Mul.html
 //! [`clone`]: ../clone/trait.Clone.html#tymethod.clone
-//! [operator precedence]: ../../reference/expressions.html#operator-precedence
+//! [operator precedence]: ../../reference/expressions.html#expression-precedence
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
@@ -161,9 +151,8 @@ mod drop;
 mod function;
 mod generator;
 mod index;
-mod place;
 mod range;
-mod try;
+mod r#try;
 mod unsize;
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -179,6 +168,9 @@ pub use self::bit::{BitAndAssign, BitOrAssign, BitXorAssign, ShlAssign, ShrAssig
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::deref::{Deref, DerefMut};
 
+#[unstable(feature = "receiver_trait", issue = "0")]
+pub use self::deref::Receiver;
+
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::drop::Drop;
 
@@ -191,17 +183,17 @@ pub use self::index::{Index, IndexMut};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::range::{Range, RangeFrom, RangeFull, RangeTo};
 
-#[unstable(feature = "inclusive_range", reason = "recently added, follows RFC", issue = "28237")]
-pub use self::range::{RangeInclusive, RangeToInclusive};
+#[stable(feature = "inclusive_range", since = "1.26.0")]
+pub use self::range::{RangeInclusive, RangeToInclusive, RangeBounds, Bound};
 
 #[unstable(feature = "try_trait", issue = "42327")]
-pub use self::try::Try;
+pub use self::r#try::Try;
 
 #[unstable(feature = "generator_trait", issue = "43122")]
 pub use self::generator::{Generator, GeneratorState};
 
-#[unstable(feature = "placement_new_protocol", issue = "27779")]
-pub use self::place::{Place, Placer, InPlace, Boxed, BoxPlace};
-
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 pub use self::unsize::CoerceUnsized;
+
+#[unstable(feature = "dispatch_from_dyn", issue = "0")]
+pub use self::unsize::DispatchFromDyn;

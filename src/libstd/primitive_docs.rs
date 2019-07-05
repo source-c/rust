@@ -1,14 +1,6 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 #[doc(primitive = "bool")]
+#[doc(alias = "true")]
+#[doc(alias = "false")]
 //
 /// The boolean type.
 ///
@@ -20,7 +12,7 @@
 /// `bool` implements various traits, such as [`BitAnd`], [`BitOr`], [`Not`], etc.,
 /// which allow us to perform boolean operations using `&`, `|` and `!`.
 ///
-/// [`if`] always demands a `bool` value. [`assert!`], being an important macro in testing,
+/// `if` always demands a `bool` value. [`assert!`], being an important macro in testing,
 /// checks whether an expression returns `true`.
 ///
 /// ```
@@ -29,7 +21,6 @@
 /// ```
 ///
 /// [`assert!`]: macro.assert.html
-/// [`if`]: ../book/first-edition/if.html
 /// [`BitAnd`]: ops/trait.BitAnd.html
 /// [`BitOr`]: ops/trait.BitOr.html
 /// [`Not`]: ops/trait.Not.html
@@ -66,6 +57,190 @@
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_bool { }
+
+#[doc(primitive = "never")]
+#[doc(alias = "!")]
+//
+/// The `!` type, also called "never".
+///
+/// `!` represents the type of computations which never resolve to any value at all. For example,
+/// the [`exit`] function `fn exit(code: i32) -> !` exits the process without ever returning, and
+/// so returns `!`.
+///
+/// `break`, `continue` and `return` expressions also have type `!`. For example we are allowed to
+/// write:
+///
+/// ```
+/// #![feature(never_type)]
+/// # fn foo() -> u32 {
+/// let x: ! = {
+///     return 123
+/// };
+/// # }
+/// ```
+///
+/// Although the `let` is pointless here, it illustrates the meaning of `!`. Since `x` is never
+/// assigned a value (because `return` returns from the entire function), `x` can be given type
+/// `!`. We could also replace `return 123` with a `panic!` or a never-ending `loop` and this code
+/// would still be valid.
+///
+/// A more realistic usage of `!` is in this code:
+///
+/// ```
+/// # fn get_a_number() -> Option<u32> { None }
+/// # loop {
+/// let num: u32 = match get_a_number() {
+///     Some(num) => num,
+///     None => break,
+/// };
+/// # }
+/// ```
+///
+/// Both match arms must produce values of type [`u32`], but since `break` never produces a value
+/// at all we know it can never produce a value which isn't a [`u32`]. This illustrates another
+/// behaviour of the `!` type - expressions with type `!` will coerce into any other type.
+///
+/// [`u32`]: primitive.str.html
+/// [`exit`]: process/fn.exit.html
+///
+/// # `!` and generics
+///
+/// ## Infallible errors
+///
+/// The main place you'll see `!` used explicitly is in generic code. Consider the [`FromStr`]
+/// trait:
+///
+/// ```
+/// trait FromStr: Sized {
+///     type Err;
+///     fn from_str(s: &str) -> Result<Self, Self::Err>;
+/// }
+/// ```
+///
+/// When implementing this trait for [`String`] we need to pick a type for [`Err`]. And since
+/// converting a string into a string will never result in an error, the appropriate type is `!`.
+/// (Currently the type actually used is an enum with no variants, though this is only because `!`
+/// was added to Rust at a later date and it may change in the future.) With an [`Err`] type of
+/// `!`, if we have to call [`String::from_str`] for some reason the result will be a
+/// [`Result<String, !>`] which we can unpack like this:
+///
+/// ```ignore (string-from-str-error-type-is-not-never-yet)
+/// #[feature(exhaustive_patterns)]
+/// // NOTE: this does not work today!
+/// let Ok(s) = String::from_str("hello");
+/// ```
+///
+/// Since the [`Err`] variant contains a `!`, it can never occur. If the `exhaustive_patterns`
+/// feature is present this means we can exhaustively match on [`Result<T, !>`] by just taking the
+/// [`Ok`] variant. This illustrates another behaviour of `!` - it can be used to "delete" certain
+/// enum variants from generic types like `Result`.
+///
+/// ## Infinite loops
+///
+/// While [`Result<T, !>`] is very useful for removing errors, `!` can also be used to remove
+/// successes as well. If we think of [`Result<T, !>`] as "if this function returns, it has not
+/// errored," we get a very intuitive idea of [`Result<!, E>`] as well: if the function returns, it
+/// *has* errored.
+///
+/// For example, consider the case of a simple web server, which can be simplified to:
+///
+/// ```ignore (hypothetical-example)
+/// loop {
+///     let (client, request) = get_request().expect("disconnected");
+///     let response = request.process();
+///     response.send(client);
+/// }
+/// ```
+///
+/// Currently, this isn't ideal, because we simply panic whenever we fail to get a new connection.
+/// Instead, we'd like to keep track of this error, like this:
+///
+/// ```ignore (hypothetical-example)
+/// loop {
+///     match get_request() {
+///         Err(err) => break err,
+///         Ok((client, request)) => {
+///             let response = request.process();
+///             response.send(client);
+///         },
+///     }
+/// }
+/// ```
+///
+/// Now, when the server disconnects, we exit the loop with an error instead of panicking. While it
+/// might be intuitive to simply return the error, we might want to wrap it in a [`Result<!, E>`]
+/// instead:
+///
+/// ```ignore (hypothetical-example)
+/// fn server_loop() -> Result<!, ConnectionError> {
+///     loop {
+///         let (client, request) = get_request()?;
+///         let response = request.process();
+///         response.send(client);
+///     }
+/// }
+/// ```
+///
+/// Now, we can use `?` instead of `match`, and the return type makes a lot more sense: if the loop
+/// ever stops, it means that an error occurred. We don't even have to wrap the loop in an `Ok`
+/// because `!` coerces to `Result<!, ConnectionError>` automatically.
+///
+/// [`String::from_str`]: str/trait.FromStr.html#tymethod.from_str
+/// [`Result<String, !>`]: result/enum.Result.html
+/// [`Result<T, !>`]: result/enum.Result.html
+/// [`Result<!, E>`]: result/enum.Result.html
+/// [`Ok`]: result/enum.Result.html#variant.Ok
+/// [`String`]: string/struct.String.html
+/// [`Err`]: result/enum.Result.html#variant.Err
+/// [`FromStr`]: str/trait.FromStr.html
+///
+/// # `!` and traits
+///
+/// When writing your own traits, `!` should have an `impl` whenever there is an obvious `impl`
+/// which doesn't `panic!`. As it turns out, most traits can have an `impl` for `!`. Take [`Debug`]
+/// for example:
+///
+/// ```
+/// #![feature(never_type)]
+/// # use std::fmt;
+/// # trait Debug {
+/// # fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+/// # }
+/// impl Debug for ! {
+///     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+///         *self
+///     }
+/// }
+/// ```
+///
+/// Once again we're using `!`'s ability to coerce into any other type, in this case
+/// [`fmt::Result`]. Since this method takes a `&!` as an argument we know that it can never be
+/// called (because there is no value of type `!` for it to be called with). Writing `*self`
+/// essentially tells the compiler "We know that this code can never be run, so just treat the
+/// entire function body as having type [`fmt::Result`]". This pattern can be used a lot when
+/// implementing traits for `!`. Generally, any trait which only has methods which take a `self`
+/// parameter should have such an impl.
+///
+/// On the other hand, one trait which would not be appropriate to implement is [`Default`]:
+///
+/// ```
+/// trait Default {
+///     fn default() -> Self;
+/// }
+/// ```
+///
+/// Since `!` has no values, it has no default value either. It's true that we could write an
+/// `impl` for this which simply panics, but the same is true for any type (we could `impl
+/// Default` for (eg.) [`File`] by just making [`default()`] panic.)
+///
+/// [`fmt::Result`]: fmt/type.Result.html
+/// [`File`]: fs/struct.File.html
+/// [`Debug`]: fmt/trait.Debug.html
+/// [`Default`]: default/trait.Default.html
+/// [`default()`]: default/trait.Default.html#tymethod.default
+///
+#[unstable(feature = "never_type", issue = "35121")]
+mod prim_never { }
 
 #[doc(primitive = "char")]
 //
@@ -104,7 +279,7 @@ mod prim_bool { }
 ///
 /// As always, remember that a human intuition for 'character' may not map to
 /// Unicode's definitions. For example, despite looking similar, the 'é'
-/// character is one Unicode code point while 'é' is two Unicode code points:
+/// character is one Unicode code point while 'é' is two Unicode code points:
 ///
 /// ```
 /// let mut chars = "é".chars();
@@ -127,7 +302,7 @@ mod prim_bool { }
 /// ```text
 /// error: character literal may only contain one codepoint: 'é'
 /// let c = 'é';
-///         ^^^^
+///         ^^^
 /// ```
 ///
 /// Another implication of the 4-byte fixed size of a `char` is that
@@ -137,8 +312,8 @@ mod prim_bool { }
 /// let s = String::from("love: ❤️");
 /// let v: Vec<char> = s.chars().collect();
 ///
-/// assert_eq!(12, s.len() * std::mem::size_of::<u8>());
-/// assert_eq!(32, v.len() * std::mem::size_of::<char>());
+/// assert_eq!(12, std::mem::size_of_val(&s[..]));
+/// assert_eq!(32, std::mem::size_of_val(&v[..]));
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_char { }
@@ -184,6 +359,8 @@ mod prim_unit { }
 #[doc(primitive = "pointer")]
 //
 /// Raw, unsafe pointers, `*const T`, and `*mut T`.
+///
+/// *[See also the `std::ptr` module](ptr/index.html).*
 ///
 /// Working with raw pointers in Rust is uncommon,
 /// typically limited to a few patterns.
@@ -239,7 +416,7 @@ mod prim_unit { }
 /// ## 3. Get it from C.
 ///
 /// ```
-/// # #![feature(libc)]
+/// # #![feature(rustc_private)]
 /// extern crate libc;
 ///
 /// use std::mem;
@@ -259,8 +436,6 @@ mod prim_unit { }
 /// but C APIs hand out a lot of pointers generally, so are a common source
 /// of raw pointers in Rust.
 ///
-/// *[See also the `std::ptr` module](ptr/index.html).*
-///
 /// [`null`]: ../std/ptr/fn.null.html
 /// [`null_mut`]: ../std/ptr/fn.null_mut.html
 /// [`is_null`]: ../std/primitive.pointer.html#method.is_null
@@ -277,14 +452,13 @@ mod prim_pointer { }
 ///
 /// There are two syntactic forms for creating an array:
 ///
-/// * A list with each element, i.e. `[x, y, z]`.
+/// * A list with each element, i.e., `[x, y, z]`.
 /// * A repeat expression `[x; N]`, which produces an array with `N` copies of `x`.
 ///   The type of `x` must be [`Copy`][copy].
 ///
 /// Arrays of sizes from 0 to 32 (inclusive) implement the following traits if
 /// the element type allows it:
 ///
-/// - [`Clone`][clone] (only if `T: `[`Copy`][copy])
 /// - [`Debug`][debug]
 /// - [`IntoIterator`][intoiterator] (implemented for `&[T; N]` and `&mut [T; N]`)
 /// - [`PartialEq`][partialeq], [`PartialOrd`][partialord], [`Eq`][eq], [`Ord`][ord]
@@ -299,15 +473,17 @@ mod prim_pointer { }
 /// entirely different types. As a stopgap, trait implementations are
 /// statically generated up to size 32.
 ///
-/// Arrays of *any* size are [`Copy`][copy] if the element type is [`Copy`][copy]. This
-/// works because the [`Copy`][copy] trait is specially known to the compiler.
+/// Arrays of *any* size are [`Copy`][copy] if the element type is [`Copy`][copy]
+/// and [`Clone`][clone] if the element type is [`Clone`][clone]. This works
+/// because [`Copy`][copy] and [`Clone`][clone] traits are specially known
+/// to the compiler.
 ///
 /// Arrays coerce to [slices (`[T]`)][slice], so a slice method may be called on
 /// an array. Indeed, this provides most of the API for working with arrays.
 /// Slices have a dynamic size and do not coerce to arrays.
 ///
-/// There is no way to move elements out of an array. See [`mem::replace`][replace]
-/// for an alternative.
+/// You can move elements out of an array with a slice pattern. If you want
+/// one element, see [`mem::replace`][replace].
 ///
 /// # Examples
 ///
@@ -349,6 +525,16 @@ mod prim_pointer { }
 /// for x in &array { }
 /// ```
 ///
+/// You can use a slice pattern to move elements out of an array:
+///
+/// ```
+/// fn move_away(_: String) { /* Do interesting things. */ }
+///
+/// let [john, roa] = ["John".to_string(), "Roa".to_string()];
+/// move_away(john);
+/// move_away(roa);
+/// ```
+///
 /// [slice]: primitive.slice.html
 /// [copy]: marker/trait.Copy.html
 /// [clone]: clone/trait.Clone.html
@@ -371,8 +557,12 @@ mod prim_pointer { }
 mod prim_array { }
 
 #[doc(primitive = "slice")]
-//
+#[doc(alias = "[")]
+#[doc(alias = "]")]
+#[doc(alias = "[]")]
 /// A dynamically-sized view into a contiguous sequence, `[T]`.
+///
+/// *[See also the `std::slice` module](slice/index.html).*
 ///
 /// Slices are a view into a block of memory represented as a pointer and a
 /// length.
@@ -391,13 +581,11 @@ mod prim_array { }
 /// points to:
 ///
 /// ```
-/// let x = &mut [1, 2, 3];
+/// let mut x = [1, 2, 3];
+/// let x = &mut x[..]; // Take a full slice of `x`.
 /// x[1] = 7;
 /// assert_eq!(x, &[1, 7, 3]);
 /// ```
-///
-/// *[See also the `std::slice` module](slice/index.html).*
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_slice { }
 
@@ -405,15 +593,13 @@ mod prim_slice { }
 //
 /// String slices.
 ///
+/// *[See also the `std::str` module](str/index.html).*
+///
 /// The `str` type, also called a 'string slice', is the most primitive string
 /// type. It is usually seen in its borrowed form, `&str`. It is also the type
 /// of string literals, `&'static str`.
 ///
-/// Strings slices are always valid UTF-8.
-///
-/// This documentation describes a number of methods and trait implementations
-/// on the `str` type. For technical reasons, there is additional, separate
-/// documentation in the [`std::str`](str/index.html) module as well.
+/// String slices are always valid UTF-8.
 ///
 /// # Examples
 ///
@@ -469,6 +655,9 @@ mod prim_slice { }
 mod prim_str { }
 
 #[doc(primitive = "tuple")]
+#[doc(alias = "(")]
+#[doc(alias = ")")]
+#[doc(alias = "()")]
 //
 /// A finite heterogeneous sequence, `(T, U, ..)`.
 ///
@@ -504,7 +693,11 @@ mod prim_str { }
 /// assert_eq!(tuple.2, 'c');
 /// ```
 ///
-/// For more about tuples, see [the book](../book/first-edition/primitive-types.html#tuples).
+/// The sequential nature of the tuple applies to its implementations of various
+/// traits.  For example, in `PartialOrd` and `Ord`, the elements are compared
+/// sequentially until the first non-equal set is found.
+///
+/// For more about tuples, see [the book](../book/ch03-02-data-types.html#the-tuple-type).
 ///
 /// # Trait implementations
 ///
@@ -591,10 +784,6 @@ mod prim_f64 { }
 /// The 8-bit signed integer type.
 ///
 /// *[See also the `std::i8` module](i8/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `i64` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_i8 { }
 
@@ -603,10 +792,6 @@ mod prim_i8 { }
 /// The 16-bit signed integer type.
 ///
 /// *[See also the `std::i16` module](i16/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `i32` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_i16 { }
 
@@ -615,10 +800,6 @@ mod prim_i16 { }
 /// The 32-bit signed integer type.
 ///
 /// *[See also the `std::i32` module](i32/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `i16` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_i32 { }
 
@@ -627,10 +808,6 @@ mod prim_i32 { }
 /// The 64-bit signed integer type.
 ///
 /// *[See also the `std::i64` module](i64/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `i8` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_i64 { }
 
@@ -639,11 +816,7 @@ mod prim_i64 { }
 /// The 128-bit signed integer type.
 ///
 /// *[See also the `std::i128` module](i128/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `i8` in there.
-///
-#[unstable(feature = "i128", issue="35118")]
+#[stable(feature = "i128", since="1.26.0")]
 mod prim_i128 { }
 
 #[doc(primitive = "u8")]
@@ -651,10 +824,6 @@ mod prim_i128 { }
 /// The 8-bit unsigned integer type.
 ///
 /// *[See also the `std::u8` module](u8/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `u64` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_u8 { }
 
@@ -663,10 +832,6 @@ mod prim_u8 { }
 /// The 16-bit unsigned integer type.
 ///
 /// *[See also the `std::u16` module](u16/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `u32` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_u16 { }
 
@@ -675,10 +840,6 @@ mod prim_u16 { }
 /// The 32-bit unsigned integer type.
 ///
 /// *[See also the `std::u32` module](u32/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `u16` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_u32 { }
 
@@ -687,10 +848,6 @@ mod prim_u32 { }
 /// The 64-bit unsigned integer type.
 ///
 /// *[See also the `std::u64` module](u64/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `u8` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_u64 { }
 
@@ -699,26 +856,18 @@ mod prim_u64 { }
 /// The 128-bit unsigned integer type.
 ///
 /// *[See also the `std::u128` module](u128/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `u8` in there.
-///
-#[unstable(feature = "i128", issue="35118")]
+#[stable(feature = "i128", since="1.26.0")]
 mod prim_u128 { }
 
 #[doc(primitive = "isize")]
 //
 /// The pointer-sized signed integer type.
 ///
+/// *[See also the `std::isize` module](isize/index.html).*
+///
 /// The size of this primitive is how many bytes it takes to reference any
 /// location in memory. For example, on a 32 bit target, this is 4 bytes
 /// and on a 64 bit target, this is 8 bytes.
-///
-/// *[See also the `std::isize` module](isize/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `usize` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_isize { }
 
@@ -726,19 +875,16 @@ mod prim_isize { }
 //
 /// The pointer-sized unsigned integer type.
 ///
+/// *[See also the `std::usize` module](usize/index.html).*
+///
 /// The size of this primitive is how many bytes it takes to reference any
 /// location in memory. For example, on a 32 bit target, this is 4 bytes
 /// and on a 64 bit target, this is 8 bytes.
-///
-/// *[See also the `std::usize` module](usize/index.html).*
-///
-/// However, please note that examples are shared between primitive integer
-/// types. So it's normal if you see usage of types like `isize` in there.
-///
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_usize { }
 
 #[doc(primitive = "reference")]
+#[doc(alias = "&")]
 //
 /// References, both shared and mutable.
 ///
@@ -764,10 +910,35 @@ mod prim_usize { }
 /// `&mut T` references can be freely coerced into `&T` references with the same referent type, and
 /// references with longer lifetimes can be freely coerced into references with shorter ones.
 ///
+/// Reference equality by address, instead of comparing the values pointed to, is accomplished via
+/// implicit reference-pointer coercion and raw pointer equality via [`ptr::eq`], while
+/// [`PartialEq`] compares values.
+///
+/// [`ptr::eq`]: ptr/fn.eq.html
+/// [`PartialEq`]: cmp/trait.PartialEq.html
+///
+/// ```
+/// use std::ptr;
+///
+/// let five = 5;
+/// let other_five = 5;
+/// let five_ref = &five;
+/// let same_five_ref = &five;
+/// let other_five_ref = &other_five;
+///
+/// assert!(five_ref == same_five_ref);
+/// assert!(five_ref == other_five_ref);
+///
+/// assert!(ptr::eq(five_ref, same_five_ref));
+/// assert!(!ptr::eq(five_ref, other_five_ref));
+/// ```
+///
 /// For more information on how to use references, see [the book's section on "References and
 /// Borrowing"][book-refs].
 ///
-/// [book-refs]: ../book/second-edition/ch04-02-references-and-borrowing.html
+/// [book-refs]: ../book/ch04-02-references-and-borrowing.html
+///
+/// # Trait implementations
 ///
 /// The following traits are implemented for all `&T`, regardless of the type of its referent:
 ///
@@ -905,7 +1076,7 @@ mod prim_ref { }
 /// On top of that, function pointers can vary based on what ABI they use. This is achieved by
 /// adding the `extern` keyword to the type name, followed by the ABI in question. For example,
 /// `fn()` is different from `extern "C" fn()`, which itself is different from `extern "stdcall"
-/// fn()`, and so on for the various ABIs that Rust supports.  Non-`extern` functions have an ABI
+/// fn()`, and so on for the various ABIs that Rust supports. Non-`extern` functions have an ABI
 /// of `"Rust"`, and `extern` functions without an explicit ABI have an ABI of `"C"`. For more
 /// information, see [the nomicon's section on foreign calling conventions][nomicon-abi].
 ///

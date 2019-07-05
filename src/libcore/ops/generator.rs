@@ -1,12 +1,5 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::marker::Unpin;
+use crate::pin::Pin;
 
 /// The result of a generator resumption.
 ///
@@ -14,7 +7,7 @@
 /// possible return values of a generator. Currently this corresponds to either
 /// a suspension point (`Yielded`) or a termination point (`Complete`).
 #[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Debug, Hash)]
-#[cfg_attr(not(stage0), lang = "generator_state")]
+#[lang = "generator_state"]
 #[unstable(feature = "generator_trait", issue = "43122")]
 pub enum GeneratorState<Y, R> {
     /// The generator suspended with a value.
@@ -49,6 +42,7 @@ pub enum GeneratorState<Y, R> {
 /// #![feature(generators, generator_trait)]
 ///
 /// use std::ops::{Generator, GeneratorState};
+/// use std::pin::Pin;
 ///
 /// fn main() {
 ///     let mut generator = || {
@@ -56,11 +50,11 @@ pub enum GeneratorState<Y, R> {
 ///         return "foo"
 ///     };
 ///
-///     match generator.resume() {
+///     match Pin::new(&mut generator).resume() {
 ///         GeneratorState::Yielded(1) => {}
 ///         _ => panic!("unexpected return from resume"),
 ///     }
-///     match generator.resume() {
+///     match Pin::new(&mut generator).resume() {
 ///         GeneratorState::Complete("foo") => {}
 ///         _ => panic!("unexpected return from resume"),
 ///     }
@@ -70,7 +64,7 @@ pub enum GeneratorState<Y, R> {
 /// More documentation of generators can be found in the unstable book.
 ///
 /// [RFC 2033]: https://github.com/rust-lang/rfcs/pull/2033
-#[cfg_attr(not(stage0), lang = "generator")]
+#[lang = "generator"]
 #[unstable(feature = "generator_trait", issue = "43122")]
 #[fundamental]
 pub trait Generator {
@@ -116,16 +110,25 @@ pub trait Generator {
     /// been returned previously. While generator literals in the language are
     /// guaranteed to panic on resuming after `Complete`, this is not guaranteed
     /// for all implementations of the `Generator` trait.
-    fn resume(&mut self) -> GeneratorState<Self::Yield, Self::Return>;
+    fn resume(self: Pin<&mut Self>) -> GeneratorState<Self::Yield, Self::Return>;
 }
 
 #[unstable(feature = "generator_trait", issue = "43122")]
-impl<'a, T> Generator for &'a mut T
-    where T: Generator + ?Sized
-{
-    type Yield = T::Yield;
-    type Return = T::Return;
-    fn resume(&mut self) -> GeneratorState<Self::Yield, Self::Return> {
-        (**self).resume()
+impl<G: ?Sized + Generator> Generator for Pin<&mut G> {
+    type Yield = G::Yield;
+    type Return = G::Return;
+
+    fn resume(mut self: Pin<&mut Self>) -> GeneratorState<Self::Yield, Self::Return> {
+        G::resume((*self).as_mut())
+    }
+}
+
+#[unstable(feature = "generator_trait", issue = "43122")]
+impl<G: ?Sized + Generator + Unpin> Generator for &mut G {
+    type Yield = G::Yield;
+    type Return = G::Return;
+
+    fn resume(mut self: Pin<&mut Self>) -> GeneratorState<Self::Yield, Self::Return> {
+        G::resume(Pin::new(&mut *self))
     }
 }

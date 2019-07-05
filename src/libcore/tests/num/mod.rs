@@ -1,17 +1,8 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use core::convert::TryFrom;
+use core::convert::{TryFrom, TryInto};
 use core::cmp::PartialEq;
 use core::fmt::Debug;
 use core::marker::Copy;
+use core::num::TryFromIntError;
 use core::ops::{Add, Sub, Mul, Div, Rem};
 use core::option::Option;
 use core::option::Option::{Some, None};
@@ -81,36 +72,28 @@ fn from_str_issue7588() {
 
 #[test]
 fn test_int_from_str_overflow() {
-    let mut i8_val: i8 = 127;
-    assert_eq!("127".parse::<i8>().ok(), Some(i8_val));
+    assert_eq!("127".parse::<i8>().ok(), Some(127i8));
     assert_eq!("128".parse::<i8>().ok(), None);
 
-    i8_val = i8_val.wrapping_add(1);
-    assert_eq!("-128".parse::<i8>().ok(), Some(i8_val));
+    assert_eq!("-128".parse::<i8>().ok(), Some(-128i8));
     assert_eq!("-129".parse::<i8>().ok(), None);
 
-    let mut i16_val: i16 = 32_767;
-    assert_eq!("32767".parse::<i16>().ok(), Some(i16_val));
+    assert_eq!("32767".parse::<i16>().ok(), Some(32_767i16));
     assert_eq!("32768".parse::<i16>().ok(), None);
 
-    i16_val = i16_val.wrapping_add(1);
-    assert_eq!("-32768".parse::<i16>().ok(), Some(i16_val));
+    assert_eq!("-32768".parse::<i16>().ok(), Some(-32_768i16));
     assert_eq!("-32769".parse::<i16>().ok(), None);
 
-    let mut i32_val: i32 = 2_147_483_647;
-    assert_eq!("2147483647".parse::<i32>().ok(), Some(i32_val));
+    assert_eq!("2147483647".parse::<i32>().ok(), Some(2_147_483_647i32));
     assert_eq!("2147483648".parse::<i32>().ok(), None);
 
-    i32_val = i32_val.wrapping_add(1);
-    assert_eq!("-2147483648".parse::<i32>().ok(), Some(i32_val));
+    assert_eq!("-2147483648".parse::<i32>().ok(), Some(-2_147_483_648i32));
     assert_eq!("-2147483649".parse::<i32>().ok(), None);
 
-    let mut i64_val: i64 = 9_223_372_036_854_775_807;
-    assert_eq!("9223372036854775807".parse::<i64>().ok(), Some(i64_val));
+    assert_eq!("9223372036854775807".parse::<i64>().ok(), Some(9_223_372_036_854_775_807i64));
     assert_eq!("9223372036854775808".parse::<i64>().ok(), None);
 
-    i64_val = i64_val.wrapping_add(1);
-    assert_eq!("-9223372036854775808".parse::<i64>().ok(), Some(i64_val));
+    assert_eq!("-9223372036854775808".parse::<i64>().ok(), Some(-9_223_372_036_854_775_808i64));
     assert_eq!("-9223372036854775809".parse::<i64>().ok(), None);
 }
 
@@ -134,7 +117,23 @@ fn test_empty() {
     assert_eq!("".parse::<u8>().ok(), None);
 }
 
+#[test]
+fn test_infallible_try_from_int_error() {
+    let func = |x: i8| -> Result<i32, TryFromIntError> { Ok(x.try_into()?) };
+
+    assert!(func(0).is_ok());
+}
+
 macro_rules! test_impl_from {
+    ($fn_name:ident, bool, $target: ty) => {
+        #[test]
+        fn $fn_name() {
+            let one: $target = 1;
+            let zero: $target = 0;
+            assert_eq!(one, <$target>::from(true));
+            assert_eq!(zero, <$target>::from(false));
+        }
+    };
     ($fn_name: ident, $Small: ty, $Large: ty) => {
         #[test]
         fn $fn_name() {
@@ -174,6 +173,18 @@ test_impl_from! { test_u16i32, u16, i32 }
 test_impl_from! { test_u16i64, u16, i64 }
 test_impl_from! { test_u32i64, u32, i64 }
 
+// Bool -> Integer
+test_impl_from! { test_boolu8, bool, u8 }
+test_impl_from! { test_boolu16, bool, u16 }
+test_impl_from! { test_boolu32, bool, u32 }
+test_impl_from! { test_boolu64, bool, u64 }
+test_impl_from! { test_boolu128, bool, u128 }
+test_impl_from! { test_booli8, bool, i8 }
+test_impl_from! { test_booli16, bool, i16 }
+test_impl_from! { test_booli32, bool, i32 }
+test_impl_from! { test_booli64, bool, i64 }
+test_impl_from! { test_booli128, bool, i128 }
+
 // Signed -> Float
 test_impl_from! { test_i8f32, i8, f32 }
 test_impl_from! { test_i8f64, i8, f64 }
@@ -189,7 +200,6 @@ test_impl_from! { test_u16f64, u16, f64 }
 test_impl_from! { test_u32f64, u32, f64 }
 
 // Float -> Float
-#[cfg_attr(all(target_arch = "wasm32", target_os = "emscripten"), ignore)] // issue 42630
 #[test]
 fn test_f32f64() {
     use core::f32;
@@ -628,51 +638,69 @@ assume_usize_width! {
 
 macro_rules! test_float {
     ($modname: ident, $fty: ty, $inf: expr, $neginf: expr, $nan: expr) => { mod $modname {
-        use core::num::Float;
         // FIXME(nagisa): these tests should test for sign of -0.0
         #[test]
         fn min() {
-            assert_eq!(0.0.min(0.0), 0.0);
-            assert_eq!((-0.0).min(-0.0), -0.0);
-            assert_eq!(9.0.min(9.0), 9.0);
-            assert_eq!((-9.0).min(0.0), -9.0);
-            assert_eq!(0.0.min(9.0), 0.0);
-            assert_eq!((-0.0).min(-9.0), -9.0);
-            assert_eq!($inf.min(9.0), 9.0);
-            assert_eq!(9.0.min($inf), 9.0);
-            assert_eq!($inf.min(-9.0), -9.0);
-            assert_eq!((-9.0).min($inf), -9.0);
-            assert_eq!($neginf.min(9.0), $neginf);
-            assert_eq!(9.0.min($neginf), $neginf);
-            assert_eq!($neginf.min(-9.0), $neginf);
-            assert_eq!((-9.0).min($neginf), $neginf);
-            assert_eq!($nan.min(9.0), 9.0);
-            assert_eq!($nan.min(-9.0), -9.0);
-            assert_eq!(9.0.min($nan), 9.0);
-            assert_eq!((-9.0).min($nan), -9.0);
-            assert!($nan.min($nan).is_nan());
+            assert_eq!((0.0 as $fty).min(0.0), 0.0);
+            assert_eq!((-0.0 as $fty).min(-0.0), -0.0);
+            assert_eq!((9.0 as $fty).min(9.0), 9.0);
+            assert_eq!((-9.0 as $fty).min(0.0), -9.0);
+            assert_eq!((0.0 as $fty).min(9.0), 0.0);
+            assert_eq!((-0.0 as $fty).min(-9.0), -9.0);
+            assert_eq!(($inf as $fty).min(9.0), 9.0);
+            assert_eq!((9.0 as $fty).min($inf), 9.0);
+            assert_eq!(($inf as $fty).min(-9.0), -9.0);
+            assert_eq!((-9.0 as $fty).min($inf), -9.0);
+            assert_eq!(($neginf as $fty).min(9.0), $neginf);
+            assert_eq!((9.0 as $fty).min($neginf), $neginf);
+            assert_eq!(($neginf as $fty).min(-9.0), $neginf);
+            assert_eq!((-9.0 as $fty).min($neginf), $neginf);
+            assert_eq!(($nan as $fty).min(9.0), 9.0);
+            assert_eq!(($nan as $fty).min(-9.0), -9.0);
+            assert_eq!((9.0 as $fty).min($nan), 9.0);
+            assert_eq!((-9.0 as $fty).min($nan), -9.0);
+            assert!(($nan as $fty).min($nan).is_nan());
         }
         #[test]
         fn max() {
-            assert_eq!(0.0.max(0.0), 0.0);
-            assert_eq!((-0.0).max(-0.0), -0.0);
-            assert_eq!(9.0.max(9.0), 9.0);
-            assert_eq!((-9.0).max(0.0), 0.0);
-            assert_eq!(0.0.max(9.0), 9.0);
-            assert_eq!((-0.0).max(-9.0), -0.0);
-            assert_eq!($inf.max(9.0), $inf);
-            assert_eq!(9.0.max($inf), $inf);
-            assert_eq!($inf.max(-9.0), $inf);
-            assert_eq!((-9.0).max($inf), $inf);
-            assert_eq!($neginf.max(9.0), 9.0);
-            assert_eq!(9.0.max($neginf), 9.0);
-            assert_eq!($neginf.max(-9.0), -9.0);
-            assert_eq!((-9.0).max($neginf), -9.0);
-            assert_eq!($nan.max(9.0), 9.0);
-            assert_eq!($nan.max(-9.0), -9.0);
-            assert_eq!(9.0.max($nan), 9.0);
-            assert_eq!((-9.0).max($nan), -9.0);
-            assert!($nan.max($nan).is_nan());
+            assert_eq!((0.0 as $fty).max(0.0), 0.0);
+            assert_eq!((-0.0 as $fty).max(-0.0), -0.0);
+            assert_eq!((9.0 as $fty).max(9.0), 9.0);
+            assert_eq!((-9.0 as $fty).max(0.0), 0.0);
+            assert_eq!((0.0 as $fty).max(9.0), 9.0);
+            assert_eq!((-0.0 as $fty).max(-9.0), -0.0);
+            assert_eq!(($inf as $fty).max(9.0), $inf);
+            assert_eq!((9.0 as $fty).max($inf), $inf);
+            assert_eq!(($inf as $fty).max(-9.0), $inf);
+            assert_eq!((-9.0 as $fty).max($inf), $inf);
+            assert_eq!(($neginf as $fty).max(9.0), 9.0);
+            assert_eq!((9.0 as $fty).max($neginf), 9.0);
+            assert_eq!(($neginf as $fty).max(-9.0), -9.0);
+            assert_eq!((-9.0 as $fty).max($neginf), -9.0);
+            assert_eq!(($nan as $fty).max(9.0), 9.0);
+            assert_eq!(($nan as $fty).max(-9.0), -9.0);
+            assert_eq!((9.0 as $fty).max($nan), 9.0);
+            assert_eq!((-9.0 as $fty).max($nan), -9.0);
+            assert!(($nan as $fty).max($nan).is_nan());
+        }
+        #[test]
+        fn rem_euclid() {
+            let a: $fty = 42.0;
+            assert!($inf.rem_euclid(a).is_nan());
+            assert_eq!(a.rem_euclid($inf), a);
+            assert!(a.rem_euclid($nan).is_nan());
+            assert!($inf.rem_euclid($inf).is_nan());
+            assert!($inf.rem_euclid($nan).is_nan());
+            assert!($nan.rem_euclid($inf).is_nan());
+        }
+        #[test]
+        fn div_euclid() {
+            let a: $fty = 42.0;
+            assert_eq!(a.div_euclid($inf), 0.0);
+            assert!(a.div_euclid($nan).is_nan());
+            assert!($inf.div_euclid($inf).is_nan());
+            assert!($inf.div_euclid($nan).is_nan());
+            assert!($nan.div_euclid($inf).is_nan());
         }
     } }
 }

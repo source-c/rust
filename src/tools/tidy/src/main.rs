@@ -1,14 +1,4 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-//! Tidy checks source code in this repository
+//! Tidy checks source code in this repository.
 //!
 //! This program runs all of the various tidy checks for style, cleanliness,
 //! etc. This is run by default on `make check` and as part of the auto
@@ -16,35 +6,37 @@
 
 #![deny(warnings)]
 
-extern crate tidy;
 use tidy::*;
 
 use std::process;
 use std::path::PathBuf;
 use std::env;
-use std::io::{self, Write};
 
 fn main() {
-    let path = env::args_os().skip(1).next().expect("need an argument");
-    let path = PathBuf::from(path);
+    let path: PathBuf = env::args_os().nth(1).expect("need path to src").into();
+    let cargo: PathBuf = env::args_os().nth(2).expect("need path to cargo").into();
 
     let args: Vec<String> = env::args().skip(1).collect();
 
     let mut bad = false;
-    let quiet = args.iter().any(|s| *s == "--quiet");
+    let verbose = args.iter().any(|s| *s == "--verbose");
     bins::check(&path, &mut bad);
     style::check(&path, &mut bad);
     errors::check(&path, &mut bad);
     cargo::check(&path, &mut bad);
-    features::check(&path, &mut bad, quiet);
+    let collected = features::check(&path, &mut bad, verbose);
     pal::check(&path, &mut bad);
-    unstable_book::check(&path, &mut bad);
+    unstable_book::check(&path, collected, &mut bad);
+    libcoretest::check(&path, &mut bad);
     if !args.iter().any(|s| *s == "--no-vendor") {
         deps::check(&path, &mut bad);
     }
+    deps::check_whitelist(&path, &cargo, &mut bad);
+    extdeps::check(&path, &mut bad);
+    ui_tests::check(&path, &mut bad);
 
     if bad {
-        writeln!(io::stderr(), "some tidy checks failed").expect("could not write to stderr");
+        eprintln!("some tidy checks failed");
         process::exit(1);
     }
 }

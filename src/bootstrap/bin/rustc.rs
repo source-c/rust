@@ -1,13 +1,3 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Shim which is passed to Cargo as "rustc" when running the bootstrap.
 //!
 //! This shim will take care of some various tasks that our build process
@@ -27,15 +17,13 @@
 
 #![deny(warnings)]
 
-extern crate bootstrap;
-
 use std::env;
 use std::ffi::OsString;
 use std::io;
-use std::io::prelude::*;
-use std::str::FromStr;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus};
+use std::process::Command;
+use std::str::FromStr;
+use std::time::Instant;
 
 fn main() {
     let mut args = env::args_os().skip(1).collect::<Vec<_>>();
@@ -63,6 +51,11 @@ fn main() {
         args.remove(n);
     }
 
+    if let Some(s) = env::var_os("RUSTC_ERROR_FORMAT") {
+        args.push("--error-format".into());
+        args.push(s);
+    }
+
     // Detect whether or not we're a build script depending on whether --target
     // is passed (a bit janky...)
     let target = args.windows(2)
@@ -87,24 +80,63 @@ fn main() {
     };
     let stage = env::var("RUSTC_STAGE").expect("RUSTC_STAGE was not set");
     let sysroot = env::var_os("RUSTC_SYSROOT").expect("RUSTC_SYSROOT was not set");
-    let mut on_fail = env::var_os("RUSTC_ON_FAIL").map(|of| Command::new(of));
+    let on_fail = env::var_os("RUSTC_ON_FAIL").map(|of| Command::new(of));
 
     let rustc = env::var_os(rustc).unwrap_or_else(|| panic!("{:?} was not set", rustc));
     let libdir = env::var_os(libdir).unwrap_or_else(|| panic!("{:?} was not set", libdir));
     let mut dylib_path = bootstrap::util::dylib_path();
-    dylib_path.insert(0, PathBuf::from(libdir));
+    dylib_path.insert(0, PathBuf::from(&libdir));
 
     let mut cmd = Command::new(rustc);
     cmd.args(&args)
-        .arg("--cfg")
-        .arg(format!("stage{}", stage))
         .env(bootstrap::util::dylib_path_var(),
              env::join_paths(&dylib_path).unwrap());
+    let mut maybe_crate = None;
+
+    // Get the name of the crate we're compiling, if any.
+    let maybe_crate_name = args.windows(2)
+        .find(|a| &*a[0] == "--crate-name")
+        .map(|crate_name| &*crate_name[1]);
+
+    if let Some(current_crate) = maybe_crate_name {
+        if let Some(target) = env::var_os("RUSTC_TIME") {
+            if target == "all" ||
+               target.into_string().unwrap().split(",").any(|c| c.trim() == current_crate)
+            {
+                cmd.arg("-Ztime");
+            }
+        }
+    }
+
+    // Non-zero stages must all be treated uniformly to avoid problems when attempting to uplift
+    // compiler libraries and such from stage 1 to 2.
+    if stage == "0" {
+        cmd.arg("--cfg").arg("bootstrap");
+    }
+
+    // Print backtrace in case of ICE
+    if env::var("RUSTC_BACKTRACE_ON_ICE").is_ok() && env::var("RUST_BACKTRACE").is_err() {
+        cmd.env("RUST_BACKTRACE", "1");
+    }
+
+    cmd.env("RUSTC_BREAK_ON_ICE", "1");
+
+    if let Ok(debuginfo_level) = env::var("RUSTC_DEBUGINFO_LEVEL") {
+        cmd.arg(format!("-Cdebuginfo={}", debuginfo_level));
+    }
 
     if let Some(target) = target {
         // The stage0 compiler has a special sysroot distinct from what we
         // actually downloaded, so we just always pass the `--sysroot` option.
-        cmd.arg("--sysroot").arg(sysroot);
+        cmd.arg("--sysroot").arg(&sysroot);
+
+        cmd.arg("-Zexternal-macro-backtrace");
+
+        // Link crates to the proc macro crate for the target, but use a host proc macro crate
+        // to actually run the macros
+        if env::var_os("RUST_DUAL_PROC_MACROS").is_some() {
+            cmd.arg("-Zdual-proc-macros");
+        }
 
         // When we build Rust dylibs they're all intended for intermediate
         // usage, so make sure we pass the -Cprefer-dynamic flag instead of
@@ -113,34 +145,30 @@ fn main() {
             cmd.arg("-Cprefer-dynamic");
         }
 
-        // Help the libc crate compile by assisting it in finding the MUSL
-        // native libraries.
+        // Help the libc crate compile by assisting it in finding various
+        // sysroot native libraries.
         if let Some(s) = env::var_os("MUSL_ROOT") {
+            if target.contains("musl") {
+                let mut root = OsString::from("native=");
+                root.push(&s);
+                root.push("/lib");
+                cmd.arg("-L").arg(&root);
+            }
+        }
+        if let Some(s) = env::var_os("WASI_ROOT") {
             let mut root = OsString::from("native=");
             root.push(&s);
-            root.push("/lib");
+            root.push("/lib/wasm32-wasi");
             cmd.arg("-L").arg(&root);
         }
 
-        // Pass down extra flags, commonly used to configure `-Clinker` when
-        // cross compiling.
-        if let Ok(s) = env::var("RUSTC_FLAGS") {
-            cmd.args(&s.split(" ").filter(|s| !s.is_empty()).collect::<Vec<_>>());
+        // Override linker if necessary.
+        if let Ok(target_linker) = env::var("RUSTC_TARGET_LINKER") {
+            cmd.arg(format!("-Clinker={}", target_linker));
         }
 
-        // Pass down incremental directory, if any.
-        if let Ok(dir) = env::var("RUSTC_INCREMENTAL") {
-            cmd.arg(format!("-Zincremental={}", dir));
-
-            if verbose > 0 {
-                cmd.arg("-Zincremental-info");
-            }
-        }
-
-        let crate_name = args.windows(2)
-            .find(|a| &*a[0] == "--crate-name")
-            .unwrap();
-        let crate_name = &*crate_name[1];
+        let crate_name = maybe_crate_name.unwrap();
+        maybe_crate = Some(crate_name);
 
         // If we're compiling specifically the `panic_abort` crate then we pass
         // the `-C panic=abort` option. Note that we do not do this for any
@@ -161,11 +189,6 @@ fn main() {
 
         // Set various options from config.toml to configure how we're building
         // code.
-        if env::var("RUSTC_DEBUGINFO") == Ok("true".to_string()) {
-            cmd.arg("-g");
-        } else if env::var("RUSTC_DEBUGINFO_LINES") == Ok("true".to_string()) {
-            cmd.arg("-Cdebuginfo=1");
-        }
         let debug_assertions = match env::var("RUSTC_DEBUG_ASSERTIONS") {
             Ok(s) => if s == "true" { "y" } else { "n" },
             Err(..) => "n",
@@ -187,7 +210,8 @@ fn main() {
         if env::var("RUSTC_SAVE_ANALYSIS") == Ok("api".to_string()) {
             cmd.arg("-Zsave-analysis");
             cmd.env("RUST_SAVE_ANALYSIS_CONFIG",
-                    "{\"output_file\": null,\"full_docs\": false,\"pub_only\": true,\
+                    "{\"output_file\": null,\"full_docs\": false,\
+                     \"pub_only\": true,\"reachable_only\": false,\
                      \"distro_crate\": true,\"signatures\": false,\"borrow_data\": false}");
         }
 
@@ -227,7 +251,9 @@ fn main() {
                 // flesh out rpath support more fully in the future.
                 cmd.arg("-Z").arg("osx-rpath-install-name");
                 Some("-Wl,-rpath,@loader_path/../lib")
-            } else if !target.contains("windows") {
+            } else if !target.contains("windows") &&
+                      !target.contains("wasm32") &&
+                      !target.contains("fuchsia") {
                 Some("-Wl,-rpath,$ORIGIN/../lib")
             } else {
                 None
@@ -248,56 +274,116 @@ fn main() {
 
         // When running miri tests, we need to generate MIR for all libraries
         if env::var("TEST_MIRI").ok().map_or(false, |val| val == "true") {
+            // The flags here should be kept in sync with `add_miri_default_args`
+            // in miri's `src/lib.rs`.
             cmd.arg("-Zalways-encode-mir");
-            cmd.arg("-Zmir-emit-validate=1");
+            cmd.arg("--cfg=miri");
+            // These options are preferred by miri, to be able to perform better validation,
+            // but the bootstrap compiler might not understand them.
+            if stage != "0" {
+                cmd.arg("-Zmir-emit-retag");
+                cmd.arg("-Zmir-opt-level=0");
+            }
         }
 
-        // Force all crates compiled by this compiler to (a) be unstable and (b)
-        // allow the `rustc_private` feature to link to other unstable crates
-        // also in the sysroot.
-        if env::var_os("RUSTC_FORCE_UNSTABLE").is_some() {
-            cmd.arg("-Z").arg("force-unstable-if-unmarked");
+        if let Ok(map) = env::var("RUSTC_DEBUGINFO_MAP") {
+            cmd.arg("--remap-path-prefix").arg(&map);
+        }
+    } else {
+        // Override linker if necessary.
+        if let Ok(host_linker) = env::var("RUSTC_HOST_LINKER") {
+            cmd.arg(format!("-Clinker={}", host_linker));
+        }
+
+        if let Ok(s) = env::var("RUSTC_HOST_CRT_STATIC") {
+            if s == "true" {
+                cmd.arg("-C").arg("target-feature=+crt-static");
+            }
+            if s == "false" {
+                cmd.arg("-C").arg("target-feature=-crt-static");
+            }
         }
     }
 
-    let color = match env::var("RUSTC_COLOR") {
-        Ok(s) => usize::from_str(&s).expect("RUSTC_COLOR should be an integer"),
-        Err(_) => 0,
-    };
+    // This is required for internal lints.
+    cmd.arg("-Zunstable-options");
 
-    if color != 0 {
-        cmd.arg("--color=always");
+    // Force all crates compiled by this compiler to (a) be unstable and (b)
+    // allow the `rustc_private` feature to link to other unstable crates
+    // also in the sysroot. We also do this for host crates, since those
+    // may be proc macros, in which case we might ship them.
+    if env::var_os("RUSTC_FORCE_UNSTABLE").is_some() && (stage != "0" || target.is_some()) {
+        cmd.arg("-Z").arg("force-unstable-if-unmarked");
+    }
+
+    if env::var_os("RUSTC_PARALLEL_COMPILER").is_some() {
+        cmd.arg("--cfg").arg("parallel_compiler");
+    }
+
+    if env::var_os("RUSTC_DENY_WARNINGS").is_some() && env::var_os("RUSTC_EXTERNAL_TOOL").is_none()
+    {
+        cmd.arg("-Dwarnings");
+        cmd.arg("-Dbare_trait_objects");
+        cmd.arg("-Drust_2018_idioms");
     }
 
     if verbose > 1 {
-        writeln!(&mut io::stderr(), "rustc command: {:?}", cmd).unwrap();
+        eprintln!(
+            "rustc command: {:?}={:?} {:?}",
+            bootstrap::util::dylib_path_var(),
+            env::join_paths(&dylib_path).unwrap(),
+            cmd,
+        );
+        eprintln!("sysroot: {:?}", sysroot);
+        eprintln!("libdir: {:?}", libdir);
     }
 
-    // Actually run the compiler!
-    std::process::exit(if let Some(ref mut on_fail) = on_fail {
-        match cmd.status() {
-            Ok(s) if s.success() => 0,
-            _ => {
-                println!("\nDid not run successfully:\n{:?}\n-------------", cmd);
-                exec_cmd(on_fail).expect("could not run the backup command");
-                1
+    if let Some(mut on_fail) = on_fail {
+        let e = match cmd.status() {
+            Ok(s) if s.success() => std::process::exit(0),
+            e => e,
+        };
+        println!("\nDid not run successfully: {:?}\n{:?}\n-------------", e, cmd);
+        exec_cmd(&mut on_fail).expect("could not run the backup command");
+        std::process::exit(1);
+    }
+
+    if env::var_os("RUSTC_PRINT_STEP_TIMINGS").is_some() {
+        if let Some(krate) = maybe_crate {
+            let start = Instant::now();
+            let status = cmd
+                .status()
+                .unwrap_or_else(|_| panic!("\n\n failed to run {:?}", cmd));
+            let dur = start.elapsed();
+
+            let is_test = args.iter().any(|a| a == "--test");
+            eprintln!("[RUSTC-TIMING] {} test:{} {}.{:03}",
+                      krate.to_string_lossy(),
+                      is_test,
+                      dur.as_secs(),
+                      dur.subsec_nanos() / 1_000_000);
+
+            match status.code() {
+                Some(i) => std::process::exit(i),
+                None => {
+                    eprintln!("rustc exited with {}", status);
+                    std::process::exit(0xfe);
+                }
             }
         }
-    } else {
-        std::process::exit(match exec_cmd(&mut cmd) {
-            Ok(s) => s.code().unwrap_or(0xfe),
-            Err(e) => panic!("\n\nfailed to run {:?}: {}\n\n", cmd, e),
-        })
-    })
+    }
+
+    let code = exec_cmd(&mut cmd).unwrap_or_else(|_| panic!("\n\n failed to run {:?}", cmd));
+    std::process::exit(code);
 }
 
 #[cfg(unix)]
-fn exec_cmd(cmd: &mut Command) -> ::std::io::Result<ExitStatus> {
+fn exec_cmd(cmd: &mut Command) -> io::Result<i32> {
     use std::os::unix::process::CommandExt;
     Err(cmd.exec())
 }
 
 #[cfg(not(unix))]
-fn exec_cmd(cmd: &mut Command) -> ::std::io::Result<ExitStatus> {
-    cmd.status()
+fn exec_cmd(cmd: &mut Command) -> io::Result<i32> {
+    cmd.status().map(|status| status.code().unwrap())
 }

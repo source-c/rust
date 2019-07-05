@@ -1,17 +1,13 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-//! Experimental extensions to `std` for Unix platforms.
+//! Platform-specific extensions to `std` for Unix platforms.
 //!
-//! For now, this module is limited to extracting file descriptors,
-//! but its functionality will grow over time.
+//! Provides access to platform-level information on Unix platforms, and
+//! exposes Unix-specific functions that would otherwise be inappropriate as
+//! part of the core `std` library.
+//!
+//! It exposes more ways to deal with platform-specific strings (`OsStr`,
+//! `OsString`), allows to set permissions more granularly, extract low-level
+//! file descriptors from files and sockets, and has platform-specific helpers
+//! for spawning processes.
 //!
 //! # Examples
 //!
@@ -29,6 +25,7 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 #![doc(cfg(unix))]
+#![allow(missing_docs)]
 
 pub mod io;
 pub mod ffi;

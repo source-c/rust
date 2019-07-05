@@ -1,12 +1,3 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
 // ignore-tidy-linelength
 
 #![feature(on_unimplemented)]
@@ -19,16 +10,17 @@ trait Foo<Bar, Baz, Quux>
 
 #[rustc_on_unimplemented="a collection of type `{Self}` cannot be built from an iterator over elements of type `{A}`"]
 trait MyFromIterator<A> {
-    /// Build a container with elements from an external iterator.
+    /// Builds a container with elements from an external iterator.
     fn my_from_iter<T: Iterator<Item=A>>(iterator: T) -> Self;
 }
 
-#[rustc_on_unimplemented] //~ ERROR this attribute must have a value
+#[rustc_on_unimplemented]
+//~^ ERROR malformed `rustc_on_unimplemented` attribute
 trait BadAnnotation1
 {}
 
 #[rustc_on_unimplemented = "Unimplemented trait error on `{Self}` with params `<{A},{B},{C}>`"]
-//~^ ERROR there is no type parameter C on trait BadAnnotation2
+//~^ ERROR there is no parameter `C` on trait `BadAnnotation2`
 trait BadAnnotation2<A,B>
 {}
 
@@ -38,27 +30,34 @@ trait BadAnnotation3<A,B>
 {}
 
 #[rustc_on_unimplemented(lorem="")]
+//~^ this attribute must have a valid
 trait BadAnnotation4 {}
 
 #[rustc_on_unimplemented(lorem(ipsum(dolor)))]
+//~^ this attribute must have a valid
 trait BadAnnotation5 {}
 
 #[rustc_on_unimplemented(message="x", message="y")]
+//~^ this attribute must have a valid
 trait BadAnnotation6 {}
 
 #[rustc_on_unimplemented(message="x", on(desugared, message="y"))]
+//~^ this attribute must have a valid
 trait BadAnnotation7 {}
 
 #[rustc_on_unimplemented(on(), message="y")]
+//~^ empty `on`-clause
 trait BadAnnotation8 {}
 
 #[rustc_on_unimplemented(on="x", message="y")]
+//~^ this attribute must have a valid
 trait BadAnnotation9 {}
 
 #[rustc_on_unimplemented(on(x="y"), message="y")]
 trait BadAnnotation10 {}
 
 #[rustc_on_unimplemented(on(desugared, on(desugared, message="x")), message="y")]
+//~^ this attribute must have a valid
 trait BadAnnotation11 {}
 
 pub fn main() {

@@ -1,22 +1,13 @@
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Buffering wrappers for I/O traits
 
-use io::prelude::*;
+use crate::io::prelude::*;
 
-use cmp;
-use error;
-use fmt;
-use io::{self, Initializer, DEFAULT_BUF_SIZE, Error, ErrorKind, SeekFrom};
-use memchr;
+use crate::cmp;
+use crate::error;
+use crate::fmt;
+use crate::io::{self, Initializer, DEFAULT_BUF_SIZE, Error, ErrorKind, SeekFrom, IoSlice,
+        IoSliceMut};
+use crate::memchr;
 
 /// The `BufReader` struct adds buffering to any reader.
 ///
@@ -25,26 +16,36 @@ use memchr;
 /// results in a system call. A `BufReader` performs large, infrequent reads on
 /// the underlying [`Read`] and maintains an in-memory buffer of the results.
 ///
+/// `BufReader` can improve the speed of programs that make *small* and
+/// *repeated* read calls to the same file or network socket. It does not
+/// help when reading very large amounts at once, or reading just one or a few
+/// times. It also provides no advantage when reading from a source that is
+/// already in memory, like a `Vec<u8>`.
+///
+/// When the `BufReader` is dropped, the contents of its buffer will be
+/// discarded. Creating multiple instances of a `BufReader` on the same
+/// stream can cause data loss.
+///
 /// [`Read`]: ../../std/io/trait.Read.html
 /// [`TcpStream::read`]: ../../std/net/struct.TcpStream.html#method.read
 /// [`TcpStream`]: ../../std/net/struct.TcpStream.html
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use std::io::prelude::*;
 /// use std::io::BufReader;
 /// use std::fs::File;
 ///
-/// # fn foo() -> std::io::Result<()> {
-/// let f = File::open("log.txt")?;
-/// let mut reader = BufReader::new(f);
+/// fn main() -> std::io::Result<()> {
+///     let f = File::open("log.txt")?;
+///     let mut reader = BufReader::new(f);
 ///
-/// let mut line = String::new();
-/// let len = reader.read_line(&mut line)?;
-/// println!("First line is {} bytes long", len);
-/// # Ok(())
-/// # }
+///     let mut line = String::new();
+///     let len = reader.read_line(&mut line)?;
+///     println!("First line is {} bytes long", len);
+///     Ok(())
+/// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct BufReader<R> {
@@ -55,19 +56,20 @@ pub struct BufReader<R> {
 }
 
 impl<R: Read> BufReader<R> {
-    /// Creates a new `BufReader` with a default buffer capacity.
+    /// Creates a new `BufReader` with a default buffer capacity. The default is currently 8 KB,
+    /// but may change in the future.
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::io::BufReader;
     /// use std::fs::File;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let f = File::open("log.txt")?;
-    /// let reader = BufReader::new(f);
-    /// # Ok(())
-    /// # }
+    /// fn main() -> std::io::Result<()> {
+    ///     let f = File::open("log.txt")?;
+    ///     let reader = BufReader::new(f);
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn new(inner: R) -> BufReader<R> {
@@ -80,21 +82,21 @@ impl<R: Read> BufReader<R> {
     ///
     /// Creating a buffer with ten bytes of capacity:
     ///
-    /// ```
+    /// ```no_run
     /// use std::io::BufReader;
     /// use std::fs::File;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let f = File::open("log.txt")?;
-    /// let reader = BufReader::with_capacity(10, f);
-    /// # Ok(())
-    /// # }
+    /// fn main() -> std::io::Result<()> {
+    ///     let f = File::open("log.txt")?;
+    ///     let reader = BufReader::with_capacity(10, f);
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn with_capacity(cap: usize, inner: R) -> BufReader<R> {
+    pub fn with_capacity(capacity: usize, inner: R) -> BufReader<R> {
         unsafe {
-            let mut buffer = Vec::with_capacity(cap);
-            buffer.set_len(cap);
+            let mut buffer = Vec::with_capacity(capacity);
+            buffer.set_len(capacity);
             inner.initializer().initialize(&mut buffer);
             BufReader {
                 inner,
@@ -104,24 +106,26 @@ impl<R: Read> BufReader<R> {
             }
         }
     }
+}
 
+impl<R> BufReader<R> {
     /// Gets a reference to the underlying reader.
     ///
     /// It is inadvisable to directly read from the underlying reader.
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::io::BufReader;
     /// use std::fs::File;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let f1 = File::open("log.txt")?;
-    /// let reader = BufReader::new(f1);
+    /// fn main() -> std::io::Result<()> {
+    ///     let f1 = File::open("log.txt")?;
+    ///     let reader = BufReader::new(f1);
     ///
-    /// let f2 = reader.get_ref();
-    /// # Ok(())
-    /// # }
+    ///     let f2 = reader.get_ref();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn get_ref(&self) -> &R { &self.inner }
@@ -132,20 +136,46 @@ impl<R: Read> BufReader<R> {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::io::BufReader;
     /// use std::fs::File;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let f1 = File::open("log.txt")?;
-    /// let mut reader = BufReader::new(f1);
+    /// fn main() -> std::io::Result<()> {
+    ///     let f1 = File::open("log.txt")?;
+    ///     let mut reader = BufReader::new(f1);
     ///
-    /// let f2 = reader.get_mut();
-    /// # Ok(())
-    /// # }
+    ///     let f2 = reader.get_mut();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn get_mut(&mut self) -> &mut R { &mut self.inner }
+
+    /// Returns a reference to the internally buffered data.
+    ///
+    /// Unlike `fill_buf`, this will not attempt to fill the buffer if it is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::io::{BufReader, BufRead};
+    /// use std::fs::File;
+    ///
+    /// fn main() -> std::io::Result<()> {
+    ///     let f = File::open("log.txt")?;
+    ///     let mut reader = BufReader::new(f);
+    ///     assert!(reader.buffer().is_empty());
+    ///
+    ///     if reader.fill_buf()?.len() > 0 {
+    ///         assert!(!reader.buffer().is_empty());
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    #[stable(feature = "bufreader_buffer", since = "1.37.0")]
+    pub fn buffer(&self) -> &[u8] {
+        &self.buf[self.pos..self.cap]
+    }
 
     /// Unwraps this `BufReader`, returning the underlying reader.
     ///
@@ -153,20 +183,52 @@ impl<R: Read> BufReader<R> {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::io::BufReader;
     /// use std::fs::File;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let f1 = File::open("log.txt")?;
-    /// let reader = BufReader::new(f1);
+    /// fn main() -> std::io::Result<()> {
+    ///     let f1 = File::open("log.txt")?;
+    ///     let reader = BufReader::new(f1);
     ///
-    /// let f2 = reader.into_inner();
-    /// # Ok(())
-    /// # }
+    ///     let f2 = reader.into_inner();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn into_inner(self) -> R { self.inner }
+
+    /// Invalidates all data in the internal buffer.
+    #[inline]
+    fn discard_buffer(&mut self) {
+        self.pos = 0;
+        self.cap = 0;
+    }
+}
+
+impl<R: Seek> BufReader<R> {
+    /// Seeks relative to the current position. If the new position lies within the buffer,
+    /// the buffer will not be flushed, allowing for more efficient seeks.
+    /// This method does not return the location of the underlying reader, so the caller
+    /// must track this information themselves if it is required.
+    #[unstable(feature = "bufreader_seek_relative", issue = "31100")]
+    pub fn seek_relative(&mut self, offset: i64) -> io::Result<()> {
+        let pos = self.pos as u64;
+        if offset < 0 {
+            if let Some(new_pos) = pos.checked_sub((-offset) as u64) {
+                self.pos = new_pos as usize;
+                return Ok(())
+            }
+        } else {
+            if let Some(new_pos) = pos.checked_add(offset as u64) {
+                if new_pos <= self.cap as u64 {
+                    self.pos = new_pos as usize;
+                    return Ok(())
+                }
+            }
+        }
+        self.seek(SeekFrom::Current(offset)).map(|_|())
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -176,11 +238,26 @@ impl<R: Read> Read for BufReader<R> {
         // (larger than our internal buffer), bypass our internal buffer
         // entirely.
         if self.pos == self.cap && buf.len() >= self.buf.len() {
+            self.discard_buffer();
             return self.inner.read(buf);
         }
         let nread = {
             let mut rem = self.fill_buf()?;
             rem.read(buf)?
+        };
+        self.consume(nread);
+        Ok(nread)
+    }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        let total_len = bufs.iter().map(|b| b.len()).sum::<usize>();
+        if self.pos == self.cap && total_len >= self.buf.len() {
+            self.discard_buffer();
+            return self.inner.read_vectored(bufs);
+        }
+        let nread = {
+            let mut rem = self.fill_buf()?;
+            rem.read_vectored(bufs)?
         };
         self.consume(nread);
         Ok(nread)
@@ -214,7 +291,7 @@ impl<R: Read> BufRead for BufReader<R> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<R> fmt::Debug for BufReader<R> where R: fmt::Debug {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt.debug_struct("BufReader")
             .field("reader", &self.inner)
             .field("buffer", &format_args!("{}/{}", self.cap - self.pos, self.buf.len()))
@@ -235,13 +312,18 @@ impl<R: Seek> Seek for BufReader<R> {
     /// `.into_inner()` immediately after a seek yields the underlying reader
     /// at the same position.
     ///
-    /// See `std::io::Seek` for more details.
+    /// To seek without discarding the internal buffer, use [`BufReader::seek_relative`].
+    ///
+    /// See [`std::io::Seek`] for more details.
     ///
     /// Note: In the edge case where you're seeking with `SeekFrom::Current(n)`
-    /// where `n` minus the internal buffer length underflows an `i64`, two
+    /// where `n` minus the internal buffer length overflows an `i64`, two
     /// seeks will be performed instead of one. If the second seek returns
     /// `Err`, the underlying reader will be left at the same position it would
-    /// have if you seeked to `SeekFrom::Current(0)`.
+    /// have if you called `seek` with `SeekFrom::Current(0)`.
+    ///
+    /// [`BufReader::seek_relative`]: struct.BufReader.html#method.seek_relative
+    /// [`std::io::Seek`]: trait.Seek.html
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let result: u64;
         if let SeekFrom::Current(n) = pos {
@@ -256,14 +338,14 @@ impl<R: Seek> Seek for BufReader<R> {
             } else {
                 // seek backwards by our remainder, and then by the offset
                 self.inner.seek(SeekFrom::Current(-remainder))?;
-                self.pos = self.cap; // empty the buffer
+                self.discard_buffer();
                 result = self.inner.seek(SeekFrom::Current(n))?;
             }
         } else {
             // Seeking with Start/End doesn't care about our buffer length.
             result = self.inner.seek(pos)?;
         }
-        self.pos = self.cap; // empty the buffer
+        self.discard_buffer();
         Ok(result)
     }
 }
@@ -272,9 +354,15 @@ impl<R: Seek> Seek for BufReader<R> {
 ///
 /// It can be excessively inefficient to work directly with something that
 /// implements [`Write`]. For example, every call to
-/// [`write`][`Tcpstream::write`] on [`TcpStream`] results in a system call. A
+/// [`write`][`TcpStream::write`] on [`TcpStream`] results in a system call. A
 /// `BufWriter` keeps an in-memory buffer of data and writes it to an underlying
 /// writer in large, infrequent batches.
+///
+/// `BufWriter` can improve the speed of programs that make *small* and
+/// *repeated* write calls to the same file or network socket. It does not
+/// help when writing very large amounts at once, or writing just one or a few
+/// times. It also provides no advantage when writing to a destination that is
+/// in memory, like a `Vec<u8>`.
 ///
 /// When the `BufWriter` is dropped, the contents of its buffer will be written
 /// out. However, any errors that happen in the process of flushing the buffer
@@ -291,8 +379,8 @@ impl<R: Seek> Seek for BufReader<R> {
 ///
 /// let mut stream = TcpStream::connect("127.0.0.1:34254").unwrap();
 ///
-/// for i in 1..10 {
-///     stream.write(&[i]).unwrap();
+/// for i in 0..10 {
+///     stream.write(&[i+1]).unwrap();
 /// }
 /// ```
 ///
@@ -307,8 +395,8 @@ impl<R: Seek> Seek for BufReader<R> {
 ///
 /// let mut stream = BufWriter::new(TcpStream::connect("127.0.0.1:34254").unwrap());
 ///
-/// for i in 1..10 {
-///     stream.write(&[i]).unwrap();
+/// for i in 0..10 {
+///     stream.write(&[i+1]).unwrap();
 /// }
 /// ```
 ///
@@ -317,7 +405,7 @@ impl<R: Seek> Seek for BufReader<R> {
 /// the `stream` is dropped.
 ///
 /// [`Write`]: ../../std/io/trait.Write.html
-/// [`Tcpstream::write`]: ../../std/net/struct.TcpStream.html#method.write
+/// [`TcpStream::write`]: ../../std/net/struct.TcpStream.html#method.write
 /// [`TcpStream`]: ../../std/net/struct.TcpStream.html
 /// [`flush`]: #method.flush
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -359,7 +447,8 @@ pub struct BufWriter<W: Write> {
 pub struct IntoInnerError<W>(W, Error);
 
 impl<W: Write> BufWriter<W> {
-    /// Creates a new `BufWriter` with a default buffer capacity.
+    /// Creates a new `BufWriter` with a default buffer capacity. The default is currently 8 KB,
+    /// but may change in the future.
     ///
     /// # Examples
     ///
@@ -388,10 +477,10 @@ impl<W: Write> BufWriter<W> {
     /// let mut buffer = BufWriter::with_capacity(100, stream);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn with_capacity(cap: usize, inner: W) -> BufWriter<W> {
+    pub fn with_capacity(capacity: usize, inner: W) -> BufWriter<W> {
         BufWriter {
             inner: Some(inner),
-            buf: Vec::with_capacity(cap),
+            buf: Vec::with_capacity(capacity),
             panicked: false,
         }
     }
@@ -457,9 +546,31 @@ impl<W: Write> BufWriter<W> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn get_mut(&mut self) -> &mut W { self.inner.as_mut().unwrap() }
 
+    /// Returns a reference to the internally buffered data.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::io::BufWriter;
+    /// use std::net::TcpStream;
+    ///
+    /// let buf_writer = BufWriter::new(TcpStream::connect("127.0.0.1:34254").unwrap());
+    ///
+    /// // See how many bytes are currently buffered
+    /// let bytes_buffered = buf_writer.buffer().len();
+    /// ```
+    #[stable(feature = "bufreader_buffer", since = "1.37.0")]
+    pub fn buffer(&self) -> &[u8] {
+        &self.buf
+    }
+
     /// Unwraps this `BufWriter`, returning the underlying writer.
     ///
     /// The buffer is written out before returning the writer.
+    ///
+    /// # Errors
+    ///
+    /// An `Err` will be returned if an error occurs while flushing the buffer.
     ///
     /// # Examples
     ///
@@ -489,13 +600,29 @@ impl<W: Write> Write for BufWriter<W> {
         }
         if buf.len() >= self.buf.capacity() {
             self.panicked = true;
-            let r = self.inner.as_mut().unwrap().write(buf);
+            let r = self.get_mut().write(buf);
             self.panicked = false;
             r
         } else {
-            Write::write(&mut self.buf, buf)
+            self.buf.write(buf)
         }
     }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        let total_len = bufs.iter().map(|b| b.len()).sum::<usize>();
+        if self.buf.len() + total_len > self.buf.capacity() {
+            self.flush_buf()?;
+        }
+        if total_len >= self.buf.capacity() {
+            self.panicked = true;
+            let r = self.get_mut().write_vectored(bufs);
+            self.panicked = false;
+            r
+        } else {
+            self.buf.write_vectored(bufs)
+        }
+    }
+
     fn flush(&mut self) -> io::Result<()> {
         self.flush_buf().and_then(|()| self.get_mut().flush())
     }
@@ -503,7 +630,7 @@ impl<W: Write> Write for BufWriter<W> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<W: Write> fmt::Debug for BufWriter<W> where W: fmt::Debug {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt.debug_struct("BufWriter")
             .field("writer", &self.inner.as_ref().unwrap())
             .field("buffer", &format_args!("{}/{}", self.buf.len(), self.buf.capacity()))
@@ -611,7 +738,7 @@ impl<W: Send + fmt::Debug> error::Error for IntoInnerError<W> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<W> fmt::Display for IntoInnerError<W> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.error().fmt(f)
     }
 }
@@ -625,6 +752,9 @@ impl<W> fmt::Display for IntoInnerError<W> {
 /// completed, rather than the entire buffer at once. Enter `LineWriter`. It
 /// does exactly that.
 ///
+/// Like [`BufWriter`][bufwriter], a `LineWriter`’s buffer will also be flushed when the
+/// `LineWriter` goes out of scope or when its internal buffer is full.
+///
 /// [bufwriter]: struct.BufWriter.html
 ///
 /// If there's still a partial line in the buffer when the `LineWriter` is
@@ -635,34 +765,47 @@ impl<W> fmt::Display for IntoInnerError<W> {
 /// We can use `LineWriter` to write one line at a time, significantly
 /// reducing the number of actual writes to the file.
 ///
-/// ```
-/// use std::fs::File;
+/// ```no_run
+/// use std::fs::{self, File};
 /// use std::io::prelude::*;
 /// use std::io::LineWriter;
 ///
-/// # fn foo() -> std::io::Result<()> {
-/// let road_not_taken = b"I shall be telling this with a sigh
+/// fn main() -> std::io::Result<()> {
+///     let road_not_taken = b"I shall be telling this with a sigh
 /// Somewhere ages and ages hence:
 /// Two roads diverged in a wood, and I -
 /// I took the one less traveled by,
 /// And that has made all the difference.";
 ///
-/// let file = File::create("poem.txt")?;
-/// let mut file = LineWriter::new(file);
+///     let file = File::create("poem.txt")?;
+///     let mut file = LineWriter::new(file);
 ///
-/// for &byte in road_not_taken.iter() {
-///    file.write(&[byte]).unwrap();
+///     file.write_all(b"I shall be telling this with a sigh")?;
+///
+///     // No bytes are written until a newline is encountered (or
+///     // the internal buffer is filled).
+///     assert_eq!(fs::read_to_string("poem.txt")?, "");
+///     file.write_all(b"\n")?;
+///     assert_eq!(
+///         fs::read_to_string("poem.txt")?,
+///         "I shall be telling this with a sigh\n",
+///     );
+///
+///     // Write the rest of the poem.
+///     file.write_all(b"Somewhere ages and ages hence:
+/// Two roads diverged in a wood, and I -
+/// I took the one less traveled by,
+/// And that has made all the difference.")?;
+///
+///     // The last line of the poem doesn't end in a newline, so
+///     // we have to flush or drop the `LineWriter` to finish
+///     // writing.
+///     file.flush()?;
+///
+///     // Confirm the whole poem was written.
+///     assert_eq!(fs::read("poem.txt")?, &road_not_taken[..]);
+///     Ok(())
 /// }
-///
-/// // let's check we did the right thing.
-/// let mut file = File::open("poem.txt")?;
-/// let mut contents = String::new();
-///
-/// file.read_to_string(&mut contents)?;
-///
-/// assert_eq!(contents.as_bytes(), &road_not_taken[..]);
-/// # Ok(())
-/// # }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct LineWriter<W: Write> {
@@ -675,15 +818,15 @@ impl<W: Write> LineWriter<W> {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::fs::File;
     /// use std::io::LineWriter;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let file = File::create("poem.txt")?;
-    /// let file = LineWriter::new(file);
-    /// # Ok(())
-    /// # }
+    /// fn main() -> std::io::Result<()> {
+    ///     let file = File::create("poem.txt")?;
+    ///     let file = LineWriter::new(file);
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn new(inner: W) -> LineWriter<W> {
@@ -696,20 +839,20 @@ impl<W: Write> LineWriter<W> {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::fs::File;
     /// use std::io::LineWriter;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let file = File::create("poem.txt")?;
-    /// let file = LineWriter::with_capacity(100, file);
-    /// # Ok(())
-    /// # }
+    /// fn main() -> std::io::Result<()> {
+    ///     let file = File::create("poem.txt")?;
+    ///     let file = LineWriter::with_capacity(100, file);
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn with_capacity(cap: usize, inner: W) -> LineWriter<W> {
+    pub fn with_capacity(capacity: usize, inner: W) -> LineWriter<W> {
         LineWriter {
-            inner: BufWriter::with_capacity(cap, inner),
+            inner: BufWriter::with_capacity(capacity, inner),
             need_flush: false,
         }
     }
@@ -718,17 +861,17 @@ impl<W: Write> LineWriter<W> {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::fs::File;
     /// use std::io::LineWriter;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let file = File::create("poem.txt")?;
-    /// let file = LineWriter::new(file);
+    /// fn main() -> std::io::Result<()> {
+    ///     let file = File::create("poem.txt")?;
+    ///     let file = LineWriter::new(file);
     ///
-    /// let reference = file.get_ref();
-    /// # Ok(())
-    /// # }
+    ///     let reference = file.get_ref();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn get_ref(&self) -> &W { self.inner.get_ref() }
@@ -740,18 +883,18 @@ impl<W: Write> LineWriter<W> {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::fs::File;
     /// use std::io::LineWriter;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let file = File::create("poem.txt")?;
-    /// let mut file = LineWriter::new(file);
+    /// fn main() -> std::io::Result<()> {
+    ///     let file = File::create("poem.txt")?;
+    ///     let mut file = LineWriter::new(file);
     ///
-    /// // we can use reference just like file
-    /// let reference = file.get_mut();
-    /// # Ok(())
-    /// # }
+    ///     // we can use reference just like file
+    ///     let reference = file.get_mut();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn get_mut(&mut self) -> &mut W { self.inner.get_mut() }
@@ -760,20 +903,24 @@ impl<W: Write> LineWriter<W> {
     ///
     /// The internal buffer is written out before returning the writer.
     ///
+    /// # Errors
+    ///
+    /// An `Err` will be returned if an error occurs while flushing the buffer.
+    ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::fs::File;
     /// use std::io::LineWriter;
     ///
-    /// # fn foo() -> std::io::Result<()> {
-    /// let file = File::create("poem.txt")?;
+    /// fn main() -> std::io::Result<()> {
+    ///     let file = File::create("poem.txt")?;
     ///
-    /// let writer: LineWriter<File> = LineWriter::new(file);
+    ///     let writer: LineWriter<File> = LineWriter::new(file);
     ///
-    /// let file: File = writer.into_inner()?;
-    /// # Ok(())
-    /// # }
+    ///     let file: File = writer.into_inner()?;
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn into_inner(self) -> Result<W, IntoInnerError<LineWriter<W>>> {
@@ -795,7 +942,7 @@ impl<W: Write> Write for LineWriter<W> {
 
         // Find the last newline character in the buffer provided. If found then
         // we're going to write all the data up to that point and then flush,
-        // otherewise we just write the whole block to the underlying writer.
+        // otherwise we just write the whole block to the underlying writer.
         let i = match memchr::memrchr(b'\n', buf) {
             Some(i) => i,
             None => return self.inner.write(buf),
@@ -807,7 +954,7 @@ impl<W: Write> Write for LineWriter<W> {
         // some data then we *must* report that we wrote that data, so future
         // errors are ignored. We set our internal `need_flush` flag, though, in
         // case flushing fails and we need to try it first next time.
-        let n = self.inner.write(&buf[..i + 1])?;
+        let n = self.inner.write(&buf[..=i])?;
         self.need_flush = true;
         if self.flush().is_err() || n != i + 1 {
             return Ok(n)
@@ -833,7 +980,7 @@ impl<W: Write> Write for LineWriter<W> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<W: Write> fmt::Debug for LineWriter<W> where W: fmt::Debug {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt.debug_struct("LineWriter")
             .field("writer", &self.inner.inner)
             .field("buffer",
@@ -844,11 +991,10 @@ impl<W: Write> fmt::Debug for LineWriter<W> where W: fmt::Debug {
 
 #[cfg(test)]
 mod tests {
-    use io::prelude::*;
-    use io::{self, BufReader, BufWriter, LineWriter, SeekFrom};
-    use sync::atomic::{AtomicUsize, Ordering};
-    use thread;
-    use test;
+    use crate::io::prelude::*;
+    use crate::io::{self, BufReader, BufWriter, LineWriter, SeekFrom};
+    use crate::sync::atomic::{AtomicUsize, Ordering};
+    use crate::thread;
 
     /// A dummy reader intended at testing short-reads propagation.
     pub struct ShortReader {
@@ -873,31 +1019,31 @@ mod tests {
         let mut buf = [0, 0, 0];
         let nread = reader.read(&mut buf);
         assert_eq!(nread.unwrap(), 3);
-        let b: &[_] = &[5, 6, 7];
-        assert_eq!(buf, b);
+        assert_eq!(buf, [5, 6, 7]);
+        assert_eq!(reader.buffer(), []);
 
         let mut buf = [0, 0];
         let nread = reader.read(&mut buf);
         assert_eq!(nread.unwrap(), 2);
-        let b: &[_] = &[0, 1];
-        assert_eq!(buf, b);
+        assert_eq!(buf, [0, 1]);
+        assert_eq!(reader.buffer(), []);
 
         let mut buf = [0];
         let nread = reader.read(&mut buf);
         assert_eq!(nread.unwrap(), 1);
-        let b: &[_] = &[2];
-        assert_eq!(buf, b);
+        assert_eq!(buf, [2]);
+        assert_eq!(reader.buffer(), [3]);
 
         let mut buf = [0, 0, 0];
         let nread = reader.read(&mut buf);
         assert_eq!(nread.unwrap(), 1);
-        let b: &[_] = &[3, 0, 0];
-        assert_eq!(buf, b);
+        assert_eq!(buf, [3, 0, 0]);
+        assert_eq!(reader.buffer(), []);
 
         let nread = reader.read(&mut buf);
         assert_eq!(nread.unwrap(), 1);
-        let b: &[_] = &[4, 0, 0];
-        assert_eq!(buf, b);
+        assert_eq!(buf, [4, 0, 0]);
+        assert_eq!(reader.buffer(), []);
 
         assert_eq!(reader.read(&mut buf).unwrap(), 0);
     }
@@ -915,6 +1061,57 @@ mod tests {
         assert_eq!(reader.fill_buf().ok(), Some(&[1, 2][..]));
         reader.consume(1);
         assert_eq!(reader.seek(SeekFrom::Current(-2)).ok(), Some(3));
+    }
+
+    #[test]
+    fn test_buffered_reader_seek_relative() {
+        let inner: &[u8] = &[5, 6, 7, 0, 1, 2, 3, 4];
+        let mut reader = BufReader::with_capacity(2, io::Cursor::new(inner));
+
+        assert!(reader.seek_relative(3).is_ok());
+        assert_eq!(reader.fill_buf().ok(), Some(&[0, 1][..]));
+        assert!(reader.seek_relative(0).is_ok());
+        assert_eq!(reader.fill_buf().ok(), Some(&[0, 1][..]));
+        assert!(reader.seek_relative(1).is_ok());
+        assert_eq!(reader.fill_buf().ok(), Some(&[1][..]));
+        assert!(reader.seek_relative(-1).is_ok());
+        assert_eq!(reader.fill_buf().ok(), Some(&[0, 1][..]));
+        assert!(reader.seek_relative(2).is_ok());
+        assert_eq!(reader.fill_buf().ok(), Some(&[2, 3][..]));
+    }
+
+    #[test]
+    fn test_buffered_reader_invalidated_after_read() {
+        let inner: &[u8] = &[5, 6, 7, 0, 1, 2, 3, 4];
+        let mut reader = BufReader::with_capacity(3, io::Cursor::new(inner));
+
+        assert_eq!(reader.fill_buf().ok(), Some(&[5, 6, 7][..]));
+        reader.consume(3);
+
+        let mut buffer = [0, 0, 0, 0, 0];
+        assert_eq!(reader.read(&mut buffer).ok(), Some(5));
+        assert_eq!(buffer, [0, 1, 2, 3, 4]);
+
+        assert!(reader.seek_relative(-2).is_ok());
+        let mut buffer = [0, 0];
+        assert_eq!(reader.read(&mut buffer).ok(), Some(2));
+        assert_eq!(buffer, [3, 4]);
+    }
+
+    #[test]
+    fn test_buffered_reader_invalidated_after_seek() {
+        let inner: &[u8] = &[5, 6, 7, 0, 1, 2, 3, 4];
+        let mut reader = BufReader::with_capacity(3, io::Cursor::new(inner));
+
+        assert_eq!(reader.fill_buf().ok(), Some(&[5, 6, 7][..]));
+        reader.consume(3);
+
+        assert!(reader.seek(SeekFrom::Current(5)).is_ok());
+
+        assert!(reader.seek_relative(-2).is_ok());
+        let mut buffer = [0, 0];
+        assert_eq!(reader.read(&mut buffer).ok(), Some(2));
+        assert_eq!(buffer, [3, 4]);
     }
 
     #[test]
@@ -964,36 +1161,80 @@ mod tests {
     }
 
     #[test]
+    fn test_buffered_reader_seek_underflow_discard_buffer_between_seeks() {
+        // gimmick reader that returns Err after first seek
+        struct ErrAfterFirstSeekReader {
+            first_seek: bool,
+        }
+        impl Read for ErrAfterFirstSeekReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                for x in &mut *buf {
+                    *x = 0;
+                }
+                Ok(buf.len())
+            }
+        }
+        impl Seek for ErrAfterFirstSeekReader {
+            fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+                if self.first_seek {
+                    self.first_seek = false;
+                    Ok(0)
+                } else {
+                    Err(io::Error::new(io::ErrorKind::Other, "oh no!"))
+                }
+            }
+        }
+
+        let mut reader = BufReader::with_capacity(5, ErrAfterFirstSeekReader { first_seek: true });
+        assert_eq!(reader.fill_buf().ok(), Some(&[0, 0, 0, 0, 0][..]));
+
+        // The following seek will require two underlying seeks.  The first will
+        // succeed but the second will fail.  This should still invalidate the
+        // buffer.
+        assert!(reader.seek(SeekFrom::Current(i64::min_value())).is_err());
+        assert_eq!(reader.buffer().len(), 0);
+    }
+
+    #[test]
     fn test_buffered_writer() {
         let inner = Vec::new();
         let mut writer = BufWriter::with_capacity(2, inner);
 
         writer.write(&[0, 1]).unwrap();
+        assert_eq!(writer.buffer(), []);
         assert_eq!(*writer.get_ref(), [0, 1]);
 
         writer.write(&[2]).unwrap();
+        assert_eq!(writer.buffer(), [2]);
         assert_eq!(*writer.get_ref(), [0, 1]);
 
         writer.write(&[3]).unwrap();
+        assert_eq!(writer.buffer(), [2, 3]);
         assert_eq!(*writer.get_ref(), [0, 1]);
 
         writer.flush().unwrap();
+        assert_eq!(writer.buffer(), []);
         assert_eq!(*writer.get_ref(), [0, 1, 2, 3]);
 
         writer.write(&[4]).unwrap();
         writer.write(&[5]).unwrap();
+        assert_eq!(writer.buffer(), [4, 5]);
         assert_eq!(*writer.get_ref(), [0, 1, 2, 3]);
 
         writer.write(&[6]).unwrap();
+        assert_eq!(writer.buffer(), [6]);
         assert_eq!(*writer.get_ref(), [0, 1, 2, 3, 4, 5]);
 
         writer.write(&[7, 8]).unwrap();
+        assert_eq!(writer.buffer(), []);
         assert_eq!(*writer.get_ref(), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 
         writer.write(&[9, 10, 11]).unwrap();
+        assert_eq!(writer.buffer(), []);
         assert_eq!(*writer.get_ref(), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 
         writer.flush().unwrap();
+        assert_eq!(writer.buffer(), []);
         assert_eq!(*writer.get_ref(), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     }
 
@@ -1044,7 +1285,7 @@ mod tests {
         // Issue #32085
         struct FailFlushWriter<'a>(&'a mut Vec<u8>);
 
-        impl<'a> Write for FailFlushWriter<'a> {
+        impl Write for FailFlushWriter<'_> {
             fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
                 self.0.extend_from_slice(buf);
                 Ok(buf.len())
@@ -1125,23 +1366,6 @@ mod tests {
         assert_eq!(reader.read(&mut buf).unwrap(), 1);
         assert_eq!(reader.read(&mut buf).unwrap(), 0);
         assert_eq!(reader.read(&mut buf).unwrap(), 0);
-    }
-
-    #[test]
-    fn read_char_buffered() {
-        let buf = [195, 159];
-        let reader = BufReader::with_capacity(1, &buf[..]);
-        assert_eq!(reader.chars().next().unwrap().unwrap(), 'ß');
-    }
-
-    #[test]
-    fn test_chars() {
-        let buf = [195, 159, b'a'];
-        let reader = BufReader::with_capacity(1, &buf[..]);
-        let mut it = reader.chars();
-        assert_eq!(it.next().unwrap().unwrap(), 'ß');
-        assert_eq!(it.next().unwrap().unwrap(), 'a');
-        assert!(it.next().is_none());
     }
 
     #[test]

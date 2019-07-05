@@ -1,28 +1,18 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use cell::UnsafeCell;
-use fmt;
-use mem;
-use ops::{Deref, DerefMut};
-use ptr;
-use sys_common::mutex as sys;
-use sys_common::poison::{self, TryLockError, TryLockResult, LockResult};
+use crate::cell::UnsafeCell;
+use crate::fmt;
+use crate::mem;
+use crate::ops::{Deref, DerefMut};
+use crate::ptr;
+use crate::sys_common::mutex as sys;
+use crate::sys_common::poison::{self, TryLockError, TryLockResult, LockResult};
 
 /// A mutual exclusion primitive useful for protecting shared data
 ///
 /// This mutex will block threads waiting for the lock to become available. The
-/// mutex can also be statically initialized or created via a `new`
+/// mutex can also be statically initialized or created via a [`new`]
 /// constructor. Each mutex has a type parameter which represents the data that
 /// it is protecting. The data can only be accessed through the RAII guards
-/// returned from `lock` and `try_lock`, which guarantees that the data is only
+/// returned from [`lock`] and [`try_lock`], which guarantees that the data is only
 /// ever accessed when the mutex is locked.
 ///
 /// # Poisoning
@@ -33,15 +23,23 @@ use sys_common::poison::{self, TryLockError, TryLockResult, LockResult};
 /// data by default as it is likely tainted (some invariant is not being
 /// upheld).
 ///
-/// For a mutex, this means that the `lock` and `try_lock` methods return a
-/// `Result` which indicates whether a mutex has been poisoned or not. Most
-/// usage of a mutex will simply `unwrap()` these results, propagating panics
+/// For a mutex, this means that the [`lock`] and [`try_lock`] methods return a
+/// [`Result`] which indicates whether a mutex has been poisoned or not. Most
+/// usage of a mutex will simply [`unwrap()`] these results, propagating panics
 /// among threads to ensure that a possibly invalid invariant is not witnessed.
 ///
 /// A poisoned mutex, however, does not prevent all access to the underlying
-/// data. The `PoisonError` type has an `into_inner` method which will return
+/// data. The [`PoisonError`] type has an [`into_inner`] method which will return
 /// the guard that would have otherwise been returned on a successful lock. This
 /// allows access to the data, despite the lock being poisoned.
+///
+/// [`new`]: #method.new
+/// [`lock`]: #method.lock
+/// [`try_lock`]: #method.try_lock
+/// [`Result`]: ../../std/result/enum.Result.html
+/// [`unwrap()`]: ../../std/result/enum.Result.html#method.unwrap
+/// [`PoisonError`]: ../../std/sync/struct.PoisonError.html
+/// [`into_inner`]: ../../std/sync/struct.PoisonError.html#method.into_inner
 ///
 /// # Examples
 ///
@@ -61,7 +59,7 @@ use sys_common::poison::{self, TryLockError, TryLockResult, LockResult};
 ///
 /// let (tx, rx) = channel();
 /// for _ in 0..N {
-///     let (data, tx) = (data.clone(), tx.clone());
+///     let (data, tx) = (Arc::clone(&data), tx.clone());
 ///     thread::spawn(move || {
 ///         // The shared state can only be accessed once the lock is held.
 ///         // Our non-atomic increment is safe because we're the only thread
@@ -142,7 +140,7 @@ unsafe impl<T: ?Sized + Send> Sync for Mutex<T> { }
 /// [`lock`]: struct.Mutex.html#method.lock
 /// [`try_lock`]: struct.Mutex.html#method.try_lock
 /// [`Mutex`]: struct.Mutex.html
-#[must_use]
+#[must_use = "if unused the Mutex will immediately unlock"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct MutexGuard<'a, T: ?Sized + 'a> {
     // funny underscores due to how Deref/DerefMut currently work (they
@@ -152,9 +150,9 @@ pub struct MutexGuard<'a, T: ?Sized + 'a> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> !Send for MutexGuard<'a, T> { }
+impl<T: ?Sized> !Send for MutexGuard<'_, T> { }
 #[stable(feature = "mutexguard", since = "1.19.0")]
-unsafe impl<'a, T: ?Sized + Sync> Sync for MutexGuard<'a, T> { }
+unsafe impl<T: ?Sized + Sync> Sync for MutexGuard<'_, T> { }
 
 impl<T> Mutex<T> {
     /// Creates a new mutex in an unlocked state ready for use.
@@ -217,16 +215,16 @@ impl<T: ?Sized> Mutex<T> {
     /// assert_eq!(*mutex.lock().unwrap(), 10);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn lock(&self) -> LockResult<MutexGuard<T>> {
+    pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
         unsafe {
-            self.inner.lock();
+            self.inner.raw_lock();
             MutexGuard::new(self)
         }
     }
 
     /// Attempts to acquire this lock.
     ///
-    /// If the lock could not be acquired at this time, then `Err` is returned.
+    /// If the lock could not be acquired at this time, then [`Err`] is returned.
     /// Otherwise, an RAII guard is returned. The lock will be unlocked when the
     /// guard is dropped.
     ///
@@ -237,6 +235,8 @@ impl<T: ?Sized> Mutex<T> {
     /// If another user of this mutex panicked while holding the mutex, then
     /// this call will return failure if the mutex would otherwise be
     /// acquired.
+    ///
+    /// [`Err`]: ../../std/result/enum.Result.html#variant.Err
     ///
     /// # Examples
     ///
@@ -258,7 +258,7 @@ impl<T: ?Sized> Mutex<T> {
     /// assert_eq!(*mutex.lock().unwrap(), 10);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn try_lock(&self) -> TryLockResult<MutexGuard<T>> {
+    pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
         unsafe {
             if self.inner.try_lock() {
                 Ok(MutexGuard::new(self)?)
@@ -335,7 +335,7 @@ impl<T: ?Sized> Mutex<T> {
     /// Returns a mutable reference to the underlying data.
     ///
     /// Since this call borrows the `Mutex` mutably, no actual locking needs to
-    /// take place---the mutable borrow statically guarantees no locks exist.
+    /// take place -- the mutable borrow statically guarantees no locks exist.
     ///
     /// # Errors
     ///
@@ -372,6 +372,17 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Mutex<T> {
     }
 }
 
+#[stable(feature = "mutex_from", since = "1.24.0")]
+impl<T> From<T> for Mutex<T> {
+    /// Creates a new mutex in an unlocked state ready for use.
+    /// This is equivalent to [`Mutex::new`].
+    ///
+    /// [`Mutex::new`]: ../../std/sync/struct.Mutex.html#method.new
+    fn from(t: T) -> Self {
+        Mutex::new(t)
+    }
+}
+
 #[stable(feature = "mutex_default", since = "1.10.0")]
 impl<T: ?Sized + Default> Default for Mutex<T> {
     /// Creates a `Mutex<T>`, with the `Default` value for T.
@@ -382,13 +393,22 @@ impl<T: ?Sized + Default> Default for Mutex<T> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized + fmt::Debug> fmt::Debug for Mutex<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.try_lock() {
-            Ok(guard) => write!(f, "Mutex {{ data: {:?} }}", &*guard),
+            Ok(guard) => f.debug_struct("Mutex").field("data", &&*guard).finish(),
             Err(TryLockError::Poisoned(err)) => {
-                write!(f, "Mutex {{ data: Poisoned({:?}) }}", &**err.get_ref())
+                f.debug_struct("Mutex").field("data", &&**err.get_ref()).finish()
             },
-            Err(TryLockError::WouldBlock) => write!(f, "Mutex {{ <locked> }}")
+            Err(TryLockError::WouldBlock) => {
+                struct LockedPlaceholder;
+                impl fmt::Debug for LockedPlaceholder {
+                    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        f.write_str("<locked>")
+                    }
+                }
+
+                f.debug_struct("Mutex").field("data", &LockedPlaceholder).finish()
+            }
         }
     }
 }
@@ -405,7 +425,7 @@ impl<'mutex, T: ?Sized> MutexGuard<'mutex, T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'mutex, T: ?Sized> Deref for MutexGuard<'mutex, T> {
+impl<T: ?Sized> Deref for MutexGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -414,35 +434,33 @@ impl<'mutex, T: ?Sized> Deref for MutexGuard<'mutex, T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'mutex, T: ?Sized> DerefMut for MutexGuard<'mutex, T> {
+impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.__lock.data.get() }
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> Drop for MutexGuard<'a, T> {
+impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         unsafe {
             self.__lock.poison.done(&self.__poison);
-            self.__lock.inner.unlock();
+            self.__lock.inner.raw_unlock();
         }
     }
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
-impl<'a, T: ?Sized + fmt::Debug> fmt::Debug for MutexGuard<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("MutexGuard")
-            .field("lock", &self.__lock)
-            .finish()
+impl<T: ?Sized + fmt::Debug> fmt::Debug for MutexGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
     }
 }
 
 #[stable(feature = "std_guard_impls", since = "1.20.0")]
-impl<'a, T: ?Sized + fmt::Display> fmt::Display for MutexGuard<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl<T: ?Sized + fmt::Display> fmt::Display for MutexGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         (**self).fmt(f)
     }
 }
@@ -457,10 +475,10 @@ pub fn guard_poison<'a, T: ?Sized>(guard: &MutexGuard<'a, T>) -> &'a poison::Fla
 
 #[cfg(all(test, not(target_os = "emscripten")))]
 mod tests {
-    use sync::mpsc::channel;
-    use sync::{Arc, Mutex, Condvar};
-    use sync::atomic::{AtomicUsize, Ordering};
-    use thread;
+    use crate::sync::mpsc::channel;
+    use crate::sync::{Arc, Mutex, Condvar};
+    use crate::sync::atomic::{AtomicUsize, Ordering};
+    use crate::thread;
 
     struct Packet<T>(Arc<(Mutex<T>, Condvar)>);
 

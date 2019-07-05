@@ -1,13 +1,3 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use std::borrow::Cow;
 
 // check that Cow<'a, str> implements addition
@@ -17,9 +7,9 @@ fn check_cow_add_cow() {
     let borrowed2 = Cow::Borrowed("World!");
     let borrow_empty = Cow::Borrowed("");
 
-    let owned1: Cow<str> = Cow::Owned(String::from("Hi, "));
-    let owned2: Cow<str> = Cow::Owned(String::from("Rustaceans!"));
-    let owned_empty: Cow<str> = Cow::Owned(String::new());
+    let owned1: Cow<'_, str> = Cow::Owned(String::from("Hi, "));
+    let owned2: Cow<'_, str> = Cow::Owned(String::from("Rustaceans!"));
+    let owned_empty: Cow<'_, str> = Cow::Owned(String::new());
 
     assert_eq!("Hello, World!", borrowed1.clone() + borrowed2.clone());
     assert_eq!("Hello, Rustaceans!", borrowed1.clone() + owned2.clone());
@@ -46,8 +36,8 @@ fn check_cow_add_str() {
     let borrowed = Cow::Borrowed("Hello, ");
     let borrow_empty = Cow::Borrowed("");
 
-    let owned: Cow<str> = Cow::Owned(String::from("Hi, "));
-    let owned_empty: Cow<str> = Cow::Owned(String::new());
+    let owned: Cow<'_, str> = Cow::Owned(String::from("Hi, "));
+    let owned_empty: Cow<'_, str> = Cow::Owned(String::new());
 
     assert_eq!("Hello, World!", borrowed.clone() + "World!");
 
@@ -70,9 +60,9 @@ fn check_cow_add_assign_cow() {
     let borrowed2 = Cow::Borrowed("World!");
     let borrow_empty = Cow::Borrowed("");
 
-    let mut owned1: Cow<str> = Cow::Owned(String::from("Hi, "));
-    let owned2: Cow<str> = Cow::Owned(String::from("Rustaceans!"));
-    let owned_empty: Cow<str> = Cow::Owned(String::new());
+    let mut owned1: Cow<'_, str> = Cow::Owned(String::from("Hi, "));
+    let owned2: Cow<'_, str> = Cow::Owned(String::from("Rustaceans!"));
+    let owned_empty: Cow<'_, str> = Cow::Owned(String::new());
 
     let mut s = borrowed1.clone();
     s += borrow_empty.clone();
@@ -111,8 +101,8 @@ fn check_cow_add_assign_str() {
     let mut borrowed = Cow::Borrowed("Hello, ");
     let borrow_empty = Cow::Borrowed("");
 
-    let mut owned: Cow<str> = Cow::Owned(String::from("Hi, "));
-    let owned_empty: Cow<str> = Cow::Owned(String::new());
+    let mut owned: Cow<'_, str> = Cow::Owned(String::from("Hi, "));
+    let owned_empty: Cow<'_, str> = Cow::Owned(String::new());
 
     let mut s = borrowed.clone();
     s += "";
@@ -142,10 +132,10 @@ fn check_cow_add_assign_str() {
 
 #[test]
 fn check_cow_clone_from() {
-    let mut c1: Cow<str> = Cow::Owned(String::with_capacity(25));
+    let mut c1: Cow<'_, str> = Cow::Owned(String::with_capacity(25));
     let s: String = "hi".to_string();
     assert!(s.capacity() < 25);
-    let c2: Cow<str> = Cow::Owned(s);
+    let c2: Cow<'_, str> = Cow::Owned(s);
     c1.clone_from(&c2);
     assert!(c1.into_owned().capacity() >= 25);
 }

@@ -1,27 +1,26 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+#![cfg_attr(test, allow(unused))]
 
-use io::prelude::*;
+use crate::io::prelude::*;
 
-use cell::RefCell;
-use fmt;
-use io::lazy::Lazy;
-use io::{self, Initializer, BufReader, LineWriter};
-use sync::{Arc, Mutex, MutexGuard};
-use sys::stdio;
-use sys_common::remutex::{ReentrantMutex, ReentrantMutexGuard};
-use thread::{LocalKey, LocalKeyState};
+use crate::cell::RefCell;
+use crate::fmt;
+use crate::io::lazy::Lazy;
+use crate::io::{self, Initializer, BufReader, LineWriter, IoSlice, IoSliceMut};
+use crate::sync::{Arc, Mutex, MutexGuard};
+use crate::sys::stdio;
+use crate::sys_common::remutex::{ReentrantMutex, ReentrantMutexGuard};
+use crate::thread::LocalKey;
 
-/// Stdout used by print! and println! macros
 thread_local! {
-    static LOCAL_STDOUT: RefCell<Option<Box<Write + Send>>> = {
+    /// Stdout used by print! and println! macros
+    static LOCAL_STDOUT: RefCell<Option<Box<dyn Write + Send>>> = {
+        RefCell::new(None)
+    }
+}
+
+thread_local! {
+    /// Stderr used by eprint! and eprintln! macros, and panics
+    static LOCAL_STDERR: RefCell<Option<Box<dyn Write + Send>>> = {
         RefCell::new(None)
     }
 }
@@ -76,6 +75,10 @@ fn stderr_raw() -> io::Result<StderrRaw> { stdio::Stderr::new().map(StderrRaw) }
 impl Read for StdinRaw {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.0.read(buf) }
 
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.0.read_vectored(bufs)
+    }
+
     #[inline]
     unsafe fn initializer(&self) -> Initializer {
         Initializer::nop()
@@ -83,10 +86,20 @@ impl Read for StdinRaw {
 }
 impl Write for StdoutRaw {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.0.write(buf) }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.0.write_vectored(bufs)
+    }
+
     fn flush(&mut self) -> io::Result<()> { self.0.flush() }
 }
 impl Write for StderrRaw {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.0.write(buf) }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.0.write_vectored(bufs)
+    }
+
     fn flush(&mut self) -> io::Result<()> { self.0.flush() }
 }
 
@@ -100,6 +113,14 @@ impl<W: io::Write> io::Write for Maybe<W> {
         match *self {
             Maybe::Real(ref mut w) => handle_ebadf(w.write(buf), buf.len()),
             Maybe::Fake => Ok(buf.len())
+        }
+    }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        let total = bufs.iter().map(|b| b.len()).sum();
+        match self {
+            Maybe::Real(w) => handle_ebadf(w.write_vectored(bufs), total),
+            Maybe::Fake => Ok(total),
         }
     }
 
@@ -118,13 +139,18 @@ impl<R: io::Read> io::Read for Maybe<R> {
             Maybe::Fake => Ok(0)
         }
     }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        match self {
+            Maybe::Real(r) => handle_ebadf(r.read_vectored(bufs), 0),
+            Maybe::Fake => Ok(0)
+        }
+    }
 }
 
 fn handle_ebadf<T>(r: io::Result<T>, default: T) -> io::Result<T> {
-    use sys::stdio::EBADF_ERR;
-
     match r {
-        Err(ref e) if e.raw_os_error() == Some(EBADF_ERR) => Ok(default),
+        Err(ref e) if stdio::is_ebadf(e) => Ok(default),
         r => r
     }
 }
@@ -133,7 +159,7 @@ fn handle_ebadf<T>(r: io::Result<T>, default: T) -> io::Result<T> {
 ///
 /// Each handle is a shared reference to a global buffer of input data to this
 /// process. A handle can be `lock`'d to gain full access to [`BufRead`] methods
-/// (e.g. `.lines()`). Reads to this handle are otherwise locked with respect
+/// (e.g., `.lines()`). Reads to this handle are otherwise locked with respect
 /// to other reads.
 ///
 /// This handle implements the `Read` trait, but beware that concurrent reads
@@ -143,6 +169,11 @@ fn handle_ebadf<T>(r: io::Result<T>, default: T) -> io::Result<T> {
 ///
 /// [`io::stdin`]: fn.stdin.html
 /// [`BufRead`]: trait.BufRead.html
+///
+/// ### Note: Windows Portability Consideration
+/// When operating in a console, the Windows implementation of this stream does not support
+/// non-UTF-8 byte sequences. Attempting to read bytes that are not valid UTF-8 will return
+/// an error.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Stdin {
     inner: Arc<Mutex<BufReader<Maybe<StdinRaw>>>>,
@@ -156,6 +187,11 @@ pub struct Stdin {
 /// [`Read`]: trait.Read.html
 /// [`BufRead`]: trait.BufRead.html
 /// [`Stdin::lock`]: struct.Stdin.html#method.lock
+///
+/// ### Note: Windows Portability Consideration
+/// When operating in a console, the Windows implementation of this stream does not support
+/// non-UTF-8 byte sequences. Attempting to read bytes that are not valid UTF-8 will return
+/// an error.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct StdinLock<'a> {
     inner: MutexGuard<'a, BufReader<Maybe<StdinRaw>>>,
@@ -169,42 +205,50 @@ pub struct StdinLock<'a> {
 ///
 /// [lock]: struct.Stdin.html#method.lock
 ///
+/// ### Note: Windows Portability Consideration
+/// When operating in a console, the Windows implementation of this stream does not support
+/// non-UTF-8 byte sequences. Attempting to read bytes that are not valid UTF-8 will return
+/// an error.
+///
 /// # Examples
 ///
 /// Using implicit synchronization:
 ///
-/// ```
+/// ```no_run
 /// use std::io::{self, Read};
 ///
-/// # fn foo() -> io::Result<String> {
-/// let mut buffer = String::new();
-/// io::stdin().read_to_string(&mut buffer)?;
-/// # Ok(buffer)
-/// # }
+/// fn main() -> io::Result<()> {
+///     let mut buffer = String::new();
+///     io::stdin().read_to_string(&mut buffer)?;
+///     Ok(())
+/// }
 /// ```
 ///
 /// Using explicit synchronization:
 ///
-/// ```
+/// ```no_run
 /// use std::io::{self, Read};
 ///
-/// # fn foo() -> io::Result<String> {
-/// let mut buffer = String::new();
-/// let stdin = io::stdin();
-/// let mut handle = stdin.lock();
+/// fn main() -> io::Result<()> {
+///     let mut buffer = String::new();
+///     let stdin = io::stdin();
+///     let mut handle = stdin.lock();
 ///
-/// handle.read_to_string(&mut buffer)?;
-/// # Ok(buffer)
-/// # }
+///     handle.read_to_string(&mut buffer)?;
+///     Ok(())
+/// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn stdin() -> Stdin {
-    static INSTANCE: Lazy<Mutex<BufReader<Maybe<StdinRaw>>>> = Lazy::new(stdin_init);
+    static INSTANCE: Lazy<Mutex<BufReader<Maybe<StdinRaw>>>> = Lazy::new();
     return Stdin {
-        inner: INSTANCE.get().expect("cannot access stdin during shutdown"),
+        inner: unsafe {
+            INSTANCE.get(stdin_init).expect("cannot access stdin during shutdown")
+        },
     };
 
     fn stdin_init() -> Arc<Mutex<BufReader<Maybe<StdinRaw>>>> {
+        // This must not reentrantly access `INSTANCE`
         let stdin = match stdin_raw() {
             Ok(stdin) => Maybe::Real(stdin),
             _ => Maybe::Fake
@@ -227,20 +271,20 @@ impl Stdin {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::io::{self, Read};
     ///
-    /// # fn foo() -> io::Result<String> {
-    /// let mut buffer = String::new();
-    /// let stdin = io::stdin();
-    /// let mut handle = stdin.lock();
+    /// fn main() -> io::Result<()> {
+    ///     let mut buffer = String::new();
+    ///     let stdin = io::stdin();
+    ///     let mut handle = stdin.lock();
     ///
-    /// handle.read_to_string(&mut buffer)?;
-    /// # Ok(buffer)
-    /// # }
+    ///     handle.read_to_string(&mut buffer)?;
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn lock(&self) -> StdinLock {
+    pub fn lock(&self) -> StdinLock<'_> {
         StdinLock { inner: self.inner.lock().unwrap_or_else(|e| e.into_inner()) }
     }
 
@@ -268,7 +312,7 @@ impl Stdin {
     ///
     /// You can run the example one of two ways:
     ///
-    /// - Pipe some text to it, e.g. `printf foo | path/to/executable`
+    /// - Pipe some text to it, e.g., `printf foo | path/to/executable`
     /// - Give it text interactively by running the executable directly,
     ///   in which case it will wait for the Enter key to be pressed before
     ///   continuing
@@ -280,7 +324,7 @@ impl Stdin {
 
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Stdin {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("Stdin { .. }")
     }
 }
@@ -289,6 +333,9 @@ impl fmt::Debug for Stdin {
 impl Read for Stdin {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.lock().read(buf)
+    }
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.lock().read_vectored(bufs)
     }
     #[inline]
     unsafe fn initializer(&self) -> Initializer {
@@ -306,10 +353,15 @@ impl Read for Stdin {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a> Read for StdinLock<'a> {
+impl Read for StdinLock<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
     }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.inner.read_vectored(bufs)
+    }
+
     #[inline]
     unsafe fn initializer(&self) -> Initializer {
         Initializer::nop()
@@ -317,14 +369,14 @@ impl<'a> Read for StdinLock<'a> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a> BufRead for StdinLock<'a> {
+impl BufRead for StdinLock<'_> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> { self.inner.fill_buf() }
     fn consume(&mut self, n: usize) { self.inner.consume(n) }
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
-impl<'a> fmt::Debug for StdinLock<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl fmt::Debug for StdinLock<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("StdinLock { .. }")
     }
 }
@@ -336,6 +388,11 @@ impl<'a> fmt::Debug for StdinLock<'a> {
 /// over locking is available via the [`lock`] method.
 ///
 /// Created by the [`io::stdout`] method.
+///
+/// ### Note: Windows Portability Consideration
+/// When operating in a console, the Windows implementation of this stream does not support
+/// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
+/// an error.
 ///
 /// [`lock`]: #method.lock
 /// [`io::stdout`]: fn.stdout.html
@@ -352,6 +409,11 @@ pub struct Stdout {
 /// This handle implements the [`Write`] trait, and is constructed via
 /// the [`Stdout::lock`] method.
 ///
+/// ### Note: Windows Portability Consideration
+/// When operating in a console, the Windows implementation of this stream does not support
+/// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
+/// an error.
+///
 /// [`Write`]: trait.Write.html
 /// [`Stdout::lock`]: struct.Stdout.html#method.lock
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -367,43 +429,50 @@ pub struct StdoutLock<'a> {
 ///
 /// [Stdout::lock]: struct.Stdout.html#method.lock
 ///
+/// ### Note: Windows Portability Consideration
+/// When operating in a console, the Windows implementation of this stream does not support
+/// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
+/// an error.
+///
 /// # Examples
 ///
 /// Using implicit synchronization:
 ///
-/// ```
+/// ```no_run
 /// use std::io::{self, Write};
 ///
-/// # fn foo() -> io::Result<()> {
-/// io::stdout().write(b"hello world")?;
+/// fn main() -> io::Result<()> {
+///     io::stdout().write_all(b"hello world")?;
 ///
-/// # Ok(())
-/// # }
+///     Ok(())
+/// }
 /// ```
 ///
 /// Using explicit synchronization:
 ///
-/// ```
+/// ```no_run
 /// use std::io::{self, Write};
 ///
-/// # fn foo() -> io::Result<()> {
-/// let stdout = io::stdout();
-/// let mut handle = stdout.lock();
+/// fn main() -> io::Result<()> {
+///     let stdout = io::stdout();
+///     let mut handle = stdout.lock();
 ///
-/// handle.write(b"hello world")?;
+///     handle.write_all(b"hello world")?;
 ///
-/// # Ok(())
-/// # }
+///     Ok(())
+/// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn stdout() -> Stdout {
-    static INSTANCE: Lazy<ReentrantMutex<RefCell<LineWriter<Maybe<StdoutRaw>>>>>
-        = Lazy::new(stdout_init);
+    static INSTANCE: Lazy<ReentrantMutex<RefCell<LineWriter<Maybe<StdoutRaw>>>>> = Lazy::new();
     return Stdout {
-        inner: INSTANCE.get().expect("cannot access stdout during shutdown"),
+        inner: unsafe {
+            INSTANCE.get(stdout_init).expect("cannot access stdout during shutdown")
+        },
     };
 
     fn stdout_init() -> Arc<ReentrantMutex<RefCell<LineWriter<Maybe<StdoutRaw>>>>> {
+        // This must not reentrantly access `INSTANCE`
         let stdout = match stdout_raw() {
             Ok(stdout) => Maybe::Real(stdout),
             _ => Maybe::Fake,
@@ -421,27 +490,27 @@ impl Stdout {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::io::{self, Write};
     ///
-    /// # fn foo() -> io::Result<()> {
-    /// let stdout = io::stdout();
-    /// let mut handle = stdout.lock();
+    /// fn main() -> io::Result<()> {
+    ///     let stdout = io::stdout();
+    ///     let mut handle = stdout.lock();
     ///
-    /// handle.write(b"hello world")?;
+    ///     handle.write_all(b"hello world")?;
     ///
-    /// # Ok(())
-    /// # }
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn lock(&self) -> StdoutLock {
+    pub fn lock(&self) -> StdoutLock<'_> {
         StdoutLock { inner: self.inner.lock().unwrap_or_else(|e| e.into_inner()) }
     }
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Stdout {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("Stdout { .. }")
     }
 }
@@ -451,20 +520,26 @@ impl Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.lock().write(buf)
     }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.lock().write_vectored(bufs)
+    }
     fn flush(&mut self) -> io::Result<()> {
         self.lock().flush()
     }
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.lock().write_all(buf)
     }
-    fn write_fmt(&mut self, args: fmt::Arguments) -> io::Result<()> {
+    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
         self.lock().write_fmt(args)
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a> Write for StdoutLock<'a> {
+impl Write for StdoutLock<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner.borrow_mut().write(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.inner.borrow_mut().write_vectored(bufs)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.inner.borrow_mut().flush()
@@ -472,8 +547,8 @@ impl<'a> Write for StdoutLock<'a> {
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
-impl<'a> fmt::Debug for StdoutLock<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl fmt::Debug for StdoutLock<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("StdoutLock { .. }")
     }
 }
@@ -483,6 +558,11 @@ impl<'a> fmt::Debug for StdoutLock<'a> {
 /// For more information, see the [`io::stderr`] method.
 ///
 /// [`io::stderr`]: fn.stderr.html
+///
+/// ### Note: Windows Portability Consideration
+/// When operating in a console, the Windows implementation of this stream does not support
+/// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
+/// an error.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Stderr {
     inner: Arc<ReentrantMutex<RefCell<Maybe<StderrRaw>>>>,
@@ -494,6 +574,11 @@ pub struct Stderr {
 /// the [`Stderr::lock`] method.
 ///
 /// [`Stderr::lock`]: struct.Stderr.html#method.lock
+///
+/// ### Note: Windows Portability Consideration
+/// When operating in a console, the Windows implementation of this stream does not support
+/// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
+/// an error.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct StderrLock<'a> {
     inner: ReentrantMutexGuard<'a, RefCell<Maybe<StderrRaw>>>,
@@ -503,42 +588,50 @@ pub struct StderrLock<'a> {
 ///
 /// This handle is not buffered.
 ///
+/// ### Note: Windows Portability Consideration
+/// When operating in a console, the Windows implementation of this stream does not support
+/// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
+/// an error.
+///
 /// # Examples
 ///
 /// Using implicit synchronization:
 ///
-/// ```
+/// ```no_run
 /// use std::io::{self, Write};
 ///
-/// # fn foo() -> io::Result<()> {
-/// io::stderr().write(b"hello world")?;
+/// fn main() -> io::Result<()> {
+///     io::stderr().write_all(b"hello world")?;
 ///
-/// # Ok(())
-/// # }
+///     Ok(())
+/// }
 /// ```
 ///
 /// Using explicit synchronization:
 ///
-/// ```
+/// ```no_run
 /// use std::io::{self, Write};
 ///
-/// # fn foo() -> io::Result<()> {
-/// let stderr = io::stderr();
-/// let mut handle = stderr.lock();
+/// fn main() -> io::Result<()> {
+///     let stderr = io::stderr();
+///     let mut handle = stderr.lock();
 ///
-/// handle.write(b"hello world")?;
+///     handle.write_all(b"hello world")?;
 ///
-/// # Ok(())
-/// # }
+///     Ok(())
+/// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn stderr() -> Stderr {
-    static INSTANCE: Lazy<ReentrantMutex<RefCell<Maybe<StderrRaw>>>> = Lazy::new(stderr_init);
+    static INSTANCE: Lazy<ReentrantMutex<RefCell<Maybe<StderrRaw>>>> = Lazy::new();
     return Stderr {
-        inner: INSTANCE.get().expect("cannot access stderr during shutdown"),
+        inner: unsafe {
+            INSTANCE.get(stderr_init).expect("cannot access stderr during shutdown")
+        },
     };
 
     fn stderr_init() -> Arc<ReentrantMutex<RefCell<Maybe<StderrRaw>>>> {
+        // This must not reentrantly access `INSTANCE`
         let stderr = match stderr_raw() {
             Ok(stderr) => Maybe::Real(stderr),
             _ => Maybe::Fake,
@@ -563,20 +656,20 @@ impl Stderr {
     ///     let stderr = io::stderr();
     ///     let mut handle = stderr.lock();
     ///
-    ///     handle.write(b"hello world")?;
+    ///     handle.write_all(b"hello world")?;
     ///
     ///     Ok(())
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn lock(&self) -> StderrLock {
+    pub fn lock(&self) -> StderrLock<'_> {
         StderrLock { inner: self.inner.lock().unwrap_or_else(|e| e.into_inner()) }
     }
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Stderr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("Stderr { .. }")
     }
 }
@@ -586,20 +679,26 @@ impl Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.lock().write(buf)
     }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.lock().write_vectored(bufs)
+    }
     fn flush(&mut self) -> io::Result<()> {
         self.lock().flush()
     }
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.lock().write_all(buf)
     }
-    fn write_fmt(&mut self, args: fmt::Arguments) -> io::Result<()> {
+    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
         self.lock().write_fmt(args)
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a> Write for StderrLock<'a> {
+impl Write for StderrLock<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner.borrow_mut().write(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.inner.borrow_mut().write_vectored(bufs)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.inner.borrow_mut().flush()
@@ -607,8 +706,8 @@ impl<'a> Write for StderrLock<'a> {
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
-impl<'a> fmt::Debug for StderrLock<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl fmt::Debug for StderrLock<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("StderrLock { .. }")
     }
 }
@@ -626,9 +725,8 @@ impl<'a> fmt::Debug for StderrLock<'a> {
                      with a more general mechanism",
            issue = "0")]
 #[doc(hidden)]
-pub fn set_panic(sink: Option<Box<Write + Send>>) -> Option<Box<Write + Send>> {
-    use panicking::LOCAL_STDERR;
-    use mem;
+pub fn set_panic(sink: Option<Box<dyn Write + Send>>) -> Option<Box<dyn Write + Send>> {
+    use crate::mem;
     LOCAL_STDERR.with(move |slot| {
         mem::replace(&mut *slot.borrow_mut(), sink)
     }).and_then(|mut s| {
@@ -650,8 +748,8 @@ pub fn set_panic(sink: Option<Box<Write + Send>>) -> Option<Box<Write + Send>> {
                      with a more general mechanism",
            issue = "0")]
 #[doc(hidden)]
-pub fn set_print(sink: Option<Box<Write + Send>>) -> Option<Box<Write + Send>> {
-    use mem;
+pub fn set_print(sink: Option<Box<dyn Write + Send>>) -> Option<Box<dyn Write + Send>> {
+    use crate::mem;
     LOCAL_STDOUT.with(move |slot| {
         mem::replace(&mut *slot.borrow_mut(), sink)
     }).and_then(|mut s| {
@@ -665,29 +763,31 @@ pub fn set_print(sink: Option<Box<Write + Send>>) -> Option<Box<Write + Send>> {
 ///
 /// This function is used to print error messages, so it takes extra
 /// care to avoid causing a panic when `local_stream` is unusable.
-/// For instance, if the TLS key for the local stream is uninitialized
-/// or already destroyed, or if the local stream is locked by another
+/// For instance, if the TLS key for the local stream is
+/// already destroyed, or if the local stream is locked by another
 /// thread, it will just fall back to the global stream.
 ///
 /// However, if the actual I/O causes an error, this function does panic.
-fn print_to<T>(args: fmt::Arguments,
-               local_s: &'static LocalKey<RefCell<Option<Box<Write+Send>>>>,
-               global_s: fn() -> T,
-               label: &str) where T: Write {
-    let result = match local_s.state() {
-        LocalKeyState::Uninitialized |
-        LocalKeyState::Destroyed => global_s().write_fmt(args),
-        LocalKeyState::Valid => {
-            local_s.with(|s| {
-                if let Ok(mut borrowed) = s.try_borrow_mut() {
-                    if let Some(w) = borrowed.as_mut() {
-                        return w.write_fmt(args);
-                    }
-                }
-                global_s().write_fmt(args)
-            })
+fn print_to<T>(
+    args: fmt::Arguments<'_>,
+    local_s: &'static LocalKey<RefCell<Option<Box<dyn Write+Send>>>>,
+    global_s: fn() -> T,
+    label: &str,
+)
+where
+    T: Write,
+{
+    let result = local_s.try_with(|s| {
+        if let Ok(mut borrowed) = s.try_borrow_mut() {
+            if let Some(w) = borrowed.as_mut() {
+                return w.write_fmt(args);
+            }
         }
-    };
+        global_s().write_fmt(args)
+    }).unwrap_or_else(|_| {
+        global_s().write_fmt(args)
+    });
+
     if let Err(e) = result {
         panic!("failed printing to {}: {}", label, e);
     }
@@ -697,7 +797,8 @@ fn print_to<T>(args: fmt::Arguments,
            reason = "implementation detail which may disappear or be replaced at any time",
            issue = "0")]
 #[doc(hidden)]
-pub fn _print(args: fmt::Arguments) {
+#[cfg(not(test))]
+pub fn _print(args: fmt::Arguments<'_>) {
     print_to(args, &LOCAL_STDOUT, stdout, "stdout");
 }
 
@@ -705,15 +806,40 @@ pub fn _print(args: fmt::Arguments) {
            reason = "implementation detail which may disappear or be replaced at any time",
            issue = "0")]
 #[doc(hidden)]
-pub fn _eprint(args: fmt::Arguments) {
-    use panicking::LOCAL_STDERR;
+#[cfg(not(test))]
+pub fn _eprint(args: fmt::Arguments<'_>) {
     print_to(args, &LOCAL_STDERR, stderr, "stderr");
 }
 
 #[cfg(test)]
+pub use realstd::io::{_eprint, _print};
+
+#[cfg(test)]
 mod tests {
-    use thread;
+    use crate::panic::{UnwindSafe, RefUnwindSafe};
+    use crate::thread;
     use super::*;
+
+    #[test]
+    fn stdout_unwind_safe() {
+        assert_unwind_safe::<Stdout>();
+    }
+    #[test]
+    fn stdoutlock_unwind_safe() {
+        assert_unwind_safe::<StdoutLock<'_>>();
+        assert_unwind_safe::<StdoutLock<'static>>();
+    }
+    #[test]
+    fn stderr_unwind_safe() {
+        assert_unwind_safe::<Stderr>();
+    }
+    #[test]
+    fn stderrlock_unwind_safe() {
+        assert_unwind_safe::<StderrLock<'_>>();
+        assert_unwind_safe::<StderrLock<'static>>();
+    }
+
+    fn assert_unwind_safe<T: UnwindSafe + RefUnwindSafe>() {}
 
     #[test]
     #[cfg_attr(target_os = "emscripten", ignore)]

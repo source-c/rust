@@ -1,13 +1,3 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 mod debug_struct {
     use std::fmt;
 
@@ -16,7 +6,7 @@ mod debug_struct {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_struct("Foo").finish()
             }
         }
@@ -30,7 +20,7 @@ mod debug_struct {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_struct("Foo")
                     .field("bar", &true)
                     .finish()
@@ -40,7 +30,7 @@ mod debug_struct {
         assert_eq!("Foo { bar: true }", format!("{:?}", Foo));
         assert_eq!(
 "Foo {
-    bar: true
+    bar: true,
 }",
                    format!("{:#?}", Foo));
     }
@@ -50,7 +40,7 @@ mod debug_struct {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_struct("Foo")
                     .field("bar", &true)
                     .field("baz", &format_args!("{}/{}", 10, 20))
@@ -62,7 +52,7 @@ mod debug_struct {
         assert_eq!(
 "Foo {
     bar: true,
-    baz: 10/20
+    baz: 10/20,
 }",
                    format!("{:#?}", Foo));
     }
@@ -72,7 +62,7 @@ mod debug_struct {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_struct("Foo")
                     .field("bar", &true)
                     .field("baz", &format_args!("{}/{}", 10, 20))
@@ -83,7 +73,7 @@ mod debug_struct {
         struct Bar;
 
         impl fmt::Debug for Bar {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_struct("Bar")
                     .field("foo", &Foo)
                     .field("hello", &"world")
@@ -97,9 +87,9 @@ mod debug_struct {
 "Bar {
     foo: Foo {
         bar: true,
-        baz: 10/20
+        baz: 10/20,
     },
-    hello: \"world\"
+    hello: \"world\",
 }",
                    format!("{:#?}", Bar));
     }
@@ -113,7 +103,7 @@ mod debug_tuple {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_tuple("Foo").finish()
             }
         }
@@ -127,7 +117,7 @@ mod debug_tuple {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_tuple("Foo")
                     .field(&true)
                     .finish()
@@ -137,7 +127,7 @@ mod debug_tuple {
         assert_eq!("Foo(true)", format!("{:?}", Foo));
         assert_eq!(
 "Foo(
-    true
+    true,
 )",
                    format!("{:#?}", Foo));
     }
@@ -147,7 +137,7 @@ mod debug_tuple {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_tuple("Foo")
                     .field(&true)
                     .field(&format_args!("{}/{}", 10, 20))
@@ -159,7 +149,7 @@ mod debug_tuple {
         assert_eq!(
 "Foo(
     true,
-    10/20
+    10/20,
 )",
                    format!("{:#?}", Foo));
     }
@@ -169,7 +159,7 @@ mod debug_tuple {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_tuple("Foo")
                     .field(&true)
                     .field(&format_args!("{}/{}", 10, 20))
@@ -180,7 +170,7 @@ mod debug_tuple {
         struct Bar;
 
         impl fmt::Debug for Bar {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_tuple("Bar")
                     .field(&Foo)
                     .field(&"world")
@@ -194,9 +184,9 @@ mod debug_tuple {
 "Bar(
     Foo(
         true,
-        10/20
+        10/20,
     ),
-    \"world\"
+    \"world\",
 )",
                    format!("{:#?}", Bar));
     }
@@ -210,7 +200,7 @@ mod debug_map {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_map().finish()
             }
         }
@@ -224,7 +214,7 @@ mod debug_map {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_map()
                     .entry(&"bar", &true)
                     .finish()
@@ -234,7 +224,7 @@ mod debug_map {
         assert_eq!("{\"bar\": true}", format!("{:?}", Foo));
         assert_eq!(
 "{
-    \"bar\": true
+    \"bar\": true,
 }",
                    format!("{:#?}", Foo));
     }
@@ -244,7 +234,7 @@ mod debug_map {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_map()
                     .entry(&"bar", &true)
                     .entry(&10, &format_args!("{}/{}", 10, 20))
@@ -256,7 +246,7 @@ mod debug_map {
         assert_eq!(
 "{
     \"bar\": true,
-    10: 10/20
+    10: 10/20,
 }",
                    format!("{:#?}", Foo));
     }
@@ -266,7 +256,7 @@ mod debug_map {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_map()
                     .entry(&"bar", &true)
                     .entry(&10, &format_args!("{}/{}", 10, 20))
@@ -277,7 +267,7 @@ mod debug_map {
         struct Bar;
 
         impl fmt::Debug for Bar {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_map()
                     .entry(&"foo", &Foo)
                     .entry(&Foo, &"world")
@@ -292,12 +282,12 @@ mod debug_map {
 "{
     \"foo\": {
         \"bar\": true,
-        10: 10/20
+        10: 10/20,
     },
     {
         \"bar\": true,
-        10: 10/20
-    }: \"world\"
+        10: 10/20,
+    }: \"world\",
 }",
                    format!("{:#?}", Bar));
     }
@@ -311,7 +301,7 @@ mod debug_set {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_set().finish()
             }
         }
@@ -325,7 +315,7 @@ mod debug_set {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_set()
                     .entry(&true)
                     .finish()
@@ -335,7 +325,7 @@ mod debug_set {
         assert_eq!("{true}", format!("{:?}", Foo));
         assert_eq!(
 "{
-    true
+    true,
 }",
                    format!("{:#?}", Foo));
     }
@@ -345,7 +335,7 @@ mod debug_set {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_set()
                     .entry(&true)
                     .entry(&format_args!("{}/{}", 10, 20))
@@ -357,7 +347,7 @@ mod debug_set {
         assert_eq!(
 "{
     true,
-    10/20
+    10/20,
 }",
                    format!("{:#?}", Foo));
     }
@@ -367,7 +357,7 @@ mod debug_set {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_set()
                     .entry(&true)
                     .entry(&format_args!("{}/{}", 10, 20))
@@ -378,7 +368,7 @@ mod debug_set {
         struct Bar;
 
         impl fmt::Debug for Bar {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_set()
                     .entry(&Foo)
                     .entry(&"world")
@@ -392,9 +382,9 @@ mod debug_set {
 "{
     {
         true,
-        10/20
+        10/20,
     },
-    \"world\"
+    \"world\",
 }",
                    format!("{:#?}", Bar));
     }
@@ -408,7 +398,7 @@ mod debug_list {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_list().finish()
             }
         }
@@ -422,7 +412,7 @@ mod debug_list {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_list()
                     .entry(&true)
                     .finish()
@@ -432,7 +422,7 @@ mod debug_list {
         assert_eq!("[true]", format!("{:?}", Foo));
         assert_eq!(
 "[
-    true
+    true,
 ]",
                    format!("{:#?}", Foo));
     }
@@ -442,7 +432,7 @@ mod debug_list {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_list()
                     .entry(&true)
                     .entry(&format_args!("{}/{}", 10, 20))
@@ -454,7 +444,7 @@ mod debug_list {
         assert_eq!(
 "[
     true,
-    10/20
+    10/20,
 ]",
                    format!("{:#?}", Foo));
     }
@@ -464,7 +454,7 @@ mod debug_list {
         struct Foo;
 
         impl fmt::Debug for Foo {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_list()
                     .entry(&true)
                     .entry(&format_args!("{}/{}", 10, 20))
@@ -475,7 +465,7 @@ mod debug_list {
         struct Bar;
 
         impl fmt::Debug for Bar {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt.debug_list()
                     .entry(&Foo)
                     .entry(&"world")
@@ -489,10 +479,65 @@ mod debug_list {
 "[
     [
         true,
-        10/20
+        10/20,
     ],
-    \"world\"
+    \"world\",
 ]",
                    format!("{:#?}", Bar));
     }
+}
+
+#[test]
+fn test_formatting_parameters_are_forwarded() {
+    use std::collections::{BTreeMap, BTreeSet};
+    #[derive(Debug)]
+    struct Foo {
+        bar: u32,
+        baz: u32,
+    }
+    let struct_ = Foo { bar: 1024, baz: 7 };
+    let tuple = (1024, 7);
+    let list = [1024, 7];
+    let mut map = BTreeMap::new();
+    map.insert("bar", 1024);
+    map.insert("baz", 7);
+    let mut set = BTreeSet::new();
+    set.insert(1024);
+    set.insert(7);
+
+    assert_eq!(format!("{:03?}", struct_), "Foo { bar: 1024, baz: 007 }");
+    assert_eq!(format!("{:03?}", tuple), "(1024, 007)");
+    assert_eq!(format!("{:03?}", list), "[1024, 007]");
+    assert_eq!(format!("{:03?}", map), r#"{"bar": 1024, "baz": 007}"#);
+    assert_eq!(format!("{:03?}", set), "{007, 1024}");
+    assert_eq!(format!("{:#03?}", struct_), "
+Foo {
+    bar: 1024,
+    baz: 007,
+}
+    ".trim());
+    assert_eq!(format!("{:#03?}", tuple), "
+(
+    1024,
+    007,
+)
+    ".trim());
+    assert_eq!(format!("{:#03?}", list), "
+[
+    1024,
+    007,
+]
+    ".trim());
+    assert_eq!(format!("{:#03?}", map), r#"
+{
+    "bar": 1024,
+    "baz": 007,
+}
+    "#.trim());
+    assert_eq!(format!("{:#03?}", set), "
+{
+    007,
+    1024,
+}
+    ".trim());
 }

@@ -1,21 +1,15 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::source_map::{SourceMap, FilePathMapping};
+use crate::with_default_globals;
 
-use codemap::{CodeMap, FilePathMapping};
 use errors::Handler;
 use errors::emitter::EmitterWriter;
+
 use std::io;
 use std::io::prelude::*;
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 use std::str;
 use std::sync::{Arc, Mutex};
+use std::path::Path;
 use syntax_pos::{BytePos, NO_EXPANSION, Span, MultiSpan};
 
 /// Identify a position in the text by the Nth occurrence of a string.
@@ -45,35 +39,40 @@ impl<T: Write> Write for Shared<T> {
 }
 
 fn test_harness(file_text: &str, span_labels: Vec<SpanLabel>, expected_output: &str) {
-    let output = Arc::new(Mutex::new(Vec::new()));
+    with_default_globals(|| {
+        let output = Arc::new(Mutex::new(Vec::new()));
 
-    let code_map = Rc::new(CodeMap::new(FilePathMapping::empty()));
-    code_map.new_filemap_and_lines("test.rs", &file_text);
+        let source_map = Lrc::new(SourceMap::new(FilePathMapping::empty()));
+        source_map.new_source_file(Path::new("test.rs").to_owned().into(), file_text.to_owned());
 
-    let primary_span = make_span(&file_text, &span_labels[0].start, &span_labels[0].end);
-    let mut msp = MultiSpan::from_span(primary_span);
-    for span_label in span_labels {
-        let span = make_span(&file_text, &span_label.start, &span_label.end);
-        msp.push_span_label(span, span_label.label.to_string());
-        println!("span: {:?} label: {:?}", span, span_label.label);
-        println!("text: {:?}", code_map.span_to_snippet(span));
-    }
+        let primary_span = make_span(&file_text, &span_labels[0].start, &span_labels[0].end);
+        let mut msp = MultiSpan::from_span(primary_span);
+        for span_label in span_labels {
+            let span = make_span(&file_text, &span_label.start, &span_label.end);
+            msp.push_span_label(span, span_label.label.to_string());
+            println!("span: {:?} label: {:?}", span, span_label.label);
+            println!("text: {:?}", source_map.span_to_snippet(span));
+        }
 
-    let emitter = EmitterWriter::new(Box::new(Shared { data: output.clone() }),
-                                     Some(code_map.clone()));
-    let handler = Handler::with_emitter(true, false, Box::new(emitter));
-    handler.span_err(msp, "foo");
+        let emitter = EmitterWriter::new(Box::new(Shared { data: output.clone() }),
+                                        Some(source_map.clone()),
+                                        false,
+                                        false,
+                                        false);
+        let handler = Handler::with_emitter(true, None, Box::new(emitter));
+        handler.span_err(msp, "foo");
 
-    assert!(expected_output.chars().next() == Some('\n'),
-            "expected output should begin with newline");
-    let expected_output = &expected_output[1..];
+        assert!(expected_output.chars().next() == Some('\n'),
+                "expected output should begin with newline");
+        let expected_output = &expected_output[1..];
 
-    let bytes = output.lock().unwrap();
-    let actual_output = str::from_utf8(&bytes).unwrap();
-    println!("expected output:\n------\n{}------", expected_output);
-    println!("actual output:\n------\n{}------", actual_output);
+        let bytes = output.lock().unwrap();
+        let actual_output = str::from_utf8(&bytes).unwrap();
+        println!("expected output:\n------\n{}------", expected_output);
+        println!("actual output:\n------\n{}------", actual_output);
 
-    assert!(expected_output == actual_output)
+        assert!(expected_output == actual_output)
+    })
 }
 
 fn make_span(file_text: &str, start: &Position, end: &Position) -> Span {
@@ -372,6 +371,66 @@ error: foo
   |  ||____|__|
   |   |____|  `Y` is a good letter too
   |        `X` is a good letter
+
+"#);
+}
+
+#[test]
+fn triple_exact_overlap() {
+    test_harness(r#"
+fn foo() {
+  X0 Y0 Z0
+  X1 Y1 Z1
+  X2 Y2 Z2
+}
+"#,
+    vec![
+        SpanLabel {
+            start: Position {
+                string: "X0",
+                count: 1,
+            },
+            end: Position {
+                string: "X2",
+                count: 1,
+            },
+            label: "`X` is a good letter",
+        },
+        SpanLabel {
+            start: Position {
+                string: "X0",
+                count: 1,
+            },
+            end: Position {
+                string: "X2",
+                count: 1,
+            },
+            label: "`Y` is a good letter too",
+        },
+        SpanLabel {
+            start: Position {
+                string: "X0",
+                count: 1,
+            },
+            end: Position {
+                string: "X2",
+                count: 1,
+            },
+            label: "`Z` label",
+        },
+    ],
+    r#"
+error: foo
+ --> test.rs:3:3
+  |
+3 | /   X0 Y0 Z0
+4 | |   X1 Y1 Z1
+5 | |   X2 Y2 Z2
+  | |    ^
+  | |    |
+  | |    `X` is a good letter
+  | |____`Y` is a good letter too
+  |      `Z` label
 
 "#);
 }
@@ -1103,4 +1162,3 @@ error: foo
 
 "#);
 }
-

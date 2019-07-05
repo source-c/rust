@@ -1,13 +1,3 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use std::any::{Any, TypeId};
 use std::borrow::Borrow;
 use std::cell::RefCell;
@@ -21,8 +11,11 @@ use std::mem;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::cmp::{PartialOrd, Ord, Ordering};
 
-use builder::Step;
+use lazy_static::lazy_static;
+
+use crate::builder::Step;
 
 pub struct Interned<T>(usize, PhantomData<*const T>);
 
@@ -77,20 +70,20 @@ unsafe impl<T> Send for Interned<T> {}
 unsafe impl<T> Sync for Interned<T> {}
 
 impl fmt::Display for Interned<String> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s: &str = &*self;
         f.write_str(s)
     }
 }
 
 impl fmt::Debug for Interned<String> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s: &str = &*self;
         f.write_fmt(format_args!("{:?}", s))
     }
 }
 impl fmt::Debug for Interned<PathBuf> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s: &Path = &*self;
         f.write_fmt(format_args!("{:?}", s))
     }
@@ -154,20 +147,35 @@ impl AsRef<OsStr> for Interned<String> {
     }
 }
 
+impl PartialOrd<Interned<String>> for Interned<String> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let l = INTERNER.strs.lock().unwrap();
+        l.get(*self).partial_cmp(l.get(*other))
+    }
+}
 
-struct TyIntern<T> {
+impl Ord for Interned<String> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let l = INTERNER.strs.lock().unwrap();
+        l.get(*self).cmp(l.get(*other))
+    }
+}
+
+struct TyIntern<T: Hash + Clone + Eq> {
     items: Vec<T>,
     set: HashMap<T, Interned<T>>,
 }
 
-impl<T: Hash + Clone + Eq> TyIntern<T> {
-    fn new() -> TyIntern<T> {
+impl<T: Hash + Clone + Eq> Default for TyIntern<T> {
+    fn default() -> Self {
         TyIntern {
             items: Vec::new(),
-            set: HashMap::new(),
+            set: Default::default(),
         }
     }
+}
 
+impl<T: Hash + Clone + Eq> TyIntern<T> {
     fn intern_borrow<B>(&mut self, item: &B) -> Interned<T>
     where
         B: Eq + Hash + ToOwned<Owned=T> + ?Sized,
@@ -198,19 +206,13 @@ impl<T: Hash + Clone + Eq> TyIntern<T> {
     }
 }
 
+#[derive(Default)]
 pub struct Interner {
     strs: Mutex<TyIntern<String>>,
     paths: Mutex<TyIntern<PathBuf>>,
 }
 
 impl Interner {
-    fn new() -> Interner {
-        Interner {
-            strs: Mutex::new(TyIntern::new()),
-            paths: Mutex::new(TyIntern::new()),
-        }
-    }
-
     pub fn intern_str(&self, s: &str) -> Interned<String> {
         self.strs.lock().unwrap().intern_borrow(s)
     }
@@ -224,18 +226,18 @@ impl Interner {
 }
 
 lazy_static! {
-    pub static ref INTERNER: Interner = Interner::new();
+    pub static ref INTERNER: Interner = Interner::default();
 }
 
-/// This is essentially a HashMap which allows storing any type in its input and
+/// This is essentially a `HashMap` which allows storing any type in its input and
 /// any type in its output. It is a write-once cache; values are never evicted,
 /// which means that references to the value can safely be returned from the
-/// get() method.
+/// `get()` method.
 #[derive(Debug)]
 pub struct Cache(
     RefCell<HashMap<
         TypeId,
-        Box<Any>, // actually a HashMap<Step, Interned<Step::Output>>
+        Box<dyn Any>, // actually a HashMap<Step, Interned<Step::Output>>
     >>
 );
 
@@ -263,5 +265,22 @@ impl Cache {
                         .downcast_mut::<HashMap<S, S::Output>>()
                         .expect("invalid type mapped");
         stepcache.get(step).cloned()
+    }
+
+    #[cfg(test)]
+    pub fn all<S: Ord + Copy + Step>(&mut self) -> Vec<(S, S::Output)> {
+        let cache = self.0.get_mut();
+        let type_id = TypeId::of::<S>();
+        let mut v = cache.remove(&type_id)
+            .map(|b| b.downcast::<HashMap<S, S::Output>>().expect("correct type"))
+            .map(|m| m.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        v.sort_by_key(|&(a, _)| a);
+        v
+    }
+
+    #[cfg(test)]
+    pub fn contains<S: Step>(&self) -> bool {
+        self.0.borrow().contains_key(&TypeId::of::<S>())
     }
 }

@@ -1,19 +1,9 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! The compiler code necessary for `#[derive(Decodable)]`. See encodable.rs for more.
 
-use deriving;
-use deriving::generic::*;
-use deriving::generic::ty::*;
-use deriving::warn_if_deprecated;
+use crate::deriving::{self, pathvec_std};
+use crate::deriving::generic::*;
+use crate::deriving::generic::ty::*;
+use crate::deriving::warn_if_deprecated;
 
 use syntax::ast;
 use syntax::ast::{Expr, MetaItem, Mutability};
@@ -23,43 +13,35 @@ use syntax::ptr::P;
 use syntax::symbol::Symbol;
 use syntax_pos::Span;
 
-pub fn expand_deriving_rustc_decodable(cx: &mut ExtCtxt,
+pub fn expand_deriving_rustc_decodable(cx: &mut ExtCtxt<'_>,
                                        span: Span,
                                        mitem: &MetaItem,
                                        item: &Annotatable,
-                                       push: &mut FnMut(Annotatable)) {
+                                       push: &mut dyn FnMut(Annotatable)) {
     expand_deriving_decodable_imp(cx, span, mitem, item, push, "rustc_serialize")
 }
 
-pub fn expand_deriving_decodable(cx: &mut ExtCtxt,
+pub fn expand_deriving_decodable(cx: &mut ExtCtxt<'_>,
                                  span: Span,
                                  mitem: &MetaItem,
                                  item: &Annotatable,
-                                 push: &mut FnMut(Annotatable)) {
+                                 push: &mut dyn FnMut(Annotatable)) {
     warn_if_deprecated(cx, span, "Decodable");
     expand_deriving_decodable_imp(cx, span, mitem, item, push, "serialize")
 }
 
-fn expand_deriving_decodable_imp(cx: &mut ExtCtxt,
+fn expand_deriving_decodable_imp(cx: &mut ExtCtxt<'_>,
                                  span: Span,
                                  mitem: &MetaItem,
                                  item: &Annotatable,
-                                 push: &mut FnMut(Annotatable),
+                                 push: &mut dyn FnMut(Annotatable),
                                  krate: &'static str) {
-    if cx.crate_root != Some("std") {
-        // FIXME(#21880): lift this requirement.
-        cx.span_err(span,
-                    "this trait cannot be derived with #![no_std] \
-                           or #![no_core]");
-        return;
-    }
-
     let typaram = &*deriving::hygienic_type_parameter(item, "__D");
 
     let trait_def = TraitDef {
         span,
         attributes: Vec::new(),
-        path: Path::new_(vec![krate, "Decodable"], None, vec![], true),
+        path: Path::new_(vec![krate, "Decodable"], None, vec![], PathKind::Global),
         additional_bounds: Vec::new(),
         generics: LifetimeBounds::empty(),
         is_unsafe: false,
@@ -72,18 +54,18 @@ fn expand_deriving_decodable_imp(cx: &mut ExtCtxt,
                                             vec![Path::new_(vec![krate, "Decoder"],
                                                             None,
                                                             vec![],
-                                                            true)])],
+                                                            PathKind::Global)])],
                           },
                           explicit_self: None,
-                          args: vec![Ptr(Box::new(Literal(Path::new_local(typaram))),
-                                         Borrowed(None, Mutability::Mutable))],
+                          args: vec![(Ptr(Box::new(Literal(Path::new_local(typaram))),
+                                         Borrowed(None, Mutability::Mutable)), "d")],
                           ret_ty:
-                              Literal(Path::new_(pathvec_std!(cx, core::result::Result),
+                              Literal(Path::new_(pathvec_std!(cx, result::Result),
                                                  None,
                                                  vec![Box::new(Self_), Box::new(Literal(Path::new_(
-                        vec![typaram, "Error"], None, vec![], false
+                        vec![typaram, "Error"], None, vec![], PathKind::Local
                     )))],
-                                                 true)),
+                                                 PathKind::Std)),
                           attributes: Vec::new(),
                           is_unsafe: false,
                           unify_fieldless_variants: false,
@@ -97,9 +79,9 @@ fn expand_deriving_decodable_imp(cx: &mut ExtCtxt,
     trait_def.expand(cx, mitem, item, push)
 }
 
-fn decodable_substructure(cx: &mut ExtCtxt,
+fn decodable_substructure(cx: &mut ExtCtxt<'_>,
                           trait_span: Span,
-                          substr: &Substructure,
+                          substr: &Substructure<'_>,
                           krate: &str)
                           -> P<Expr> {
     let decoder = substr.nonself_args[0].clone();
@@ -139,8 +121,8 @@ fn decodable_substructure(cx: &mut ExtCtxt,
         StaticEnum(_, ref fields) => {
             let variant = cx.ident_of("i");
 
-            let mut arms = Vec::new();
-            let mut variants = Vec::new();
+            let mut arms = Vec::with_capacity(fields.len() + 1);
+            let mut variants = Vec::with_capacity(fields.len());
             let rvariant_arg = cx.ident_of("read_enum_variant_arg");
 
             for (i, &(ident, v_span, ref parts)) in fields.iter().enumerate() {
@@ -183,16 +165,16 @@ fn decodable_substructure(cx: &mut ExtCtxt,
     };
 }
 
-/// Create a decoder for a single enum variant/struct:
+/// Creates a decoder for a single enum variant/struct:
 /// - `outer_pat_path` is the path to this enum variant/struct
 /// - `getarg` should retrieve the `usize`-th field with name `@str`.
-fn decode_static_fields<F>(cx: &mut ExtCtxt,
+fn decode_static_fields<F>(cx: &mut ExtCtxt<'_>,
                            trait_span: Span,
                            outer_pat_path: ast::Path,
                            fields: &StaticFields,
                            mut getarg: F)
                            -> P<Expr>
-    where F: FnMut(&mut ExtCtxt, Span, Symbol, usize) -> P<Expr>
+    where F: FnMut(&mut ExtCtxt<'_>, Span, Symbol, usize) -> P<Expr>
 {
     match *fields {
         Unnamed(ref fields, is_tuple) => {

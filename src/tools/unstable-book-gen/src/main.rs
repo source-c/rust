@@ -1,18 +1,9 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Auto-generate stub docs for the unstable book
 
+#![deny(rust_2018_idioms)]
 #![deny(warnings)]
 
-extern crate tidy;
+
 
 use tidy::features::{Feature, Features, collect_lib_features, collect_lang_features};
 use tidy::unstable_book::{collect_unstable_feature_names, collect_unstable_book_section_file_names,
@@ -53,15 +44,15 @@ fn set_to_summary_str(set: &BTreeSet<String>, dir: &str
     set
         .iter()
         .map(|ref n| format!("    - [{}]({}/{}.md)",
-                                      n,
+                                      n.replace('-', "_"),
                                       dir,
-                                      n.replace('_', "-")))
+                                      n))
         .fold("".to_owned(), |s, a| s + &a + "\n")
 }
 
 fn generate_summary(path: &Path, lang_features: &Features, lib_features: &Features) {
     let compiler_flags = collect_unstable_book_section_file_names(
-        &path.join("compiler-flags"));
+        &path.join("src/compiler-flags"));
 
     let compiler_flags_str = set_to_summary_str(&compiler_flags,
                                                 "compiler-flags");
@@ -70,11 +61,11 @@ fn generate_summary(path: &Path, lang_features: &Features, lib_features: &Featur
     let unstable_lib_features = collect_unstable_feature_names(&lib_features);
 
     let lang_features_str = set_to_summary_str(&unstable_lang_features,
-                                               LANG_FEATURES_DIR);
+                                               "language-features");
     let lib_features_str = set_to_summary_str(&unstable_lib_features,
-                                              LIB_FEATURES_DIR);
+                                              "library-features");
 
-    let mut file = t!(File::create(&path.join("SUMMARY.md")));
+    let mut file = t!(File::create(&path.join("src/SUMMARY.md")));
     t!(file.write_fmt(format_args!(include_str!("SUMMARY.md"),
                                    compiler_flags = compiler_flags_str,
                                    language_features = lang_features_str,
@@ -96,20 +87,23 @@ fn generate_unstable_book_files(src :&Path, out: &Path, features :&Features) {
     let unstable_section_file_names = collect_unstable_book_section_file_names(src);
     t!(fs::create_dir_all(&out));
     for feature_name in &unstable_features - &unstable_section_file_names {
-        let file_name = format!("{}.md", feature_name.replace('_', "-"));
+        let feature_name_underscore = feature_name.replace('-', "_");
+        let file_name = format!("{}.md", feature_name);
         let out_file_path = out.join(&file_name);
-        let feature = &features[&feature_name];
+        let feature = &features[&feature_name_underscore];
 
         if has_valid_tracking_issue(&feature) {
-            generate_stub_issue(&out_file_path, &feature_name, feature.tracking_issue.unwrap());
+            generate_stub_issue(&out_file_path,
+                                &feature_name_underscore,
+                                feature.tracking_issue.unwrap());
         } else {
-            generate_stub_no_issue(&out_file_path, &feature_name);
+            generate_stub_no_issue(&out_file_path, &feature_name_underscore);
         }
     }
 }
 
-fn copy_recursive(path: &Path, to: &Path) {
-    for entry in t!(fs::read_dir(path)) {
+fn copy_recursive(from: &Path, to: &Path) {
+    for entry in t!(fs::read_dir(from)) {
         let e = t!(entry);
         let t = t!(e.metadata());
         let dest = &to.join(e.file_name());
@@ -126,10 +120,12 @@ fn main() {
     let src_path_str = env::args_os().skip(1).next().expect("source path required");
     let dest_path_str = env::args_os().skip(2).next().expect("destination path required");
     let src_path = Path::new(&src_path_str);
-    let dest_path = Path::new(&dest_path_str).join("src");
+    let dest_path = Path::new(&dest_path_str);
 
-    let lang_features = collect_lang_features(src_path);
-    let lib_features = collect_lib_features(src_path);
+    let lang_features = collect_lang_features(src_path, &mut false);
+    let lib_features = collect_lib_features(src_path).into_iter().filter(|&(ref name, _)| {
+        !lang_features.contains_key(name)
+    }).collect();
 
     let doc_src_path = src_path.join(PATH_STR);
 

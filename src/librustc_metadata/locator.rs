@@ -1,13 +1,3 @@
-// Copyright 2012-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Finds crate binaries and loads their metadata
 //!
 //! Might I be the first to welcome you to a world of platform differences,
@@ -37,7 +27,7 @@
 //!
 //! The reason for this is that any of B's types could be composed of C's types,
 //! any function in B could return a type from C, etc. To be able to guarantee
-//! that we can always typecheck/translate any function, we have to have
+//! that we can always type-check/translate any function, we have to have
 //! complete knowledge of the whole ecosystem, not just our immediate
 //! dependencies.
 //!
@@ -83,7 +73,10 @@
 //! 1. Does the filename match an rlib/dylib pattern? That is to say, does the
 //!    filename have the right prefix/suffix?
 //! 2. Does the filename have the right prefix for the crate name being queried?
-//!    This is filtering for files like `libfoo*.rlib` and such.
+//!    This is filtering for files like `libfoo*.rlib` and such. If the crate
+//!    we're looking for was originally compiled with -C extra-filename, the
+//!    extra filename will be included in this prefix to reduce reading
+//!    metadata from crates that would otherwise share our prefix.
 //! 3. Is the file an actual rust library? This is done by loading the metadata
 //!    from the library and making sure it's actually there.
 //! 4. Does the name in the metadata agree with the name of the library?
@@ -219,11 +212,12 @@
 //! no means all of the necessary details. Take a look at the rest of
 //! metadata::locator or metadata::creader for all the juicy details!
 
-use cstore::MetadataBlob;
-use creader::Library;
-use schema::{METADATA_HEADER, rustc_version};
+use crate::cstore::{MetadataRef, MetadataBlob};
+use crate::creader::Library;
+use crate::schema::{METADATA_HEADER, rustc_version};
 
-use rustc::hir::svh::Svh;
+use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::svh::Svh;
 use rustc::middle::cstore::MetadataLoader;
 use rustc::session::{config, Session};
 use rustc::session::filesearch::{FileSearch, FileMatches, FileDoesntMatch};
@@ -231,34 +225,42 @@ use rustc::session::search_paths::PathKind;
 use rustc::util::nodemap::FxHashMap;
 
 use errors::DiagnosticBuilder;
-use syntax::symbol::Symbol;
+use syntax::symbol::{Symbol, sym};
+use syntax::struct_span_err;
 use syntax_pos::Span;
-use rustc_back::target::Target;
+use rustc_target::spec::{Target, TargetTriple};
 
 use std::cmp;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Read};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use flate2::read::DeflateDecoder;
-use owning_ref::{ErasedBoxRef, OwningRef};
 
+use rustc_data_structures::owning_ref::OwningRef;
+
+use log::{debug, info, warn};
+
+#[derive(Clone)]
 pub struct CrateMismatch {
     path: PathBuf,
     got: String,
 }
 
+#[derive(Clone)]
 pub struct Context<'a> {
     pub sess: &'a Session,
     pub span: Span,
     pub ident: Symbol,
     pub crate_name: Symbol,
     pub hash: Option<&'a Svh>,
+    pub extra_filename: Option<&'a str>,
     // points to either self.sess.target.target or self.sess.host, must match triple
     pub target: &'a Target,
-    pub triple: &'a str,
+    pub triple: TargetTriple,
     pub filesearch: FileSearch<'a>,
     pub root: &'a Option<CratePaths>,
     pub rejected_via_hash: Vec<CrateMismatch>,
@@ -268,7 +270,7 @@ pub struct Context<'a> {
     pub rejected_via_filename: Vec<CrateMismatch>,
     pub should_match_name: bool,
     pub is_proc_macro: Option<bool>,
-    pub metadata_loader: &'a MetadataLoader,
+    pub metadata_loader: &'a dyn MetadataLoader,
 }
 
 pub struct CratePaths {
@@ -286,7 +288,7 @@ enum CrateFlavor {
 }
 
 impl fmt::Display for CrateFlavor {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match *self {
             CrateFlavor::Rlib => "rlib",
             CrateFlavor::Rmeta => "rmeta",
@@ -302,44 +304,102 @@ impl CratePaths {
 }
 
 impl<'a> Context<'a> {
-    pub fn maybe_load_library_crate(&mut self) -> Option<Library> {
-        self.find_library_crate()
+    pub fn reset(&mut self) {
+        self.rejected_via_hash.clear();
+        self.rejected_via_triple.clear();
+        self.rejected_via_kind.clear();
+        self.rejected_via_version.clear();
+        self.rejected_via_filename.clear();
     }
 
-    pub fn report_errs(&mut self) -> ! {
+    pub fn maybe_load_library_crate(&mut self) -> Option<Library> {
+        let mut seen_paths = FxHashSet::default();
+        match self.extra_filename {
+            Some(s) => self.find_library_crate(s, &mut seen_paths)
+                .or_else(|| self.find_library_crate("", &mut seen_paths)),
+            None => self.find_library_crate("", &mut seen_paths)
+        }
+    }
+
+    pub fn report_errs(self) -> ! {
         let add = match self.root {
             &None => String::new(),
             &Some(ref r) => format!(" which `{}` depends on", r.ident),
         };
+        let mut msg = "the following crate versions were found:".to_string();
         let mut err = if !self.rejected_via_hash.is_empty() {
-            struct_span_err!(self.sess,
-                             self.span,
-                             E0460,
-                             "found possibly newer version of crate `{}`{}",
-                             self.ident,
-                             add)
+            let mut err = struct_span_err!(self.sess,
+                                           self.span,
+                                           E0460,
+                                           "found possibly newer version of crate `{}`{}",
+                                           self.ident,
+                                           add);
+            err.note("perhaps that crate needs to be recompiled?");
+            let mismatches = self.rejected_via_hash.iter();
+            for &CrateMismatch { ref path, .. } in mismatches {
+                msg.push_str(&format!("\ncrate `{}`: {}", self.ident, path.display()));
+            }
+            match self.root {
+                &None => {}
+                &Some(ref r) => {
+                    for path in r.paths().iter() {
+                        msg.push_str(&format!("\ncrate `{}`: {}", r.ident, path.display()));
+                    }
+                }
+            }
+            err.note(&msg);
+            err
         } else if !self.rejected_via_triple.is_empty() {
-            struct_span_err!(self.sess,
-                             self.span,
-                             E0461,
-                             "couldn't find crate `{}` with expected target triple {}{}",
-                             self.ident,
-                             self.triple,
-                             add)
+            let mut err = struct_span_err!(self.sess,
+                                           self.span,
+                                           E0461,
+                                           "couldn't find crate `{}` \
+                                            with expected target triple {}{}",
+                                           self.ident,
+                                           self.triple,
+                                           add);
+            let mismatches = self.rejected_via_triple.iter();
+            for &CrateMismatch { ref path, ref got } in mismatches {
+                msg.push_str(&format!("\ncrate `{}`, target triple {}: {}",
+                                      self.ident,
+                                      got,
+                                      path.display()));
+            }
+            err.note(&msg);
+            err
         } else if !self.rejected_via_kind.is_empty() {
-            struct_span_err!(self.sess,
-                             self.span,
-                             E0462,
-                             "found staticlib `{}` instead of rlib or dylib{}",
-                             self.ident,
-                             add)
+            let mut err = struct_span_err!(self.sess,
+                                           self.span,
+                                           E0462,
+                                           "found staticlib `{}` instead of rlib or dylib{}",
+                                           self.ident,
+                                           add);
+            err.help("please recompile that crate using --crate-type lib");
+            let mismatches = self.rejected_via_kind.iter();
+            for &CrateMismatch { ref path, .. } in mismatches {
+                msg.push_str(&format!("\ncrate `{}`: {}", self.ident, path.display()));
+            }
+            err.note(&msg);
+            err
         } else if !self.rejected_via_version.is_empty() {
-            struct_span_err!(self.sess,
-                             self.span,
-                             E0514,
-                             "found crate `{}` compiled by an incompatible version of rustc{}",
-                             self.ident,
-                             add)
+            let mut err = struct_span_err!(self.sess,
+                                           self.span,
+                                           E0514,
+                                           "found crate `{}` compiled by an incompatible version \
+                                            of rustc{}",
+                                           self.ident,
+                                           add);
+            err.help(&format!("please recompile that crate using this compiler ({})",
+                              rustc_version()));
+            let mismatches = self.rejected_via_version.iter();
+            for &CrateMismatch { ref path, ref got } in mismatches {
+                msg.push_str(&format!("\ncrate `{}` compiled by {}: {}",
+                                      self.ident,
+                                      got,
+                                      path.display()));
+            }
+            err.note(&msg);
+            err
         } else {
             let mut err = struct_span_err!(self.sess,
                                            self.span,
@@ -348,61 +408,14 @@ impl<'a> Context<'a> {
                                            self.ident,
                                            add);
 
-            if (self.ident == "std" || self.ident == "core")
-                && self.triple != config::host_triple() {
+            if (self.ident == sym::std || self.ident == sym::core)
+                && self.triple != TargetTriple::from_triple(config::host_triple()) {
                 err.note(&format!("the `{}` target may not be installed", self.triple));
             }
             err.span_label(self.span, "can't find crate");
             err
         };
 
-        if !self.rejected_via_triple.is_empty() {
-            let mismatches = self.rejected_via_triple.iter();
-            for (i, &CrateMismatch { ref path, ref got }) in mismatches.enumerate() {
-                err.note(&format!("crate `{}`, path #{}, triple {}: {}",
-                                  self.ident,
-                                  i + 1,
-                                  got,
-                                  path.display()));
-            }
-        }
-        if !self.rejected_via_hash.is_empty() {
-            err.note("perhaps that crate needs to be recompiled?");
-            let mismatches = self.rejected_via_hash.iter();
-            for (i, &CrateMismatch { ref path, .. }) in mismatches.enumerate() {
-                err.note(&format!("crate `{}` path #{}: {}", self.ident, i + 1, path.display()));
-            }
-            match self.root {
-                &None => {}
-                &Some(ref r) => {
-                    for (i, path) in r.paths().iter().enumerate() {
-                        err.note(&format!("crate `{}` path #{}: {}",
-                                          r.ident,
-                                          i + 1,
-                                          path.display()));
-                    }
-                }
-            }
-        }
-        if !self.rejected_via_kind.is_empty() {
-            err.help("please recompile that crate using --crate-type lib");
-            let mismatches = self.rejected_via_kind.iter();
-            for (i, &CrateMismatch { ref path, .. }) in mismatches.enumerate() {
-                err.note(&format!("crate `{}` path #{}: {}", self.ident, i + 1, path.display()));
-            }
-        }
-        if !self.rejected_via_version.is_empty() {
-            err.help(&format!("please recompile that crate using this compiler ({})",
-                              rustc_version()));
-            let mismatches = self.rejected_via_version.iter();
-            for (i, &CrateMismatch { ref path, ref got }) in mismatches.enumerate() {
-                err.note(&format!("crate `{}` path #{}: {} compiled by {:?}",
-                                  self.ident,
-                                  i + 1,
-                                  path.display(),
-                                  got));
-            }
-        }
         if !self.rejected_via_filename.is_empty() {
             let dylibname = self.dylibname();
             let mismatches = self.rejected_via_filename.iter();
@@ -421,13 +434,21 @@ impl<'a> Context<'a> {
         unreachable!();
     }
 
-    fn find_library_crate(&mut self) -> Option<Library> {
+    fn find_library_crate(&mut self,
+                          extra_prefix: &str,
+                          seen_paths: &mut FxHashSet<PathBuf>)
+                          -> Option<Library> {
         // If an SVH is specified, then this is a transitive dependency that
         // must be loaded via -L plus some filtering.
         if self.hash.is_none() {
             self.should_match_name = false;
-            if let Some(s) = self.sess.opts.externs.get(&self.crate_name.as_str()) {
-                return self.find_commandline_library(s.iter());
+            if let Some(entry) = self.sess.opts.externs.get(&self.crate_name.as_str()) {
+                // Only use `--extern crate_name=path` here, not `--extern crate_name`.
+                if entry.locations.iter().any(|l| l.is_some()) {
+                    return self.find_commandline_library(
+                        entry.locations.iter().filter_map(|l| l.as_ref()),
+                    );
+                }
             }
             self.should_match_name = true;
         }
@@ -436,11 +457,14 @@ impl<'a> Context<'a> {
         let staticpair = self.staticlibname();
 
         // want: crate_name.dir_part() + prefix + crate_name.file_part + "-"
-        let dylib_prefix = format!("{}{}", dypair.0, self.crate_name);
-        let rlib_prefix = format!("lib{}", self.crate_name);
-        let staticlib_prefix = format!("{}{}", staticpair.0, self.crate_name);
+        let dylib_prefix = format!("{}{}{}", dypair.0, self.crate_name, extra_prefix);
+        let rlib_prefix = format!("lib{}{}", self.crate_name, extra_prefix);
+        let staticlib_prefix = format!("{}{}{}", staticpair.0, self.crate_name, extra_prefix);
 
-        let mut candidates = FxHashMap();
+        let mut candidates: FxHashMap<
+            _,
+            (FxHashMap<_, _>, FxHashMap<_, _>, FxHashMap<_, _>),
+        > = Default::default();
         let mut staticlibs = vec![];
 
         // First, find all possible candidate rlibs and dylibs purely based on
@@ -478,14 +502,18 @@ impl<'a> Context<'a> {
                     }
                     return FileDoesntMatch;
                 };
+
             info!("lib candidate: {}", path.display());
 
             let hash_str = hash.to_string();
-            let slot = candidates.entry(hash_str)
-                .or_insert_with(|| (FxHashMap(), FxHashMap(), FxHashMap()));
+            let slot = candidates.entry(hash_str).or_default();
             let (ref mut rlibs, ref mut rmetas, ref mut dylibs) = *slot;
             fs::canonicalize(path)
                 .map(|p| {
+                    if seen_paths.contains(&p) {
+                        return FileDoesntMatch
+                    };
+                    seen_paths.insert(p.clone());
                     match found_kind {
                         CrateFlavor::Rlib => { rlibs.insert(p, kind); }
                         CrateFlavor::Rmeta => { rmetas.insert(p, kind); }
@@ -505,7 +533,7 @@ impl<'a> Context<'a> {
         // A Library candidate is created if the metadata for the set of
         // libraries corresponds to the crate id and hash criteria that this
         // search is being performed for.
-        let mut libraries = FxHashMap();
+        let mut libraries = FxHashMap::default();
         for (_hash, (rlibs, rmetas, dylibs)) in candidates {
             let mut slot = None;
             let rlib = self.extract_one(rlibs, CrateFlavor::Rlib, &mut slot);
@@ -534,16 +562,23 @@ impl<'a> Context<'a> {
                                                E0464,
                                                "multiple matching crates for `{}`",
                                                self.crate_name);
-                err.note("candidates:");
-                for (_, lib) in libraries {
-                    if let Some((ref p, _)) = lib.dylib {
-                        err.note(&format!("path: {}", p.display()));
+                let candidates = libraries.iter().filter_map(|(_, lib)| {
+                    let crate_name = &lib.metadata.get_root().name.as_str();
+                    match &(&lib.dylib, &lib.rlib) {
+                        &(&Some((ref pd, _)), &Some((ref pr, _))) => {
+                            Some(format!("\ncrate `{}`: {}\n{:>padding$}",
+                                         crate_name,
+                                         pd.display(),
+                                         pr.display(),
+                                         padding=8 + crate_name.len()))
+                        }
+                        &(&Some((ref p, _)), &None) | &(&None, &Some((ref p, _))) => {
+                            Some(format!("\ncrate `{}`: {}", crate_name, p.display()))
+                        }
+                        &(&None, &None) => None,
                     }
-                    if let Some((ref p, _)) = lib.rlib {
-                        err.note(&format!("path: {}", p.display()));
-                    }
-                    note_crate_name(&mut err, &lib.metadata.get_root().name.as_str());
-                }
+                }).collect::<String>();
+                err.note(&format!("candidates:{}", candidates));
                 err.emit();
                 None
             }
@@ -578,7 +613,7 @@ impl<'a> Context<'a> {
             }
         }
 
-        let mut err: Option<DiagnosticBuilder> = None;
+        let mut err: Option<DiagnosticBuilder<'_>> = None;
         for (lib, kind) in m {
             info!("{} reading metadata from: {}", flavor, lib.display());
             let (hash, metadata) =
@@ -592,7 +627,7 @@ impl<'a> Context<'a> {
                         }
                     }
                     Err(err) => {
-                        info!("no metadata found: {}", err);
+                        warn!("no metadata found: {}", err);
                         continue;
                     }
                 };
@@ -629,7 +664,7 @@ impl<'a> Context<'a> {
             // Ok so at this point we've determined that `(lib, kind)` above is
             // a candidate crate to load, and that `slot` is either none (this
             // is the first crate of its kind) or if some the previous path has
-            // the exact same hash (e.g. it's the exact same crate).
+            // the exact same hash (e.g., it's the exact same crate).
             //
             // In principle these two candidate crates are exactly the same so
             // we can choose either of them to link. As a stupidly gross hack,
@@ -646,9 +681,9 @@ impl<'a> Context<'a> {
             // candidates are all canonicalized, so we canonicalize the sysroot
             // as well.
             if let Some((ref prev, _)) = ret {
-                let sysroot = self.sess.sysroot();
+                let sysroot = &self.sess.sysroot;
                 let sysroot = sysroot.canonicalize()
-                                     .unwrap_or(sysroot.to_path_buf());
+                                     .unwrap_or_else(|_| sysroot.to_path_buf());
                 if prev.starts_with(&sysroot) {
                     continue
                 }
@@ -681,7 +716,7 @@ impl<'a> Context<'a> {
 
         let root = metadata.get_root();
         if let Some(is_proc_macro) = self.is_proc_macro {
-            if root.macro_derive_registrar.is_some() != is_proc_macro {
+            if root.proc_macro_decls_static.is_some() != is_proc_macro {
                 return None;
             }
         }
@@ -699,7 +734,7 @@ impl<'a> Context<'a> {
                   root.triple);
             self.rejected_via_triple.push(CrateMismatch {
                 path: libpath.to_path_buf(),
-                got: root.triple,
+                got: root.triple.to_string(),
             });
             return None;
         }
@@ -741,9 +776,9 @@ impl<'a> Context<'a> {
         // rlibs/dylibs.
         let sess = self.sess;
         let dylibname = self.dylibname();
-        let mut rlibs = FxHashMap();
-        let mut rmetas = FxHashMap();
-        let mut dylibs = FxHashMap();
+        let mut rlibs = FxHashMap::default();
+        let mut rmetas = FxHashMap::default();
+        let mut dylibs = FxHashMap::default();
         {
             let locs = locs.map(|l| PathBuf::from(l)).filter(|loc| {
                 if !loc.exists() {
@@ -801,29 +836,22 @@ impl<'a> Context<'a> {
         if rlib.is_none() && rmeta.is_none() && dylib.is_none() {
             return None;
         }
-        match slot {
-            Some((_, metadata)) => {
-                Some(Library {
-                    dylib,
-                    rlib,
-                    rmeta,
-                    metadata,
-                })
+        slot.map(|(_, metadata)|
+            Library {
+                dylib,
+                rlib,
+                rmeta,
+                metadata,
             }
-            None => None,
-        }
+        )
     }
-}
-
-pub fn note_crate_name(err: &mut DiagnosticBuilder, name: &str) {
-    err.note(&format!("crate name: {}", name));
 }
 
 // Just a small wrapper to time how long reading metadata takes.
 fn get_metadata_section(target: &Target,
                         flavor: CrateFlavor,
                         filename: &Path,
-                        loader: &MetadataLoader)
+                        loader: &dyn MetadataLoader)
                         -> Result<MetadataBlob, String> {
     let start = Instant::now();
     let ret = get_metadata_section_imp(target, flavor, filename, loader);
@@ -833,15 +861,28 @@ fn get_metadata_section(target: &Target,
     return ret;
 }
 
+/// A trivial wrapper for `Mmap` that implements `StableDeref`.
+struct StableDerefMmap(memmap::Mmap);
+
+impl Deref for StableDerefMmap {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.0.deref()
+    }
+}
+
+unsafe impl stable_deref_trait::StableDeref for StableDerefMmap {}
+
 fn get_metadata_section_imp(target: &Target,
                             flavor: CrateFlavor,
                             filename: &Path,
-                            loader: &MetadataLoader)
+                            loader: &dyn MetadataLoader)
                             -> Result<MetadataBlob, String> {
     if !filename.exists() {
         return Err(format!("no such file: '{}'", filename.display()));
     }
-    let raw_bytes: ErasedBoxRef<[u8]> = match flavor {
+    let raw_bytes: MetadataRef = match flavor {
         CrateFlavor::Rlib => loader.get_rlib_metadata(target, filename)?,
         CrateFlavor::Dylib => {
             let buf = loader.get_dylib_metadata(target, filename)?;
@@ -860,8 +901,7 @@ fn get_metadata_section_imp(target: &Target,
             let mut inflated = Vec::new();
             match DeflateDecoder::new(compressed_bytes).read_to_end(&mut inflated) {
                 Ok(_) => {
-                    let buf = unsafe { OwningRef::new_assert_stable_address(inflated) };
-                    buf.map_owner_box().erase_owner()
+                    rustc_erase_owner!(OwningRef::new(inflated).map_owner_box())
                 }
                 Err(_) => {
                     return Err(format!("failed to decompress metadata: {}", filename.display()));
@@ -869,12 +909,14 @@ fn get_metadata_section_imp(target: &Target,
             }
         }
         CrateFlavor::Rmeta => {
-            let mut file = File::open(filename).map_err(|_|
-                format!("could not open file: '{}'", filename.display()))?;
-            let mut buf = vec![];
-            file.read_to_end(&mut buf).map_err(|_|
-                format!("failed to read rmeta metadata: '{}'", filename.display()))?;
-            OwningRef::new(buf).map_owner_box().erase_owner()
+            // mmap the file, because only a small fraction of it is read.
+            let file = std::fs::File::open(filename).map_err(|_|
+                format!("failed to open rmeta metadata: '{}'", filename.display()))?;
+            let mmap = unsafe { memmap::Mmap::map(&file) };
+            let mmap = mmap.map_err(|_|
+                format!("failed to mmap rmeta metadata: '{}'", filename.display()))?;
+
+            rustc_erase_owner!(OwningRef::new(StableDerefMmap(mmap)).map_owner_box())
         }
     };
     let blob = MetadataBlob(raw_bytes);
@@ -885,11 +927,11 @@ fn get_metadata_section_imp(target: &Target,
     }
 }
 
-// A diagnostic function for dumping crate metadata to an output stream
+/// A diagnostic function for dumping crate metadata to an output stream.
 pub fn list_file_metadata(target: &Target,
                           path: &Path,
-                          loader: &MetadataLoader,
-                          out: &mut io::Write)
+                          loader: &dyn MetadataLoader,
+                          out: &mut dyn io::Write)
                           -> io::Result<()> {
     let filename = path.file_name().unwrap().to_str().unwrap();
     let flavor = if filename.ends_with(".rlib") {

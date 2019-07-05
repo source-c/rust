@@ -1,13 +1,3 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Platform-independent platform abstraction
 //!
 //! This is the platform-independent portion of the standard library's
@@ -25,16 +15,44 @@
 #![allow(missing_docs)]
 #![allow(missing_debug_implementations)]
 
-use sync::Once;
-use sys;
+use crate::sync::Once;
+use crate::sys;
 
+macro_rules! rtabort {
+    ($($t:tt)*) => (crate::sys_common::util::abort(format_args!($($t)*)))
+}
+
+macro_rules! rtassert {
+    ($e:expr) => (if !$e {
+        rtabort!(concat!("assertion failed: ", stringify!($e)));
+    })
+}
+
+#[allow(unused_macros)] // not used on all platforms
+macro_rules! rtunwrap {
+    ($ok:ident, $e:expr) => (match $e {
+        $ok(v) => v,
+        ref err => {
+            let err = err.as_ref().map(|_|()); // map Ok/Some which might not be Debug
+            rtabort!(concat!("unwrap failed: ", stringify!($e), " = {:?}"), err)
+        },
+    })
+}
+
+pub mod alloc;
 pub mod at_exit_imp;
 #[cfg(feature = "backtrace")]
 pub mod backtrace;
 pub mod condvar;
 pub mod io;
-pub mod memchr;
 pub mod mutex;
+#[cfg(any(rustdoc, // see `mod os`, docs are generated for multiple platforms
+          unix,
+          target_os = "redox",
+          target_os = "cloudabi",
+          target_arch = "wasm32",
+          all(target_vendor = "fortanix", target_env = "sgx")))]
+pub mod os_str_bytes;
 pub mod poison;
 pub mod remutex;
 pub mod rwlock;
@@ -43,18 +61,21 @@ pub mod thread_info;
 pub mod thread_local;
 pub mod util;
 pub mod wtf8;
+pub mod bytestring;
+pub mod process;
+pub mod fs;
 
-#[cfg(any(target_os = "redox", target_os = "l4re"))]
-pub use sys::net;
-
-#[cfg(not(any(target_os = "redox", target_os = "l4re")))]
-pub mod net;
-
-#[cfg(feature = "backtrace")]
-#[cfg(any(all(unix, not(target_os = "emscripten")),
-          all(windows, target_env = "gnu"),
-          target_os = "redox"))]
-pub mod gnu;
+cfg_if::cfg_if! {
+    if #[cfg(any(target_os = "cloudabi",
+                 target_os = "l4re",
+                 target_os = "redox",
+                 all(target_arch = "wasm32", not(target_os = "emscripten")),
+                 all(target_vendor = "fortanix", target_env = "sgx")))] {
+        pub use crate::sys::net;
+    } else {
+        pub mod net;
+    }
+}
 
 // common error constructors
 
@@ -94,10 +115,6 @@ pub trait FromInner<Inner> {
 /// to be run.
 pub fn at_exit<F: FnOnce() + Send + 'static>(f: F) -> Result<(), ()> {
     if at_exit_imp::push(Box::new(f)) {Ok(())} else {Err(())}
-}
-
-macro_rules! rtabort {
-    ($($t:tt)*) => (::sys_common::util::abort(format_args!($($t)*)))
 }
 
 /// One-time runtime cleanup.

@@ -1,17 +1,7 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use rustc::ty::TyCtxt;
 use rustc::mir::*;
-use rustc::mir::transform::{MirPass, MirSource};
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
+use crate::transform::{MirPass, MirSource};
 
 #[derive(PartialEq)]
 pub enum AddCallGuards {
@@ -30,7 +20,7 @@ pub use self::AddCallGuards::*;
  * do at the end of the predecessor block, or at the start of the
  * successor block. Critical edges have to be broken in order to prevent
  * "edge actions" from affecting other edges. We need this for calls that are
- * translated to LLVM invoke instructions, because invoke is a block terminator
+ * codegened to LLVM invoke instructions, because invoke is a block terminator
  * in LLVM so we can't insert any code to handle the call's result into the
  * block that performs the call.
  *
@@ -41,25 +31,22 @@ pub use self::AddCallGuards::*;
  */
 
 impl MirPass for AddCallGuards {
-    fn run_pass<'a, 'tcx>(&self,
-                          _tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                          _src: MirSource,
-                          mir: &mut Mir<'tcx>) {
-        self.add_call_guards(mir);
+    fn run_pass<'tcx>(&self, _tcx: TyCtxt<'tcx>, _src: MirSource<'tcx>, body: &mut Body<'tcx>) {
+        self.add_call_guards(body);
     }
 }
 
 impl AddCallGuards {
-    pub fn add_call_guards(&self, mir: &mut Mir) {
+    pub fn add_call_guards(&self, body: &mut Body<'_>) {
         let pred_count: IndexVec<_, _> =
-            mir.predecessors().iter().map(|ps| ps.len()).collect();
+            body.predecessors().iter().map(|ps| ps.len()).collect();
 
         // We need a place to store the new blocks generated
         let mut new_blocks = Vec::new();
 
-        let cur_len = mir.basic_blocks().len();
+        let cur_len = body.basic_blocks().len();
 
-        for block in mir.basic_blocks_mut() {
+        for block in body.basic_blocks_mut() {
             match block.terminator {
                 Some(Terminator {
                     kind: TerminatorKind::Call {
@@ -91,6 +78,6 @@ impl AddCallGuards {
 
         debug!("Broke {} N edges", new_blocks.len());
 
-        mir.basic_blocks_mut().extend(new_blocks);
+        body.basic_blocks_mut().extend(new_blocks);
     }
 }

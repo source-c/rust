@@ -1,46 +1,25 @@
-// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-#![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
-      html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
-      html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 
 #![allow(non_camel_case_types)]
+#![deny(rust_2018_idioms)]
+#![deny(internal)]
+#![deny(unused_lifetimes)]
 
-#![feature(quote)]
-#![feature(rustc_diagnostic_macros)]
+#![feature(in_band_lifetimes)]
+#![feature(nll)]
 
-#[macro_use] extern crate log;
-#[macro_use] extern crate syntax;
-extern crate syntax_pos;
-extern crate rustc_errors as errors;
+#![recursion_limit="256"]
 
-// for "clarity", rename the graphviz crate to dot; graphviz within `borrowck`
-// refers to the borrowck-specific graphviz adapter traits.
-extern crate graphviz as dot;
 #[macro_use]
 extern crate rustc;
-extern crate rustc_mir;
 
 pub use borrowck::check_crate;
 pub use borrowck::build_borrowck_dataflow_data_for_fn;
-
-// NB: This module needs to be declared first so diagnostics are
-// registered before they are used.
-mod diagnostics;
 
 mod borrowck;
 
 pub mod graphviz;
 
-pub use borrowck::provide;
+mod dataflow;
 
-__build_diagnostic_array! { librustc_borrowck, DIAGNOSTICS }
+pub use borrowck::provide;

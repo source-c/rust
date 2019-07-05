@@ -1,38 +1,21 @@
-[submodule "src/llvm"]
-	path = src/llvm
-	url = https://github.com/rust-lang/llvm.git
-	branch = master
-[submodule "src/rt/hoedown"]
-	path = src/rt/hoedown
-	url = https://github.com/rust-lang/hoedown.git
-	branch = rust-2015-09-21-do-not-delete
-[submodule "src/jemalloc"]
-	path = src/jemalloc
-	url = https://github.com/rust-lang/jemalloc.git
 [submodule "src/rust-installer"]
 	path = src/tools/rust-installer
 	url = https://github.com/rust-lang/rust-installer.git
-[submodule "src/liblibc"]
-	path = src/liblibc
-	url = https://github.com/rust-lang/libc.git
 [submodule "src/doc/nomicon"]
 	path = src/doc/nomicon
 	url = https://github.com/rust-lang-nursery/nomicon.git
 [submodule "src/tools/cargo"]
 	path = src/tools/cargo
 	url = https://github.com/rust-lang/cargo.git
-[submodule "reference"]
+[submodule "src/doc/reference"]
 	path = src/doc/reference
 	url = https://github.com/rust-lang-nursery/reference.git
-[submodule "book"]
+[submodule "src/doc/book"]
 	path = src/doc/book
 	url = https://github.com/rust-lang/book.git
 [submodule "src/tools/rls"]
 	path = src/tools/rls
 	url = https://github.com/rust-lang-nursery/rls.git
-[submodule "src/libcompiler_builtins"]
-	path = src/libcompiler_builtins
-	url = https://github.com/rust-lang-nursery/compiler-builtins
 [submodule "src/tools/clippy"]
 	path = src/tools/clippy
 	url = https://github.com/rust-lang-nursery/rust-clippy.git
@@ -41,4 +24,26 @@
 	url = https://github.com/rust-lang-nursery/rustfmt.git
 [submodule "src/tools/miri"]
 	path = src/tools/miri
-	url = https://github.com/solson/miri.git
+	url = https://github.com/rust-lang/miri.git
+[submodule "src/doc/rust-by-example"]
+	path = src/doc/rust-by-example
+	url = https://github.com/rust-lang/rust-by-example.git
+[submodule "src/llvm-emscripten"]
+	path = src/llvm-emscripten
+	url = https://github.com/rust-lang/llvm.git
+[submodule "src/stdsimd"]
+	path = src/stdsimd
+	url = https://github.com/rust-lang-nursery/stdsimd.git
+[submodule "src/doc/rustc-guide"]
+	path = src/doc/rustc-guide
+	url = https://github.com/rust-lang/rustc-guide.git
+[submodule "src/doc/edition-guide"]
+	path = src/doc/edition-guide
+	url = https://github.com/rust-lang-nursery/edition-guide.git
+[submodule "src/llvm-project"]
+	path = src/llvm-project
+	url = https://github.com/rust-lang/llvm-project.git
+	branch = rustc/8.0-2019-03-18
+[submodule "src/doc/embedded-book"]
+	path = src/doc/embedded-book
+	url = https://github.com/rust-embedded/book.git

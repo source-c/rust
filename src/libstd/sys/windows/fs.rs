@@ -1,27 +1,17 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::os::windows::prelude::*;
 
-use os::windows::prelude::*;
-
-use ffi::OsString;
-use fmt;
-use io::{self, Error, SeekFrom};
-use mem;
-use path::{Path, PathBuf};
-use ptr;
-use slice;
-use sync::Arc;
-use sys::handle::Handle;
-use sys::time::SystemTime;
-use sys::{c, cvt};
-use sys_common::FromInner;
+use crate::ffi::OsString;
+use crate::fmt;
+use crate::io::{self, Error, SeekFrom, IoSlice, IoSliceMut};
+use crate::mem;
+use crate::path::{Path, PathBuf};
+use crate::ptr;
+use crate::slice;
+use crate::sync::Arc;
+use crate::sys::handle::Handle;
+use crate::sys::time::SystemTime;
+use crate::sys::{c, cvt};
+use crate::sys_common::FromInner;
 
 use super::to_u16s;
 
@@ -38,8 +28,9 @@ pub struct FileAttr {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub enum FileType {
-    Dir, File, SymlinkFile, SymlinkDir, ReparsePoint, MountPoint,
+pub struct FileType {
+    attributes: c::DWORD,
+    reparse_tag: c::DWORD,
 }
 
 pub struct ReadDir {
@@ -83,7 +74,7 @@ pub struct FilePermissions { attrs: c::DWORD }
 pub struct DirBuilder;
 
 impl fmt::Debug for ReadDir {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // This will only be called from std::fs::ReadDir, which will add a "ReadDir()" frame.
         // Thus the result will be e g 'ReadDir("C:\")'
         fmt::Debug::fmt(&*self.root, f)
@@ -200,7 +191,11 @@ impl OpenOptions {
     pub fn access_mode(&mut self, access_mode: u32) { self.access_mode = Some(access_mode); }
     pub fn share_mode(&mut self, share_mode: u32) { self.share_mode = share_mode; }
     pub fn attributes(&mut self, attrs: u32) { self.attributes = attrs; }
-    pub fn security_qos_flags(&mut self, flags: u32) { self.security_qos_flags = flags; }
+    pub fn security_qos_flags(&mut self, flags: u32) {
+        // We have to set `SECURITY_SQOS_PRESENT` here, because one of the valid flags we can
+        // receive is `SECURITY_ANONYMOUS = 0x0`, which we can't check for later on.
+        self.security_qos_flags = flags | c::SECURITY_SQOS_PRESENT;
+    }
     pub fn security_attributes(&mut self, attrs: c::LPSECURITY_ATTRIBUTES) {
         self.security_attributes = attrs as usize;
     }
@@ -248,7 +243,6 @@ impl OpenOptions {
         self.custom_flags |
         self.attributes |
         self.security_qos_flags |
-        if self.security_qos_flags != 0 { c::SECURITY_SQOS_PRESENT } else { 0 } |
         if self.create_new { c::FILE_FLAG_OPEN_REPARSE_POINT } else { 0 }
     }
 }
@@ -320,12 +314,20 @@ impl File {
         self.handle.read(buf)
     }
 
+    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.handle.read_vectored(bufs)
+    }
+
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         self.handle.read_at(buf, offset)
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         self.handle.write(buf)
+    }
+
+    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.handle.write_vectored(bufs)
     }
 
     pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
@@ -441,8 +443,8 @@ impl FromInner<c::HANDLE> for File {
 }
 
 impl fmt::Debug for File {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // FIXME(#24570): add more info here (e.g. mode)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // FIXME(#24570): add more info here (e.g., mode)
         let mut b = f.debug_struct("File");
         b.field("handle", &self.handle.raw());
         if let Ok(path) = get_path(&self) {
@@ -516,30 +518,34 @@ impl FilePermissions {
 
 impl FileType {
     fn new(attrs: c::DWORD, reparse_tag: c::DWORD) -> FileType {
-        match (attrs & c::FILE_ATTRIBUTE_DIRECTORY != 0,
-               attrs & c::FILE_ATTRIBUTE_REPARSE_POINT != 0,
-               reparse_tag) {
-            (false, false, _) => FileType::File,
-            (true, false, _) => FileType::Dir,
-            (false, true, c::IO_REPARSE_TAG_SYMLINK) => FileType::SymlinkFile,
-            (true, true, c::IO_REPARSE_TAG_SYMLINK) => FileType::SymlinkDir,
-            (true, true, c::IO_REPARSE_TAG_MOUNT_POINT) => FileType::MountPoint,
-            (_, true, _) => FileType::ReparsePoint,
-            // Note: if a _file_ has a reparse tag of the type IO_REPARSE_TAG_MOUNT_POINT it is
-            // invalid, as junctions always have to be dirs. We set the filetype to ReparsePoint
-            // to indicate it is something symlink-like, but not something you can follow.
+        FileType {
+            attributes: attrs,
+            reparse_tag: reparse_tag,
         }
     }
-
-    pub fn is_dir(&self) -> bool { *self == FileType::Dir }
-    pub fn is_file(&self) -> bool { *self == FileType::File }
+    pub fn is_dir(&self) -> bool {
+        !self.is_symlink() && self.is_directory()
+    }
+    pub fn is_file(&self) -> bool {
+        !self.is_symlink() && !self.is_directory()
+    }
     pub fn is_symlink(&self) -> bool {
-        *self == FileType::SymlinkFile ||
-        *self == FileType::SymlinkDir ||
-        *self == FileType::MountPoint
+        self.is_reparse_point() && self.is_reparse_tag_name_surrogate()
     }
     pub fn is_symlink_dir(&self) -> bool {
-        *self == FileType::SymlinkDir || *self == FileType::MountPoint
+        self.is_symlink() && self.is_directory()
+    }
+    pub fn is_symlink_file(&self) -> bool {
+        self.is_symlink() && !self.is_directory()
+    }
+    fn is_directory(&self) -> bool {
+        self.attributes & c::FILE_ATTRIBUTE_DIRECTORY != 0
+    }
+    fn is_reparse_point(&self) -> bool {
+        self.attributes & c::FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    fn is_reparse_tag_name_surrogate(&self) -> bool {
+        self.reparse_tag & 0x20000000 != 0
     }
 }
 
@@ -722,16 +728,16 @@ pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     unsafe extern "system" fn callback(
         _TotalFileSize: c::LARGE_INTEGER,
-        TotalBytesTransferred: c::LARGE_INTEGER,
+        _TotalBytesTransferred: c::LARGE_INTEGER,
         _StreamSize: c::LARGE_INTEGER,
-        _StreamBytesTransferred: c::LARGE_INTEGER,
-        _dwStreamNumber: c::DWORD,
+        StreamBytesTransferred: c::LARGE_INTEGER,
+        dwStreamNumber: c::DWORD,
         _dwCallbackReason: c::DWORD,
         _hSourceFile: c::HANDLE,
         _hDestinationFile: c::HANDLE,
         lpData: c::LPVOID,
     ) -> c::DWORD {
-        *(lpData as *mut i64) = TotalBytesTransferred;
+        if dwStreamNumber == 1 {*(lpData as *mut i64) = StreamBytesTransferred;}
         c::PROGRESS_CONTINUE
     }
     let pfrom = to_u16s(from)?;
@@ -770,7 +776,7 @@ fn symlink_junction_inner(target: &Path, junction: &Path) -> io::Result<()> {
         let mut data = [0u8; c::MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
         let db = data.as_mut_ptr()
                     as *mut c::REPARSE_MOUNTPOINT_DATA_BUFFER;
-        let buf = &mut (*db).ReparseTarget as *mut _;
+        let buf = &mut (*db).ReparseTarget as *mut c::WCHAR;
         let mut i = 0;
         // FIXME: this conversion is very hacky
         let v = br"\??\";

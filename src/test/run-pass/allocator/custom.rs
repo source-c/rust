@@ -1,35 +1,26 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+// run-pass
 
 // aux-build:helper.rs
 // no-prefer-dynamic
 
-#![feature(global_allocator, heap_api, allocator_api)]
+#![feature(allocator_api)]
 
 extern crate helper;
 
-use std::env;
-use std::heap::{Heap, Alloc, System, Layout, AllocErr};
-use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+use std::alloc::{self, Global, Alloc, System, Layout};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-static HITS: AtomicUsize = ATOMIC_USIZE_INIT;
+static HITS: AtomicUsize = AtomicUsize::new(0);
 
 struct A;
 
-unsafe impl<'a> Alloc for &'a A {
-    unsafe fn alloc(&mut self, layout: Layout) -> Result<*mut u8, AllocErr> {
+unsafe impl alloc::GlobalAlloc for A {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         HITS.fetch_add(1, Ordering::SeqCst);
         System.alloc(layout)
     }
 
-    unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         HITS.fetch_add(1, Ordering::SeqCst);
         System.dealloc(ptr, layout)
     }
@@ -39,18 +30,17 @@ unsafe impl<'a> Alloc for &'a A {
 static GLOBAL: A = A;
 
 fn main() {
-    env::set_var("FOO", "bar");
-    drop(env::var("FOO"));
+    println!("hello!");
 
     let n = HITS.load(Ordering::SeqCst);
     assert!(n > 0);
     unsafe {
         let layout = Layout::from_size_align(4, 2).unwrap();
 
-        let ptr = Heap.alloc(layout.clone()).unwrap();
+        let ptr = Global.alloc(layout.clone()).unwrap();
         helper::work_with(&ptr);
         assert_eq!(HITS.load(Ordering::SeqCst), n + 1);
-        Heap.dealloc(ptr, layout.clone());
+        Global.dealloc(ptr, layout.clone());
         assert_eq!(HITS.load(Ordering::SeqCst), n + 2);
 
         let s = String::with_capacity(10);

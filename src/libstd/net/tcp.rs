@@ -1,21 +1,11 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::io::prelude::*;
 
-use io::prelude::*;
-
-use fmt;
-use io::{self, Initializer};
-use net::{ToSocketAddrs, SocketAddr, Shutdown};
-use sys_common::net as net_imp;
-use sys_common::{AsInner, FromInner, IntoInner};
-use time::Duration;
+use crate::fmt;
+use crate::io::{self, Initializer, IoSlice, IoSliceMut};
+use crate::net::{ToSocketAddrs, SocketAddr, Shutdown};
+use crate::sys_common::net as net_imp;
+use crate::sys_common::{AsInner, FromInner, IntoInner};
+use crate::time::Duration;
 
 /// A TCP stream between a local and a remote socket.
 ///
@@ -43,12 +33,12 @@ use time::Duration;
 /// use std::io::prelude::*;
 /// use std::net::TcpStream;
 ///
-/// {
-///     let mut stream = TcpStream::connect("127.0.0.1:34254").unwrap();
+/// fn main() -> std::io::Result<()> {
+///     let mut stream = TcpStream::connect("127.0.0.1:34254")?;
 ///
-///     // ignore the Result
-///     let _ = stream.write(&[1]);
-///     let _ = stream.read(&mut [0; 128]); // ignore here too
+///     stream.write(&[1])?;
+///     stream.read(&mut [0; 128])?;
+///     Ok(())
 /// } // the stream is closed here
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -72,7 +62,7 @@ pub struct TcpStream(net_imp::TcpStream);
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// # use std::io;
 /// use std::net::{TcpListener, TcpStream};
 ///
@@ -80,15 +70,15 @@ pub struct TcpStream(net_imp::TcpStream);
 ///     // ...
 /// }
 ///
-/// # fn process() -> io::Result<()> {
-/// let listener = TcpListener::bind("127.0.0.1:80").unwrap();
+/// fn main() -> io::Result<()> {
+///     let listener = TcpListener::bind("127.0.0.1:80")?;
 ///
-/// // accept connections and process them serially
-/// for stream in listener.incoming() {
-///     handle_client(stream?);
+///     // accept connections and process them serially
+///     for stream in listener.incoming() {
+///         handle_client(stream?);
+///     }
+///     Ok(())
 /// }
-/// # Ok(())
-/// # }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct TcpListener(net_imp::TcpListener);
@@ -167,7 +157,7 @@ impl TcpStream {
     /// connection request.
     ///
     /// [`SocketAddr`]: ../../std/net/enum.SocketAddr.html
-    #[stable(feature = "tcpstream_connect_timeout", since = "1.22.0")]
+    #[stable(feature = "tcpstream_connect_timeout", since = "1.21.0")]
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         net_imp::TcpStream::connect_timeout(addr, timeout).map(TcpStream)
     }
@@ -194,12 +184,12 @@ impl TcpStream {
     /// # Examples
     ///
     /// ```no_run
-    /// use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
+    /// use std::net::{IpAddr, Ipv4Addr, TcpStream};
     ///
     /// let stream = TcpStream::connect("127.0.0.1:8080")
     ///                        .expect("Couldn't connect to the server...");
-    /// assert_eq!(stream.local_addr().unwrap(),
-    ///            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080)));
+    /// assert_eq!(stream.local_addr().unwrap().ip(),
+    ///            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -259,19 +249,21 @@ impl TcpStream {
     /// Sets the read timeout to the timeout specified.
     ///
     /// If the value specified is [`None`], then [`read`] calls will block
-    /// indefinitely. It is an error to pass the zero `Duration` to this
-    /// method.
+    /// indefinitely. An [`Err`] is returned if the zero [`Duration`] is
+    /// passed to this method.
     ///
-    /// # Note
+    /// # Platform-specific behavior
     ///
     /// Platforms may return a different error code whenever a read times out as
     /// a result of setting this option. For example Unix typically returns an
     /// error of the kind [`WouldBlock`], but Windows may return [`TimedOut`].
     ///
     /// [`None`]: ../../std/option/enum.Option.html#variant.None
+    /// [`Err`]: ../../std/result/enum.Result.html#variant.Err
     /// [`read`]: ../../std/io/trait.Read.html#tymethod.read
     /// [`WouldBlock`]: ../../std/io/enum.ErrorKind.html#variant.WouldBlock
     /// [`TimedOut`]: ../../std/io/enum.ErrorKind.html#variant.TimedOut
+    /// [`Duration`]: ../../std/time/struct.Duration.html
     ///
     /// # Examples
     ///
@@ -282,6 +274,20 @@ impl TcpStream {
     ///                        .expect("Couldn't connect to the server...");
     /// stream.set_read_timeout(None).expect("set_read_timeout call failed");
     /// ```
+    ///
+    /// An [`Err`] is returned if the zero [`Duration`] is passed to this
+    /// method:
+    ///
+    /// ```no_run
+    /// use std::io;
+    /// use std::net::TcpStream;
+    /// use std::time::Duration;
+    ///
+    /// let stream = TcpStream::connect("127.0.0.1:8080").unwrap();
+    /// let result = stream.set_read_timeout(Some(Duration::new(0, 0)));
+    /// let err = result.unwrap_err();
+    /// assert_eq!(err.kind(), io::ErrorKind::InvalidInput)
+    /// ```
     #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.0.set_read_timeout(dur)
@@ -290,16 +296,17 @@ impl TcpStream {
     /// Sets the write timeout to the timeout specified.
     ///
     /// If the value specified is [`None`], then [`write`] calls will block
-    /// indefinitely. It is an error to pass the zero [`Duration`] to this
-    /// method.
+    /// indefinitely. An [`Err`] is returned if the zero [`Duration`] is
+    /// passed to this method.
     ///
-    /// # Note
+    /// # Platform-specific behavior
     ///
     /// Platforms may return a different error code whenever a write times out
     /// as a result of setting this option. For example Unix typically returns
     /// an error of the kind [`WouldBlock`], but Windows may return [`TimedOut`].
     ///
     /// [`None`]: ../../std/option/enum.Option.html#variant.None
+    /// [`Err`]: ../../std/result/enum.Result.html#variant.Err
     /// [`write`]: ../../std/io/trait.Write.html#tymethod.write
     /// [`Duration`]: ../../std/time/struct.Duration.html
     /// [`WouldBlock`]: ../../std/io/enum.ErrorKind.html#variant.WouldBlock
@@ -314,6 +321,20 @@ impl TcpStream {
     ///                        .expect("Couldn't connect to the server...");
     /// stream.set_write_timeout(None).expect("set_write_timeout call failed");
     /// ```
+    ///
+    /// An [`Err`] is returned if the zero [`Duration`] is passed to this
+    /// method:
+    ///
+    /// ```no_run
+    /// use std::io;
+    /// use std::net::TcpStream;
+    /// use std::time::Duration;
+    ///
+    /// let stream = TcpStream::connect("127.0.0.1:8080").unwrap();
+    /// let result = stream.set_write_timeout(Some(Duration::new(0, 0)));
+    /// let err = result.unwrap_err();
+    /// assert_eq!(err.kind(), io::ErrorKind::InvalidInput)
+    /// ```
     #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.0.set_write_timeout(dur)
@@ -323,7 +344,7 @@ impl TcpStream {
     ///
     /// If the timeout is [`None`], then [`read`] calls will block indefinitely.
     ///
-    /// # Note
+    /// # Platform-specific behavior
     ///
     /// Some platforms do not provide access to the current timeout.
     ///
@@ -349,7 +370,7 @@ impl TcpStream {
     ///
     /// If the timeout is [`None`], then [`write`] calls will block indefinitely.
     ///
-    /// # Note
+    /// # Platform-specific behavior
     ///
     /// Some platforms do not provide access to the current timeout.
     ///
@@ -476,7 +497,7 @@ impl TcpStream {
         self.0.ttl()
     }
 
-    /// Get the value of the `SO_ERROR` option on this socket.
+    /// Gets the value of the `SO_ERROR` option on this socket.
     ///
     /// This will retrieve the stored error in the underlying socket, clearing
     /// the field in the process. This can be useful for checking errors between
@@ -498,18 +519,46 @@ impl TcpStream {
 
     /// Moves this TCP stream into or out of nonblocking mode.
     ///
-    /// On Unix this corresponds to calling fcntl, and on Windows this
-    /// corresponds to calling ioctlsocket.
+    /// This will result in `read`, `write`, `recv` and `send` operations
+    /// becoming nonblocking, i.e., immediately returning from their calls.
+    /// If the IO operation is successful, `Ok` is returned and no further
+    /// action is required. If the IO operation could not be completed and needs
+    /// to be retried, an error with kind [`io::ErrorKind::WouldBlock`] is
+    /// returned.
+    ///
+    /// On Unix platforms, calling this method corresponds to calling `fcntl`
+    /// `FIONBIO`. On Windows calling this method corresponds to calling
+    /// `ioctlsocket` `FIONBIO`.
     ///
     /// # Examples
     ///
+    /// Reading bytes from a TCP stream in non-blocking mode:
+    ///
     /// ```no_run
+    /// use std::io::{self, Read};
     /// use std::net::TcpStream;
     ///
-    /// let stream = TcpStream::connect("127.0.0.1:8080")
-    ///                        .expect("Couldn't connect to the server...");
+    /// let mut stream = TcpStream::connect("127.0.0.1:7878")
+    ///     .expect("Couldn't connect to the server...");
     /// stream.set_nonblocking(true).expect("set_nonblocking call failed");
+    ///
+    /// # fn wait_for_fd() { unimplemented!() }
+    /// let mut buf = vec![];
+    /// loop {
+    ///     match stream.read_to_end(&mut buf) {
+    ///         Ok(_) => break,
+    ///         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+    ///             // wait until network socket is ready, typically implemented
+    ///             // via platform-specific APIs such as epoll or IOCP
+    ///             wait_for_fd();
+    ///         }
+    ///         Err(e) => panic!("encountered IO error: {}", e),
+    ///     };
+    /// };
+    /// println!("bytes: {:?}", buf);
     /// ```
+    ///
+    /// [`io::ErrorKind::WouldBlock`]: ../io/enum.ErrorKind.html#variant.WouldBlock
     #[stable(feature = "net2_mutators", since = "1.9.0")]
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.0.set_nonblocking(nonblocking)
@@ -520,6 +569,10 @@ impl TcpStream {
 impl Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.0.read(buf) }
 
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.0.read_vectored(bufs)
+    }
+
     #[inline]
     unsafe fn initializer(&self) -> Initializer {
         Initializer::nop()
@@ -528,11 +581,20 @@ impl Read for TcpStream {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Write for TcpStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.0.write(buf) }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.0.write_vectored(bufs)
+    }
+
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a> Read for &'a TcpStream {
+impl Read for &TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.0.read(buf) }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.0.read_vectored(bufs)
+    }
 
     #[inline]
     unsafe fn initializer(&self) -> Initializer {
@@ -540,8 +602,13 @@ impl<'a> Read for &'a TcpStream {
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a> Write for &'a TcpStream {
+impl Write for &TcpStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.0.write(buf) }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.0.write_vectored(bufs)
+    }
+
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
@@ -559,7 +626,7 @@ impl IntoInner<net_imp::TcpStream> for TcpStream {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl fmt::Debug for TcpStream {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -587,7 +654,7 @@ impl TcpListener {
     ///
     /// # Examples
     ///
-    /// Create a TCP listener bound to `127.0.0.1:80`:
+    /// Creates a TCP listener bound to `127.0.0.1:80`:
     ///
     /// ```no_run
     /// use std::net::TcpListener;
@@ -595,7 +662,7 @@ impl TcpListener {
     /// let listener = TcpListener::bind("127.0.0.1:80").unwrap();
     /// ```
     ///
-    /// Create a TCP listener bound to `127.0.0.1:80`. If that fails, create a
+    /// Creates a TCP listener bound to `127.0.0.1:80`. If that fails, create a
     /// TCP listener bound to `127.0.0.1:443`:
     ///
     /// ```no_run
@@ -670,6 +737,9 @@ impl TcpListener {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        // On WASM, `TcpStream` is uninhabited (as it's unsupported) and so
+        // the `a` variable here is technically unused.
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
         self.0.accept().map(|(a, b)| (TcpStream(a), b))
     }
 
@@ -701,7 +771,7 @@ impl TcpListener {
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn incoming(&self) -> Incoming {
+    pub fn incoming(&self) -> Incoming<'_> {
         Incoming { listener: self }
     }
 
@@ -759,7 +829,7 @@ impl TcpListener {
         self.0.only_v6()
     }
 
-    /// Get the value of the `SO_ERROR` option on this socket.
+    /// Gets the value of the `SO_ERROR` option on this socket.
     ///
     /// This will retrieve the stored error in the underlying socket, clearing
     /// the field in the process. This can be useful for checking errors between
@@ -780,17 +850,48 @@ impl TcpListener {
 
     /// Moves this TCP stream into or out of nonblocking mode.
     ///
-    /// On Unix this corresponds to calling fcntl, and on Windows this
-    /// corresponds to calling ioctlsocket.
+    /// This will result in the `accept` operation becoming nonblocking,
+    /// i.e., immediately returning from their calls. If the IO operation is
+    /// successful, `Ok` is returned and no further action is required. If the
+    /// IO operation could not be completed and needs to be retried, an error
+    /// with kind [`io::ErrorKind::WouldBlock`] is returned.
+    ///
+    /// On Unix platforms, calling this method corresponds to calling `fcntl`
+    /// `FIONBIO`. On Windows calling this method corresponds to calling
+    /// `ioctlsocket` `FIONBIO`.
     ///
     /// # Examples
     ///
+    /// Bind a TCP listener to an address, listen for connections, and read
+    /// bytes in nonblocking mode:
+    ///
     /// ```no_run
+    /// use std::io;
     /// use std::net::TcpListener;
     ///
-    /// let listener = TcpListener::bind("127.0.0.1:80").unwrap();
+    /// let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
     /// listener.set_nonblocking(true).expect("Cannot set non-blocking");
+    ///
+    /// # fn wait_for_fd() { unimplemented!() }
+    /// # fn handle_connection(stream: std::net::TcpStream) { unimplemented!() }
+    /// for stream in listener.incoming() {
+    ///     match stream {
+    ///         Ok(s) => {
+    ///             // do something with the TcpStream
+    ///             handle_connection(s);
+    ///         }
+    ///         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+    ///             // wait until network socket is ready, typically implemented
+    ///             // via platform-specific APIs such as epoll or IOCP
+    ///             wait_for_fd();
+    ///             continue;
+    ///         }
+    ///         Err(e) => panic!("encountered IO error: {}", e),
+    ///     }
+    /// }
     /// ```
+    ///
+    /// [`io::ErrorKind::WouldBlock`]: ../io/enum.ErrorKind.html#variant.WouldBlock
     #[stable(feature = "net2_mutators", since = "1.9.0")]
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.0.set_nonblocking(nonblocking)
@@ -821,23 +922,23 @@ impl IntoInner<net_imp::TcpListener> for TcpListener {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl fmt::Debug for TcpListener {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-#[cfg(all(test, not(target_os = "emscripten")))]
+#[cfg(all(test, not(any(target_os = "cloudabi", target_os = "emscripten"))))]
 mod tests {
-    use io::ErrorKind;
-    use io::prelude::*;
-    use net::*;
-    use net::test::{next_test_ip4, next_test_ip6};
-    use sync::mpsc::channel;
-    use sys_common::AsInner;
-    use time::{Instant, Duration};
-    use thread;
+    use crate::fmt;
+    use crate::io::{ErrorKind, IoSlice, IoSliceMut};
+    use crate::io::prelude::*;
+    use crate::net::*;
+    use crate::net::test::{next_test_ip4, next_test_ip6};
+    use crate::sync::mpsc::channel;
+    use crate::time::{Instant, Duration};
+    use crate::thread;
 
-    fn each_ip(f: &mut FnMut(SocketAddr)) {
+    fn each_ip(f: &mut dyn FnMut(SocketAddr)) {
         f(next_test_ip4());
         f(next_test_ip6());
     }
@@ -1028,7 +1129,7 @@ mod tests {
                 connect(i + 1, addr);
                 t!(stream.write(&[i as u8]));
             });
-            t.join().ok().unwrap();
+            t.join().ok().expect("thread panicked");
         }
     }
 
@@ -1061,7 +1162,7 @@ mod tests {
                 connect(i + 1, addr);
                 t!(stream.write(&[99]));
             });
-            t.join().ok().unwrap();
+            t.join().ok().expect("thread panicked");
         }
     }
 
@@ -1102,11 +1203,62 @@ mod tests {
     }
 
     #[test]
+    fn read_vectored() {
+        each_ip(&mut |addr| {
+            let srv = t!(TcpListener::bind(&addr));
+            let mut s1 = t!(TcpStream::connect(&addr));
+            let mut s2 = t!(srv.accept()).0;
+
+            let len = s1.write(&[10, 11, 12]).unwrap();
+            assert_eq!(len, 3);
+
+            let mut a = [];
+            let mut b = [0];
+            let mut c = [0; 3];
+            let len = t!(s2.read_vectored(
+                &mut [IoSliceMut::new(&mut a), IoSliceMut::new(&mut b), IoSliceMut::new(&mut c)],
+            ));
+            assert!(len > 0);
+            assert_eq!(b, [10]);
+            // some implementations don't support readv, so we may only fill the first buffer
+            assert!(len == 1 || c == [11, 12, 0]);
+        })
+    }
+
+    #[test]
+    fn write_vectored() {
+        each_ip(&mut |addr| {
+            let srv = t!(TcpListener::bind(&addr));
+            let mut s1 = t!(TcpStream::connect(&addr));
+            let mut s2 = t!(srv.accept()).0;
+
+            let a = [];
+            let b = [10];
+            let c = [11, 12];
+            t!(s1.write_vectored(&[IoSlice::new(&a), IoSlice::new(&b), IoSlice::new(&c)]));
+
+            let mut buf = [0; 4];
+            let len = t!(s2.read(&mut buf));
+            // some implementations don't support writev, so we may only write the first buffer
+            if len == 1 {
+                assert_eq!(buf, [10, 0, 0, 0]);
+            } else {
+                assert_eq!(len, 3);
+                assert_eq!(buf, [10, 11, 12, 0]);
+            }
+        })
+    }
+
+    #[test]
     fn double_bind() {
         each_ip(&mut |addr| {
-            let _listener = t!(TcpListener::bind(&addr));
+            let listener1 = t!(TcpListener::bind(&addr));
             match TcpListener::bind(&addr) {
-                Ok(..) => panic!(),
+                Ok(listener2) => panic!(
+                    "This system (perhaps due to options set by TcpListener::bind) \
+                     permits double binding: {:?} and {:?}",
+                    listener1, listener2
+                ),
                 Err(e) => {
                     assert!(e.kind() == ErrorKind::ConnectionRefused ||
                             e.kind() == ErrorKind::Other ||
@@ -1225,6 +1377,8 @@ mod tests {
     }
 
     #[test]
+    // FIXME: https://github.com/fortanix/rust-sgx/issues/110
+    #[cfg_attr(target_env = "sgx", ignore)]
     fn shutdown_smoke() {
         each_ip(&mut |addr| {
             let a = t!(TcpListener::bind(&addr));
@@ -1245,6 +1399,8 @@ mod tests {
     }
 
     #[test]
+    // FIXME: https://github.com/fortanix/rust-sgx/issues/110
+    #[cfg_attr(target_env = "sgx", ignore)]
     fn close_readwrite_smoke() {
         each_ip(&mut |addr| {
             let a = t!(TcpListener::bind(&addr));
@@ -1398,30 +1554,51 @@ mod tests {
 
     #[test]
     fn debug() {
-        let name = if cfg!(windows) {"socket"} else {"fd"};
+        #[cfg(not(target_env = "sgx"))]
+        fn render_socket_addr<'a>(addr: &'a SocketAddr) -> impl fmt::Debug + 'a {
+            addr
+        }
+        #[cfg(target_env = "sgx")]
+        fn render_socket_addr<'a>(addr: &'a SocketAddr) -> impl fmt::Debug + 'a {
+            addr.to_string()
+        }
+
+        #[cfg(unix)]
+        use crate::os::unix::io::AsRawFd;
+        #[cfg(target_env = "sgx")]
+        use crate::os::fortanix_sgx::io::AsRawFd;
+        #[cfg(not(windows))]
+        fn render_inner(addr: &dyn AsRawFd) -> impl fmt::Debug {
+            addr.as_raw_fd()
+        }
+        #[cfg(windows)]
+        fn render_inner(addr: &dyn crate::os::windows::io::AsRawSocket) -> impl fmt::Debug {
+            addr.as_raw_socket()
+        }
+
+        let inner_name = if cfg!(windows) {"socket"} else {"fd"};
         let socket_addr = next_test_ip4();
 
         let listener = t!(TcpListener::bind(&socket_addr));
-        let listener_inner = listener.0.socket().as_inner();
         let compare = format!("TcpListener {{ addr: {:?}, {}: {:?} }}",
-                              socket_addr, name, listener_inner);
+                              render_socket_addr(&socket_addr),
+                              inner_name,
+                              render_inner(&listener));
         assert_eq!(format!("{:?}", listener), compare);
 
-        let stream = t!(TcpStream::connect(&("localhost",
-                                                 socket_addr.port())));
-        let stream_inner = stream.0.socket().as_inner();
-        let compare = format!("TcpStream {{ addr: {:?}, \
-                              peer: {:?}, {}: {:?} }}",
-                              stream.local_addr().unwrap(),
-                              stream.peer_addr().unwrap(),
-                              name,
-                              stream_inner);
+        let stream = t!(TcpStream::connect(&("localhost", socket_addr.port())));
+        let compare = format!("TcpStream {{ addr: {:?}, peer: {:?}, {}: {:?} }}",
+                              render_socket_addr(&stream.local_addr().unwrap()),
+                              render_socket_addr(&stream.peer_addr().unwrap()),
+                              inner_name,
+                              render_inner(&stream));
         assert_eq!(format!("{:?}", stream), compare);
     }
 
-    // FIXME: re-enabled bitrig/openbsd tests once their socket timeout code
+    // FIXME: re-enabled openbsd tests once their socket timeout code
     //        no longer has rounding errors.
-    #[cfg_attr(any(target_os = "bitrig", target_os = "netbsd", target_os = "openbsd"), ignore)]
+    #[cfg_attr(any(target_os = "netbsd", target_os = "openbsd"), ignore)]
+    #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
     #[test]
     fn timeouts() {
         let addr = next_test_ip4();
@@ -1449,6 +1626,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
     fn test_read_timeout() {
         let addr = next_test_ip4();
         let listener = t!(TcpListener::bind(&addr));
@@ -1458,13 +1636,15 @@ mod tests {
 
         let mut buf = [0; 10];
         let start = Instant::now();
-        let kind = stream.read(&mut buf).err().expect("expected error").kind();
-        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
+        let kind = stream.read_exact(&mut buf).err().expect("expected error").kind();
+        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut,
+                "unexpected_error: {:?}", kind);
         assert!(start.elapsed() > Duration::from_millis(400));
         drop(listener);
     }
 
     #[test]
+    #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
     fn test_read_with_timeout() {
         let addr = next_test_ip4();
         let listener = t!(TcpListener::bind(&addr));
@@ -1480,13 +1660,35 @@ mod tests {
         assert_eq!(b"hello world", &buf[..]);
 
         let start = Instant::now();
-        let kind = stream.read(&mut buf).err().expect("expected error").kind();
-        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
+        let kind = stream.read_exact(&mut buf).err().expect("expected error").kind();
+        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut,
+                "unexpected_error: {:?}", kind);
         assert!(start.elapsed() > Duration::from_millis(400));
         drop(listener);
     }
 
+    // Ensure the `set_read_timeout` and `set_write_timeout` calls return errors
+    // when passed zero Durations
     #[test]
+    fn test_timeout_zero_duration() {
+        let addr = next_test_ip4();
+
+        let listener = t!(TcpListener::bind(&addr));
+        let stream = t!(TcpStream::connect(&addr));
+
+        let result = stream.set_write_timeout(Some(Duration::new(0, 0)));
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+
+        let result = stream.set_read_timeout(Some(Duration::new(0, 0)));
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+
+        drop(listener);
+    }
+
+    #[test]
+    #[cfg_attr(target_env = "sgx", ignore)]
     fn nodelay() {
         let addr = next_test_ip4();
         let _listener = t!(TcpListener::bind(&addr));
@@ -1501,6 +1703,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_env = "sgx", ignore)]
     fn ttl() {
         let ttl = 100;
 
@@ -1517,6 +1720,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_env = "sgx", ignore)]
     fn set_nonblocking() {
         let addr = next_test_ip4();
         let listener = t!(TcpListener::bind(&addr));
@@ -1538,6 +1742,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
     fn peek() {
         each_ip(&mut |addr| {
             let (txdone, rxdone) = channel();
@@ -1569,17 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_timeout_unroutable() {
-        // this IP is unroutable, so connections should always time out,
-        // provided the network is reachable to begin with.
-        let addr = "10.255.255.1:80".parse().unwrap();
-        let e = TcpStream::connect_timeout(&addr, Duration::from_millis(250)).unwrap_err();
-        assert!(e.kind() == io::ErrorKind::TimedOut ||
-                e.kind() == io::ErrorKind::Other,
-                "bad error: {} {:?}", e, e.kind());
-    }
-
-    #[test]
+    #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
     fn connect_timeout_valid() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

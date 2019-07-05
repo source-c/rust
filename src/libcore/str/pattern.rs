@@ -1,25 +1,16 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! The string Pattern API.
 //!
-//! For more details, see the traits `Pattern`, `Searcher`,
-//! `ReverseSearcher` and `DoubleEndedSearcher`.
+//! For more details, see the traits [`Pattern`], [`Searcher`],
+//! [`ReverseSearcher`], and [`DoubleEndedSearcher`].
 
 #![unstable(feature = "pattern",
             reason = "API not fully fleshed out and ready to be stabilized",
             issue = "27721")]
 
-use cmp;
-use fmt;
-use usize;
+use crate::cmp;
+use crate::fmt;
+use crate::slice::memchr;
+use crate::usize;
 
 // Pattern
 
@@ -126,7 +117,12 @@ pub unsafe trait Searcher<'a> {
     /// `[Reject(0, 1), Reject(1, 2), Match(2, 5), Reject(5, 8)]`
     fn next(&mut self) -> SearchStep;
 
-    /// Find the next `Match` result. See `next()`
+    /// Finds the next `Match` result. See `next()`
+    ///
+    /// Unlike next(), there is no guarantee that the returned ranges
+    /// of this and next_reject will overlap. This will return (start_match, end_match),
+    /// where start_match is the index of where the match begins, and end_match is
+    /// the index after the end of the match.
     #[inline]
     fn next_match(&mut self) -> Option<(usize, usize)> {
         loop {
@@ -138,7 +134,10 @@ pub unsafe trait Searcher<'a> {
         }
     }
 
-    /// Find the next `Reject` result. See `next()`
+    /// Finds the next `Reject` result. See `next()` and `next_match()`
+    ///
+    /// Unlike next(), there is no guarantee that the returned ranges
+    /// of this and next_match will overlap.
     #[inline]
     fn next_reject(&mut self) -> Option<(usize, usize)> {
         loop {
@@ -186,7 +185,7 @@ pub unsafe trait ReverseSearcher<'a>: Searcher<'a> {
     /// `[Reject(7, 8), Match(4, 7), Reject(1, 4), Reject(0, 1)]`
     fn next_back(&mut self) -> SearchStep;
 
-    /// Find the next `Match` result. See `next_back()`
+    /// Finds the next `Match` result. See `next_back()`
     #[inline]
     fn next_match_back(&mut self) -> Option<(usize, usize)>{
         loop {
@@ -198,7 +197,7 @@ pub unsafe trait ReverseSearcher<'a>: Searcher<'a> {
         }
     }
 
-    /// Find the next `Reject` result. See `next_back()`
+    /// Finds the next `Reject` result. See `next_back()`
     #[inline]
     fn next_reject_back(&mut self) -> Option<(usize, usize)>{
         loop {
@@ -234,62 +233,275 @@ pub unsafe trait ReverseSearcher<'a>: Searcher<'a> {
 /// `"[aa]a"` or `"a[aa]"`, depending from which side it is searched.
 pub trait DoubleEndedSearcher<'a>: ReverseSearcher<'a> {}
 
+
 /////////////////////////////////////////////////////////////////////////////
-// Impl for a CharEq wrapper
+// Impl for char
+/////////////////////////////////////////////////////////////////////////////
+
+/// Associated type for `<char as Pattern<'a>>::Searcher`.
+#[derive(Clone, Debug)]
+pub struct CharSearcher<'a> {
+    haystack: &'a str,
+    // safety invariant: `finger`/`finger_back` must be a valid utf8 byte index of `haystack`
+    // This invariant can be broken *within* next_match and next_match_back, however
+    // they must exit with fingers on valid code point boundaries.
+
+    /// `finger` is the current byte index of the forward search.
+    /// Imagine that it exists before the byte at its index, i.e.
+    /// `haystack[finger]` is the first byte of the slice we must inspect during
+    /// forward searching
+    finger: usize,
+    /// `finger_back` is the current byte index of the reverse search.
+    /// Imagine that it exists after the byte at its index, i.e.
+    /// haystack[finger_back - 1] is the last byte of the slice we must inspect during
+    /// forward searching (and thus the first byte to be inspected when calling next_back())
+    finger_back: usize,
+    /// The character being searched for
+    needle: char,
+
+    // safety invariant: `utf8_size` must be less than 5
+    /// The number of bytes `needle` takes up when encoded in utf8
+    utf8_size: usize,
+    /// A utf8 encoded copy of the `needle`
+    utf8_encoded: [u8; 4],
+}
+
+unsafe impl<'a> Searcher<'a> for CharSearcher<'a> {
+    #[inline]
+    fn haystack(&self) -> &'a str {
+        self.haystack
+    }
+    #[inline]
+    fn next(&mut self) -> SearchStep {
+        let old_finger = self.finger;
+        let slice = unsafe { self.haystack.get_unchecked(old_finger..self.finger_back) };
+        let mut iter = slice.chars();
+        let old_len = iter.iter.len();
+        if let Some(ch) = iter.next() {
+            // add byte offset of current character
+            // without re-encoding as utf-8
+            self.finger += old_len - iter.iter.len();
+            if ch == self.needle {
+                SearchStep::Match(old_finger, self.finger)
+            } else {
+                SearchStep::Reject(old_finger, self.finger)
+            }
+        } else {
+            SearchStep::Done
+        }
+    }
+    #[inline]
+    fn next_match(&mut self) -> Option<(usize, usize)> {
+        loop {
+            // get the haystack after the last character found
+            let bytes = if let Some(slice) = self.haystack.as_bytes()
+                                                 .get(self.finger..self.finger_back) {
+                slice
+            } else {
+                return None;
+            };
+            // the last byte of the utf8 encoded needle
+            let last_byte = unsafe { *self.utf8_encoded.get_unchecked(self.utf8_size - 1) };
+            if let Some(index) = memchr::memchr(last_byte, bytes) {
+                // The new finger is the index of the byte we found,
+                // plus one, since we memchr'd for the last byte of the character.
+                //
+                // Note that this doesn't always give us a finger on a UTF8 boundary.
+                // If we *didn't* find our character
+                // we may have indexed to the non-last byte of a 3-byte or 4-byte character.
+                // We can't just skip to the next valid starting byte because a character like
+                // ꁁ (U+A041 YI SYLLABLE PA), utf-8 `EA 81 81` will have us always find
+                // the second byte when searching for the third.
+                //
+                // However, this is totally okay. While we have the invariant that
+                // self.finger is on a UTF8 boundary, this invariant is not relied upon
+                // within this method (it is relied upon in CharSearcher::next()).
+                //
+                // We only exit this method when we reach the end of the string, or if we
+                // find something. When we find something the `finger` will be set
+                // to a UTF8 boundary.
+                self.finger += index + 1;
+                if self.finger >= self.utf8_size {
+                    let found_char = self.finger - self.utf8_size;
+                    if let Some(slice) = self.haystack.as_bytes().get(found_char..self.finger) {
+                        if slice == &self.utf8_encoded[0..self.utf8_size] {
+                            return Some((found_char, self.finger));
+                        }
+                    }
+                }
+            } else {
+                // found nothing, exit
+                self.finger = self.finger_back;
+                return None;
+            }
+        }
+    }
+
+    // let next_reject use the default implementation from the Searcher trait
+}
+
+unsafe impl<'a> ReverseSearcher<'a> for CharSearcher<'a> {
+    #[inline]
+    fn next_back(&mut self) -> SearchStep {
+        let old_finger = self.finger_back;
+        let slice = unsafe { self.haystack.get_unchecked(self.finger..old_finger) };
+        let mut iter = slice.chars();
+        let old_len = iter.iter.len();
+        if let Some(ch) = iter.next_back() {
+            // subtract byte offset of current character
+            // without re-encoding as utf-8
+            self.finger_back -= old_len - iter.iter.len();
+            if ch == self.needle {
+                SearchStep::Match(self.finger_back, old_finger)
+            } else {
+                SearchStep::Reject(self.finger_back, old_finger)
+            }
+        } else {
+            SearchStep::Done
+        }
+    }
+    #[inline]
+    fn next_match_back(&mut self) -> Option<(usize, usize)> {
+        let haystack = self.haystack.as_bytes();
+        loop {
+            // get the haystack up to but not including the last character searched
+            let bytes = if let Some(slice) = haystack.get(self.finger..self.finger_back) {
+                slice
+            } else {
+                return None;
+            };
+            // the last byte of the utf8 encoded needle
+            let last_byte = unsafe { *self.utf8_encoded.get_unchecked(self.utf8_size - 1) };
+            if let Some(index) = memchr::memrchr(last_byte, bytes) {
+                // we searched a slice that was offset by self.finger,
+                // add self.finger to recoup the original index
+                let index = self.finger + index;
+                // memrchr will return the index of the byte we wish to
+                // find. In case of an ASCII character, this is indeed
+                // were we wish our new finger to be ("after" the found
+                // char in the paradigm of reverse iteration). For
+                // multibyte chars we need to skip down by the number of more
+                // bytes they have than ASCII
+                let shift = self.utf8_size - 1;
+                if index >= shift {
+                    let found_char = index - shift;
+                    if let Some(slice) = haystack.get(found_char..(found_char + self.utf8_size)) {
+                        if slice == &self.utf8_encoded[0..self.utf8_size] {
+                            // move finger to before the character found (i.e., at its start index)
+                            self.finger_back = found_char;
+                            return Some((self.finger_back, self.finger_back + self.utf8_size));
+                        }
+                    }
+                }
+                // We can't use finger_back = index - size + 1 here. If we found the last char
+                // of a different-sized character (or the middle byte of a different character)
+                // we need to bump the finger_back down to `index`. This similarly makes
+                // `finger_back` have the potential to no longer be on a boundary,
+                // but this is OK since we only exit this function on a boundary
+                // or when the haystack has been searched completely.
+                //
+                // Unlike next_match this does not
+                // have the problem of repeated bytes in utf-8 because
+                // we're searching for the last byte, and we can only have
+                // found the last byte when searching in reverse.
+                self.finger_back = index;
+            } else {
+                self.finger_back = self.finger;
+                // found nothing, exit
+                return None;
+            }
+        }
+    }
+
+    // let next_reject_back use the default implementation from the Searcher trait
+}
+
+impl<'a> DoubleEndedSearcher<'a> for CharSearcher<'a> {}
+
+/// Searches for chars that are equal to a given char
+impl<'a> Pattern<'a> for char {
+    type Searcher = CharSearcher<'a>;
+
+    #[inline]
+    fn into_searcher(self, haystack: &'a str) -> Self::Searcher {
+        let mut utf8_encoded = [0; 4];
+        let utf8_size = self.encode_utf8(&mut utf8_encoded).len();
+        CharSearcher {
+            haystack,
+            finger: 0,
+            finger_back: haystack.len(),
+            needle: self,
+            utf8_size,
+            utf8_encoded
+        }
+    }
+
+    #[inline]
+    fn is_contained_in(self, haystack: &'a str) -> bool {
+        if (self as u32) < 128 {
+            haystack.as_bytes().contains(&(self as u8))
+        } else {
+            let mut buffer = [0u8; 4];
+            self.encode_utf8(&mut buffer).is_contained_in(haystack)
+        }
+    }
+
+    #[inline]
+    fn is_prefix_of(self, haystack: &'a str) -> bool {
+        if let Some(ch) = haystack.chars().next() {
+            self == ch
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    fn is_suffix_of(self, haystack: &'a str) -> bool where Self::Searcher: ReverseSearcher<'a>
+    {
+        if let Some(ch) = haystack.chars().next_back() {
+            self == ch
+        } else {
+            false
+        }
+    }
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Impl for a MultiCharEq wrapper
 /////////////////////////////////////////////////////////////////////////////
 
 #[doc(hidden)]
-trait CharEq {
+trait MultiCharEq {
     fn matches(&mut self, c: char) -> bool;
-    fn only_ascii(&self) -> bool;
 }
 
-impl CharEq for char {
-    #[inline]
-    fn matches(&mut self, c: char) -> bool { *self == c }
-
-    #[inline]
-    fn only_ascii(&self) -> bool { (*self as u32) < 128 }
-}
-
-impl<F> CharEq for F where F: FnMut(char) -> bool {
+impl<F> MultiCharEq for F where F: FnMut(char) -> bool {
     #[inline]
     fn matches(&mut self, c: char) -> bool { (*self)(c) }
-
-    #[inline]
-    fn only_ascii(&self) -> bool { false }
 }
 
-impl<'a> CharEq for &'a [char] {
+impl MultiCharEq for &[char] {
     #[inline]
     fn matches(&mut self, c: char) -> bool {
-        self.iter().any(|&m| { let mut m = m; m.matches(c) })
-    }
-
-    #[inline]
-    fn only_ascii(&self) -> bool {
-        self.iter().all(|m| m.only_ascii())
+        self.iter().any(|&m| { m == c })
     }
 }
 
-struct CharEqPattern<C: CharEq>(C);
+struct MultiCharEqPattern<C: MultiCharEq>(C);
 
 #[derive(Clone, Debug)]
-struct CharEqSearcher<'a, C: CharEq> {
+struct MultiCharEqSearcher<'a, C: MultiCharEq> {
     char_eq: C,
     haystack: &'a str,
     char_indices: super::CharIndices<'a>,
-    #[allow(dead_code)]
-    ascii_only: bool,
 }
 
-impl<'a, C: CharEq> Pattern<'a> for CharEqPattern<C> {
-    type Searcher = CharEqSearcher<'a, C>;
+impl<'a, C: MultiCharEq> Pattern<'a> for MultiCharEqPattern<C> {
+    type Searcher = MultiCharEqSearcher<'a, C>;
 
     #[inline]
-    fn into_searcher(self, haystack: &'a str) -> CharEqSearcher<'a, C> {
-        CharEqSearcher {
-            ascii_only: self.0.only_ascii(),
+    fn into_searcher(self, haystack: &'a str) -> MultiCharEqSearcher<'a, C> {
+        MultiCharEqSearcher {
             haystack,
             char_eq: self.0,
             char_indices: haystack.char_indices(),
@@ -297,7 +509,7 @@ impl<'a, C: CharEq> Pattern<'a> for CharEqPattern<C> {
     }
 }
 
-unsafe impl<'a, C: CharEq> Searcher<'a> for CharEqSearcher<'a, C> {
+unsafe impl<'a, C: MultiCharEq> Searcher<'a> for MultiCharEqSearcher<'a, C> {
     #[inline]
     fn haystack(&self) -> &'a str {
         self.haystack
@@ -322,7 +534,7 @@ unsafe impl<'a, C: CharEq> Searcher<'a> for CharEqSearcher<'a, C> {
     }
 }
 
-unsafe impl<'a, C: CharEq> ReverseSearcher<'a> for CharEqSearcher<'a, C> {
+unsafe impl<'a, C: MultiCharEq> ReverseSearcher<'a> for MultiCharEqSearcher<'a, C> {
     #[inline]
     fn next_back(&mut self) -> SearchStep {
         let s = &mut self.char_indices;
@@ -342,7 +554,7 @@ unsafe impl<'a, C: CharEq> ReverseSearcher<'a> for CharEqSearcher<'a, C> {
     }
 }
 
-impl<'a, C: CharEq> DoubleEndedSearcher<'a> for CharEqSearcher<'a, C> {}
+impl<'a, C: MultiCharEq> DoubleEndedSearcher<'a> for MultiCharEqSearcher<'a, C> {}
 
 /////////////////////////////////////////////////////////////////////////////
 
@@ -410,55 +622,6 @@ macro_rules! searcher_methods {
 }
 
 /////////////////////////////////////////////////////////////////////////////
-// Impl for char
-/////////////////////////////////////////////////////////////////////////////
-
-/// Associated type for `<char as Pattern<'a>>::Searcher`.
-#[derive(Clone, Debug)]
-pub struct CharSearcher<'a>(<CharEqPattern<char> as Pattern<'a>>::Searcher);
-
-unsafe impl<'a> Searcher<'a> for CharSearcher<'a> {
-    searcher_methods!(forward);
-}
-
-unsafe impl<'a> ReverseSearcher<'a> for CharSearcher<'a> {
-    searcher_methods!(reverse);
-}
-
-impl<'a> DoubleEndedSearcher<'a> for CharSearcher<'a> {}
-
-/// Searches for chars that are equal to a given char
-impl<'a> Pattern<'a> for char {
-    type Searcher = CharSearcher<'a>;
-
-    #[inline]
-    fn into_searcher(self, haystack: &'a str) -> Self::Searcher {
-        CharSearcher(CharEqPattern(self).into_searcher(haystack))
-    }
-
-    #[inline]
-    fn is_contained_in(self, haystack: &'a str) -> bool {
-        if (self as u32) < 128 {
-            haystack.as_bytes().contains(&(self as u8))
-        } else {
-            let mut buffer = [0u8; 4];
-            self.encode_utf8(&mut buffer).is_contained_in(haystack)
-        }
-    }
-
-    #[inline]
-    fn is_prefix_of(self, haystack: &'a str) -> bool {
-        CharEqPattern(self).is_prefix_of(haystack)
-    }
-
-    #[inline]
-    fn is_suffix_of(self, haystack: &'a str) -> bool where Self::Searcher: ReverseSearcher<'a>
-    {
-        CharEqPattern(self).is_suffix_of(haystack)
-    }
-}
-
-/////////////////////////////////////////////////////////////////////////////
 // Impl for &[char]
 /////////////////////////////////////////////////////////////////////////////
 
@@ -466,7 +629,7 @@ impl<'a> Pattern<'a> for char {
 
 /// Associated type for `<&[char] as Pattern<'a>>::Searcher`.
 #[derive(Clone, Debug)]
-pub struct CharSliceSearcher<'a, 'b>(<CharEqPattern<&'b [char]> as Pattern<'a>>::Searcher);
+pub struct CharSliceSearcher<'a, 'b>(<MultiCharEqPattern<&'b [char]> as Pattern<'a>>::Searcher);
 
 unsafe impl<'a, 'b> Searcher<'a> for CharSliceSearcher<'a, 'b> {
     searcher_methods!(forward);
@@ -480,7 +643,7 @@ impl<'a, 'b> DoubleEndedSearcher<'a> for CharSliceSearcher<'a, 'b> {}
 
 /// Searches for chars that are equal to any of the chars in the array
 impl<'a, 'b> Pattern<'a> for &'b [char] {
-    pattern_methods!(CharSliceSearcher<'a, 'b>, CharEqPattern, CharSliceSearcher);
+    pattern_methods!(CharSliceSearcher<'a, 'b>, MultiCharEqPattern, CharSliceSearcher);
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -489,17 +652,16 @@ impl<'a, 'b> Pattern<'a> for &'b [char] {
 
 /// Associated type for `<F as Pattern<'a>>::Searcher`.
 #[derive(Clone)]
-pub struct CharPredicateSearcher<'a, F>(<CharEqPattern<F> as Pattern<'a>>::Searcher)
+pub struct CharPredicateSearcher<'a, F>(<MultiCharEqPattern<F> as Pattern<'a>>::Searcher)
     where F: FnMut(char) -> bool;
 
-impl<'a, F> fmt::Debug for CharPredicateSearcher<'a, F>
+impl<F> fmt::Debug for CharPredicateSearcher<'_, F>
     where F: FnMut(char) -> bool
 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CharPredicateSearcher")
             .field("haystack", &self.0.haystack)
             .field("char_indices", &self.0.char_indices)
-            .field("ascii_only", &self.0.ascii_only)
             .finish()
     }
 }
@@ -520,7 +682,7 @@ impl<'a, F> DoubleEndedSearcher<'a> for CharPredicateSearcher<'a, F>
 
 /// Searches for chars that match the given predicate
 impl<'a, F> Pattern<'a> for F where F: FnMut(char) -> bool {
-    pattern_methods!(CharPredicateSearcher<'a, F>, CharEqPattern, CharPredicateSearcher);
+    pattern_methods!(CharPredicateSearcher<'a, F>, MultiCharEqPattern, CharPredicateSearcher);
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -843,7 +1005,7 @@ struct TwoWaySearcher {
     It can be proven that the following is an equivalent definition of a local period
     for a factorization (u, v): any positive integer r such that x[i] == x[i+r] for
     all i such that |u| - r <= i <= |u| - 1 and such that both x[i] and x[i+r] are
-    defined. (i.e. i > 0 and i + r < |x|).
+    defined. (i.e., i > 0 and i + r < |x|).
 
     Using the above reformulation, it is easy to prove that
 

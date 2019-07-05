@@ -1,13 +1,3 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 #![allow(dead_code)]
 
 use std::vec;
@@ -35,8 +25,8 @@ fn main()
     // coercion-cast
     let mut it = vec![137].into_iter();
     let itr: &mut vec::IntoIter<u32> = &mut it;
-    assert_eq!((itr as &mut Iterator<Item=u32>).next(), Some(137));
-    assert_eq!((itr as &mut Iterator<Item=u32>).next(), None);
+    assert_eq!((itr as &mut dyn Iterator<Item=u32>).next(), Some(137));
+    assert_eq!((itr as &mut dyn Iterator<Item=u32>).next(), None);
 
     assert_eq!(Some(4u32) as Option<u32>, Some(4u32));
     assert_eq!((1u32,2u32) as (u32,u32), (1,2));
@@ -166,7 +156,12 @@ fn main()
 
     assert!(foo as usize != bar as usize);
 
-    assert_eq!(foo as i16, foo as usize as i16);
+    // Taking a few bits of a function's address is totally pointless and we detect that
+    // Disabling the lint to ensure that the assertion can still be run
+    #[allow(const_err)]
+    {
+        assert_eq!(foo as i16, foo as usize as i16);
+    }
 
     // fptr-ptr-cast
 

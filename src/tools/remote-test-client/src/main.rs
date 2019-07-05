@@ -1,12 +1,4 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+#![deny(rust_2018_idioms)]
 
 /// This is a small client program intended to pair with `remote-test-server` in
 /// this repository. This client connects to the server over TCP and is used to
@@ -25,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-const REMOTE_ADDR_ENV: &'static str = "TEST_DEVICE_ADDR";
+const REMOTE_ADDR_ENV: &str = "TEST_DEVICE_ADDR";
 
 macro_rules! t {
     ($e:expr) => (match $e {
@@ -177,7 +169,7 @@ fn start_qemu_emulator(target: &str,
         _ => panic!("cannot start emulator for: {}"< target),
     }
 
-    fn add_files(w: &mut Write, root: &Path, cur: &Path) {
+    fn add_files(w: &mut dyn Write, root: &Path, cur: &Path) {
         for entry in t!(cur.read_dir()) {
             let entry = t!(entry);
             let path = entry.path();
@@ -297,7 +289,7 @@ fn run(files: String, args: Vec<String>) {
     }
 }
 
-fn send(path: &Path, dst: &mut Write) {
+fn send(path: &Path, dst: &mut dyn Write) {
     t!(dst.write_all(path.file_name().unwrap().to_str().unwrap().as_bytes()));
     t!(dst.write_all(&[0]));
     let mut file = t!(File::open(&path));

@@ -2,17 +2,10 @@
 // ignore-tidy-cr (repeated again because of tidy bug)
 // license is ignored because tidy can't handle the CRLF here properly.
 
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
 
-// NB: this file needs CRLF line endings. The .gitattributes file in
+// N.B., this file needs CRLF line endings. The .gitattributes file in
 // this directory should enforce it.
 
 // ignore-pretty issue #37195
@@ -37,6 +30,9 @@ literal";
     let s = r"string
 literal";
     assert_eq!(s, "string\nliteral");
+    let s = br"byte string
+literal";
+    assert_eq!(s, "byte string\nliteral".as_bytes());
 
     // validate that our source file has CRLF endings
     let source = include_str!("lexer-crlf-line-endings-string-literal-doc-comment.rs");

@@ -1,14 +1,6 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-// ignore-emscripten
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
+// ignore-sgx no processes
 
 fn check_for_no_backtrace(test: std::process::Output) {
     assert!(!test.status.success());
@@ -16,7 +8,8 @@ fn check_for_no_backtrace(test: std::process::Output) {
     let mut it = err.lines();
 
     assert_eq!(it.next().map(|l| l.starts_with("thread '<unnamed>' panicked at")), Some(true));
-    assert_eq!(it.next(), Some("note: Run with `RUST_BACKTRACE=1` for a backtrace."));
+    assert_eq!(it.next(), Some("note: run with `RUST_BACKTRACE=1` \
+                                environment variable to display a backtrace."));
     assert_eq!(it.next().map(|l| l.starts_with("thread 'main' panicked at")), Some(true));
     assert_eq!(it.next(), None);
 }

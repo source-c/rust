@@ -1,26 +1,16 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Used by plugin crates to tell `rustc` about the plugins they provide.
 
 use rustc::lint::{EarlyLintPassObject, LateLintPassObject, LintId, Lint};
 use rustc::session::Session;
+use rustc::util::nodemap::FxHashMap;
 
-use syntax::ext::base::{SyntaxExtension, NamedSyntaxExtension, NormalTT, IdentTT};
+use syntax::ext::base::{SyntaxExtension, SyntaxExtensionKind, NamedSyntaxExtension};
 use syntax::ext::base::MacroExpanderFn;
 use syntax::symbol::Symbol;
 use syntax::ast;
 use syntax::feature_gate::AttributeType;
 use syntax_pos::Span;
 
-use std::collections::HashMap;
 use std::borrow::ToOwned;
 
 /// Structure used to register plugins.
@@ -52,15 +42,13 @@ pub struct Registry<'a> {
     pub late_lint_passes: Vec<LateLintPassObject>,
 
     #[doc(hidden)]
-    pub lint_groups: HashMap<&'static str, Vec<LintId>>,
+    pub lint_groups: FxHashMap<&'static str, (Vec<LintId>, Option<&'static str>)>,
 
     #[doc(hidden)]
     pub llvm_passes: Vec<String>,
 
     #[doc(hidden)]
-    pub attributes: Vec<(String, AttributeType)>,
-
-    whitelisted_custom_derives: Vec<ast::Name>,
+    pub attributes: Vec<(Symbol, AttributeType)>,
 }
 
 impl<'a> Registry<'a> {
@@ -73,14 +61,13 @@ impl<'a> Registry<'a> {
             syntax_exts: vec![],
             early_lint_passes: vec![],
             late_lint_passes: vec![],
-            lint_groups: HashMap::new(),
+            lint_groups: FxHashMap::default(),
             llvm_passes: vec![],
             attributes: vec![],
-            whitelisted_custom_derives: Vec::new(),
         }
     }
 
-    /// Get the plugin's arguments, if any.
+    /// Gets the plugin's arguments, if any.
     ///
     /// These are specified inside the `plugin` crate attribute as
     ///
@@ -90,66 +77,29 @@ impl<'a> Registry<'a> {
     ///
     /// Returns empty slice in case the plugin was loaded
     /// with `--extra-plugins`
-    pub fn args<'b>(&'b self) -> &'b [ast::NestedMetaItem] {
+    pub fn args(&self) -> &[ast::NestedMetaItem] {
         self.args_hidden.as_ref().map(|v| &v[..]).unwrap_or(&[])
     }
 
     /// Register a syntax extension of any kind.
     ///
     /// This is the most general hook into `libsyntax`'s expansion behavior.
-    pub fn register_syntax_extension(&mut self, name: ast::Name, extension: SyntaxExtension) {
-        if name == "macro_rules" {
-            panic!("user-defined macros may not be named `macro_rules`");
+    pub fn register_syntax_extension(&mut self, name: ast::Name, mut extension: SyntaxExtension) {
+        if extension.def_info.is_none() {
+            extension.def_info = Some((ast::CRATE_NODE_ID, self.krate_span));
         }
-        self.syntax_exts.push((name, match extension {
-            NormalTT {
-                expander,
-                def_info: _,
-                allow_internal_unstable,
-                allow_internal_unsafe
-            } => {
-                let nid = ast::CRATE_NODE_ID;
-                NormalTT {
-                    expander,
-                    def_info: Some((nid, self.krate_span)),
-                    allow_internal_unstable,
-                    allow_internal_unsafe
-                }
-            }
-            IdentTT(ext, _, allow_internal_unstable) => {
-                IdentTT(ext, Some(self.krate_span), allow_internal_unstable)
-            }
-            _ => extension,
-        }));
-    }
-
-    /// This can be used in place of `register_syntax_extension` to register legacy custom derives
-    /// (i.e. attribute syntax extensions whose name begins with `derive_`). Legacy custom
-    /// derives defined by this function do not trigger deprecation warnings when used.
-    #[unstable(feature = "rustc_private", issue = "27812")]
-    #[rustc_deprecated(since = "1.15.0", reason = "replaced by macros 1.1 (RFC 1861)")]
-    pub fn register_custom_derive(&mut self, name: ast::Name, extension: SyntaxExtension) {
-        assert!(name.as_str().starts_with("derive_"));
-        self.whitelisted_custom_derives.push(name);
-        self.register_syntax_extension(name, extension);
-    }
-
-    pub fn take_whitelisted_custom_derives(&mut self) -> Vec<ast::Name> {
-        ::std::mem::replace(&mut self.whitelisted_custom_derives, Vec::new())
+        self.syntax_exts.push((name, extension));
     }
 
     /// Register a macro of the usual kind.
     ///
     /// This is a convenience wrapper for `register_syntax_extension`.
-    /// It builds for you a `NormalTT` that calls `expander`,
+    /// It builds for you a `SyntaxExtensionKind::LegacyBang` that calls `expander`,
     /// and also takes care of interning the macro's name.
     pub fn register_macro(&mut self, name: &str, expander: MacroExpanderFn) {
-        self.register_syntax_extension(Symbol::intern(name), NormalTT {
-            expander: Box::new(expander),
-            def_info: None,
-            allow_internal_unstable: false,
-            allow_internal_unsafe: false,
-        });
+        let kind = SyntaxExtensionKind::LegacyBang(Box::new(expander));
+        let ext = SyntaxExtension::default(kind, self.sess.edition());
+        self.register_syntax_extension(Symbol::intern(name), ext);
     }
 
     /// Register a compiler lint pass.
@@ -162,8 +112,15 @@ impl<'a> Registry<'a> {
         self.late_lint_passes.push(lint_pass);
     }
     /// Register a lint group.
-    pub fn register_lint_group(&mut self, name: &'static str, to: Vec<&'static Lint>) {
-        self.lint_groups.insert(name, to.into_iter().map(|x| LintId::of(x)).collect());
+    pub fn register_lint_group(
+        &mut self,
+        name: &'static str,
+        deprecated_name: Option<&'static str>,
+        to: Vec<&'static Lint>
+    ) {
+        self.lint_groups.insert(name,
+                                (to.into_iter().map(|x| LintId::of(x)).collect(),
+                                 deprecated_name));
     }
 
     /// Register an LLVM pass.
@@ -180,7 +137,7 @@ impl<'a> Registry<'a> {
     /// Registered attributes will bypass the `custom_attribute` feature gate.
     /// `Whitelisted` attributes will additionally not trigger the `unused_attribute`
     /// lint. `CrateLevel` attributes will not be allowed on anything other than a crate.
-    pub fn register_attribute(&mut self, name: String, ty: AttributeType) {
+    pub fn register_attribute(&mut self, name: Symbol, ty: AttributeType) {
         self.attributes.push((name, ty));
     }
 }

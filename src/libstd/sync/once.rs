@@ -1,13 +1,3 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! A "once initialization" primitive
 //!
 //! This primitive is meant to be used to run one-time initialization. An
@@ -31,12 +21,10 @@
 // initialization closure panics, the Once enters a "poisoned" state which means
 // that all future calls will immediately panic as well.
 //
-// So to implement this, one might first reach for a `StaticMutex`, but those
-// unfortunately need to be deallocated (e.g. call `destroy()`) to free memory
-// on all OSes (some of the BSDs allocate memory for mutexes). It also gets a
-// lot harder with poisoning to figure out when the mutex needs to be
-// deallocated because it's not after the closure finishes, but after the first
-// successful closure finishes.
+// So to implement this, one might first reach for a `Mutex`, but those cannot
+// be put into a `static`. It also gets a lot harder with poisoning to figure
+// out when the mutex needs to be deallocated because it's not after the closure
+// finishes, but after the first successful closure finishes.
 //
 // All in all, this is instead implemented with atomics and lock-free
 // operations! Whee! Each `Once` has one word of atomic state, and this state is
@@ -64,25 +52,26 @@
 // You'll find a few more details in the implementation, but that's the gist of
 // it!
 
-use fmt;
-use marker;
-use ptr;
-use sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use thread::{self, Thread};
+use crate::fmt;
+use crate::marker;
+use crate::ptr;
+use crate::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
+use crate::thread::{self, Thread};
 
 /// A synchronization primitive which can be used to run a one-time global
 /// initialization. Useful for one-time initialization for FFI or related
 /// functionality. This type can only be constructed with the [`ONCE_INIT`]
-/// value.
+/// value or the equivalent [`Once::new`] constructor.
 ///
 /// [`ONCE_INIT`]: constant.ONCE_INIT.html
+/// [`Once::new`]: struct.Once.html#method.new
 ///
 /// # Examples
 ///
 /// ```
-/// use std::sync::{Once, ONCE_INIT};
+/// use std::sync::Once;
 ///
-/// static START: Once = ONCE_INIT;
+/// static START: Once = Once::new();
 ///
 /// START.call_once(|| {
 ///     // run initialization here
@@ -103,8 +92,8 @@ unsafe impl Sync for Once {}
 #[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl Send for Once {}
 
-/// State yielded to the [`call_once_force`] method which can be used to query
-/// whether the [`Once`] was previously poisoned or not.
+/// State yielded to [`call_once_force`]’s closure parameter. The state can be
+/// used to query the poison status of the [`Once`].
 ///
 /// [`call_once_force`]: struct.Once.html#method.call_once_force
 /// [`Once`]: struct.Once.html
@@ -126,6 +115,11 @@ pub struct OnceState {
 /// static START: Once = ONCE_INIT;
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
+#[rustc_deprecated(
+    since = "1.38.0",
+    reason = "the `new` function is now preferred",
+    suggestion = "Once::new()",
+)]
 pub const ONCE_INIT: Once = Once::new();
 
 // Four states that a Once can be in, encoded into the lower bits of `state` in
@@ -148,15 +142,14 @@ struct Waiter {
 
 // Helper struct used to clean up after a closure call with a `Drop`
 // implementation to also run on panic.
-struct Finish {
+struct Finish<'a> {
     panicked: bool,
-    me: &'static Once,
+    me: &'a Once,
 }
 
 impl Once {
     /// Creates a new `Once` value.
     #[stable(feature = "once_new", since = "1.2.0")]
-    #[cfg_attr(not(stage0), rustc_const_unstable(feature = "const_once_new"))]
     pub const fn new() -> Once {
         Once {
             state: AtomicUsize::new(INCOMPLETE),
@@ -178,16 +171,20 @@ impl Once {
     /// happens-before relation between the closure and code executing after the
     /// return).
     ///
+    /// If the given closure recursively invokes `call_once` on the same `Once`
+    /// instance the exact behavior is not specified, allowed outcomes are
+    /// a panic or a deadlock.
+    ///
     /// # Examples
     ///
     /// ```
-    /// use std::sync::{Once, ONCE_INIT};
+    /// use std::sync::Once;
     ///
     /// static mut VAL: usize = 0;
-    /// static INIT: Once = ONCE_INIT;
+    /// static INIT: Once = Once::new();
     ///
     /// // Accessing a `static mut` is unsafe much of the time, but if we do so
-    /// // in a synchronized fashion (e.g. write once or read all) then we're
+    /// // in a synchronized fashion (e.g., write once or read all) then we're
     /// // good to go!
     /// //
     /// // This function will only call `expensive_computation` once, and will
@@ -218,10 +215,10 @@ impl Once {
     ///
     /// [poison]: struct.Mutex.html#poisoning
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn call_once<F>(&'static self, f: F) where F: FnOnce() {
-        // Fast path, just see if we've completed initialization.
-        if self.state.load(Ordering::SeqCst) == COMPLETE {
-            return
+    pub fn call_once<F>(&self, f: F) where F: FnOnce() {
+        // Fast path check
+        if self.is_completed() {
+            return;
         }
 
         let mut f = Some(f);
@@ -230,28 +227,111 @@ impl Once {
 
     /// Performs the same function as [`call_once`] except ignores poisoning.
     ///
+    /// Unlike [`call_once`], if this `Once` has been poisoned (i.e., a previous
+    /// call to `call_once` or `call_once_force` caused a panic), calling
+    /// `call_once_force` will still invoke the closure `f` and will _not_
+    /// result in an immediate panic. If `f` panics, the `Once` will remain
+    /// in a poison state. If `f` does _not_ panic, the `Once` will no
+    /// longer be in a poison state and all future calls to `call_once` or
+    /// `call_one_force` will be no-ops.
+    ///
+    /// The closure `f` is yielded a [`OnceState`] structure which can be used
+    /// to query the poison status of the `Once`.
+    ///
     /// [`call_once`]: struct.Once.html#method.call_once
-    ///
-    /// If this `Once` has been poisoned (some initialization panicked) then
-    /// this function will continue to attempt to call initialization functions
-    /// until one of them doesn't panic.
-    ///
-    /// The closure `f` is yielded a [`OnceState`] structure which can be used to query the
-    /// state of this `Once` (whether initialization has previously panicked or
-    /// not).
-    ///
     /// [`OnceState`]: struct.OnceState.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(once_poison)]
+    ///
+    /// use std::sync::Once;
+    /// use std::thread;
+    ///
+    /// static INIT: Once = Once::new();
+    ///
+    /// // poison the once
+    /// let handle = thread::spawn(|| {
+    ///     INIT.call_once(|| panic!());
+    /// });
+    /// assert!(handle.join().is_err());
+    ///
+    /// // poisoning propagates
+    /// let handle = thread::spawn(|| {
+    ///     INIT.call_once(|| {});
+    /// });
+    /// assert!(handle.join().is_err());
+    ///
+    /// // call_once_force will still run and reset the poisoned state
+    /// INIT.call_once_force(|state| {
+    ///     assert!(state.poisoned());
+    /// });
+    ///
+    /// // once any success happens, we stop propagating the poison
+    /// INIT.call_once(|| {});
+    /// ```
     #[unstable(feature = "once_poison", issue = "33577")]
-    pub fn call_once_force<F>(&'static self, f: F) where F: FnOnce(&OnceState) {
-        // same as above, just with a different parameter to `call_inner`.
-        if self.state.load(Ordering::SeqCst) == COMPLETE {
-            return
+    pub fn call_once_force<F>(&self, f: F) where F: FnOnce(&OnceState) {
+        // Fast path check
+        if self.is_completed() {
+            return;
         }
 
         let mut f = Some(f);
         self.call_inner(true, &mut |p| {
             f.take().unwrap()(&OnceState { poisoned: p })
         });
+    }
+
+    /// Returns `true` if some `call_once` call has completed
+    /// successfully. Specifically, `is_completed` will return false in
+    /// the following situations:
+    ///   * `call_once` was not called at all,
+    ///   * `call_once` was called, but has not yet completed,
+    ///   * the `Once` instance is poisoned
+    ///
+    /// It is also possible that immediately after `is_completed`
+    /// returns false, some other thread finishes executing
+    /// `call_once`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(once_is_completed)]
+    /// use std::sync::Once;
+    ///
+    /// static INIT: Once = Once::new();
+    ///
+    /// assert_eq!(INIT.is_completed(), false);
+    /// INIT.call_once(|| {
+    ///     assert_eq!(INIT.is_completed(), false);
+    /// });
+    /// assert_eq!(INIT.is_completed(), true);
+    /// ```
+    ///
+    /// ```
+    /// #![feature(once_is_completed)]
+    /// use std::sync::Once;
+    /// use std::thread;
+    ///
+    /// static INIT: Once = Once::new();
+    ///
+    /// assert_eq!(INIT.is_completed(), false);
+    /// let handle = thread::spawn(|| {
+    ///     INIT.call_once(|| panic!());
+    /// });
+    /// assert!(handle.join().is_err());
+    /// assert_eq!(INIT.is_completed(), false);
+    /// ```
+    #[unstable(feature = "once_is_completed", issue = "54890")]
+    #[inline]
+    pub fn is_completed(&self) -> bool {
+        // An `Acquire` load is enough because that makes all the initialization
+        // operations visible to us, and, this being a fast path, weaker
+        // ordering helps with performance. This `Acquire` synchronizes with
+        // `SeqCst` operations on the slow path.
+        self.state.load(Ordering::Acquire) == COMPLETE
     }
 
     // This is a non-generic function to reduce the monomorphization cost of
@@ -266,9 +346,13 @@ impl Once {
     // currently no way to take an `FnOnce` and call it via virtual dispatch
     // without some allocation overhead.
     #[cold]
-    fn call_inner(&'static self,
+    fn call_inner(&self,
                   ignore_poisoning: bool,
-                  init: &mut FnMut(bool)) {
+                  init: &mut dyn FnMut(bool)) {
+
+        // This cold path uses SeqCst consistently because the
+        // performance difference really does not matter there, and
+        // SeqCst minimizes the chances of something going wrong.
         let mut state = self.state.load(Ordering::SeqCst);
 
         'outer: loop {
@@ -352,12 +436,12 @@ impl Once {
 
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Once {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("Once { .. }")
     }
 }
 
-impl Drop for Finish {
+impl Drop for Finish<'_> {
     fn drop(&mut self) {
         // Swap out our state with however we finished. We should only ever see
         // an old state which was RUNNING.
@@ -386,12 +470,47 @@ impl Drop for Finish {
 }
 
 impl OnceState {
-    /// Returns whether the associated [`Once`] has been poisoned.
+    /// Returns `true` if the associated [`Once`] was poisoned prior to the
+    /// invocation of the closure passed to [`call_once_force`].
     ///
-    /// Once an initialization routine for a [`Once`] has panicked it will forever
-    /// indicate to future forced initialization routines that it is poisoned.
-    ///
+    /// [`call_once_force`]: struct.Once.html#method.call_once_force
     /// [`Once`]: struct.Once.html
+    ///
+    /// # Examples
+    ///
+    /// A poisoned `Once`:
+    ///
+    /// ```
+    /// #![feature(once_poison)]
+    ///
+    /// use std::sync::Once;
+    /// use std::thread;
+    ///
+    /// static INIT: Once = Once::new();
+    ///
+    /// // poison the once
+    /// let handle = thread::spawn(|| {
+    ///     INIT.call_once(|| panic!());
+    /// });
+    /// assert!(handle.join().is_err());
+    ///
+    /// INIT.call_once_force(|state| {
+    ///     assert!(state.poisoned());
+    /// });
+    /// ```
+    ///
+    /// An unpoisoned `Once`:
+    ///
+    /// ```
+    /// #![feature(once_poison)]
+    ///
+    /// use std::sync::Once;
+    ///
+    /// static INIT: Once = Once::new();
+    ///
+    /// INIT.call_once_force(|state| {
+    ///     assert!(!state.poisoned());
+    /// });
     #[unstable(feature = "once_poison", issue = "33577")]
     pub fn poisoned(&self) -> bool {
         self.poisoned
@@ -400,9 +519,9 @@ impl OnceState {
 
 #[cfg(all(test, not(target_os = "emscripten")))]
 mod tests {
-    use panic;
-    use sync::mpsc::channel;
-    use thread;
+    use crate::panic;
+    use crate::sync::mpsc::channel;
+    use crate::thread;
     use super::Once;
 
     #[test]

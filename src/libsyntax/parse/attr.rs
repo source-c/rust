@@ -1,39 +1,38 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::attr;
+use crate::ast;
+use crate::parse::{SeqSep, PResult};
+use crate::parse::token::{self, Nonterminal, DelimToken};
+use crate::parse::parser::{Parser, TokenType, PathStyle};
+use crate::tokenstream::{TokenStream, TokenTree};
 
-use attr;
-use ast;
-use codemap::respan;
-use parse::common::SeqSep;
-use parse::PResult;
-use parse::token::{self, Nonterminal};
-use parse::parser::{Parser, TokenType, PathStyle};
-use tokenstream::TokenStream;
+use log::debug;
+use smallvec::smallvec;
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Debug)]
 enum InnerAttributeParsePolicy<'a> {
     Permitted,
     NotPermitted { reason: &'a str },
 }
 
-const DEFAULT_UNEXPECTED_INNER_ATTR_ERR_MSG: &'static str = "an inner attribute is not \
-                                                             permitted in this context";
+const DEFAULT_UNEXPECTED_INNER_ATTR_ERR_MSG: &str = "an inner attribute is not \
+                                                     permitted in this context";
 
 impl<'a> Parser<'a> {
+    crate fn parse_arg_attributes(&mut self) -> PResult<'a, Vec<ast::Attribute>> {
+        let attrs = self.parse_outer_attributes()?;
+        attrs.iter().for_each(|a|
+            self.sess.param_attr_spans.borrow_mut().push(a.span)
+        );
+        Ok(attrs)
+    }
+
     /// Parse attributes that appear before an item
-    pub fn parse_outer_attributes(&mut self) -> PResult<'a, Vec<ast::Attribute>> {
+    crate fn parse_outer_attributes(&mut self) -> PResult<'a, Vec<ast::Attribute>> {
         let mut attrs: Vec<ast::Attribute> = Vec::new();
         let mut just_parsed_doc_comment = false;
         loop {
             debug!("parse_outer_attributes: self.token={:?}", self.token);
-            match self.token {
+            match self.token.kind {
                 token::Pound => {
                     let inner_error_reason = if just_parsed_doc_comment {
                         "an inner attribute is not permitted following an outer doc comment"
@@ -44,11 +43,12 @@ impl<'a> Parser<'a> {
                     };
                     let inner_parse_policy =
                         InnerAttributeParsePolicy::NotPermitted { reason: inner_error_reason };
-                    attrs.push(self.parse_attribute_with_inner_parse_policy(inner_parse_policy)?);
+                    let attr = self.parse_attribute_with_inner_parse_policy(inner_parse_policy)?;
+                    attrs.push(attr);
                     just_parsed_doc_comment = false;
                 }
                 token::DocComment(s) => {
-                    let attr = attr::mk_sugared_doc_attr(attr::mk_attr_id(), s, self.span);
+                    let attr = attr::mk_sugared_doc_attr(attr::mk_attr_id(), s, self.token.span);
                     if attr.style != ast::AttrStyle::Outer {
                         let mut err = self.fatal("expected outer doc comment");
                         err.note("inner doc comments like this (starting with \
@@ -85,31 +85,30 @@ impl<'a> Parser<'a> {
     /// The same as `parse_attribute`, except it takes in an `InnerAttributeParsePolicy`
     /// that prescribes how to handle inner attributes.
     fn parse_attribute_with_inner_parse_policy(&mut self,
-                                               inner_parse_policy: InnerAttributeParsePolicy)
+                                               inner_parse_policy: InnerAttributeParsePolicy<'_>)
                                                -> PResult<'a, ast::Attribute> {
         debug!("parse_attribute_with_inner_parse_policy: inner_parse_policy={:?} self.token={:?}",
                inner_parse_policy,
                self.token);
-        let (span, path, tokens, mut style) = match self.token {
+        let (span, path, tokens, style) = match self.token.kind {
             token::Pound => {
-                let lo = self.span;
+                let lo = self.token.span;
                 self.bump();
 
-                if inner_parse_policy == InnerAttributeParsePolicy::Permitted {
+                if let InnerAttributeParsePolicy::Permitted = inner_parse_policy {
                     self.expected_tokens.push(TokenType::Token(token::Not));
                 }
                 let style = if self.token == token::Not {
                     self.bump();
                     if let InnerAttributeParsePolicy::NotPermitted { reason } = inner_parse_policy
                     {
-                        let span = self.span;
+                        let span = self.token.span;
                         self.diagnostic()
                             .struct_span_err(span, reason)
-                            .note("inner attributes and doc comments, like `#![no_std]` or \
-                                   `//! My crate`, annotate the item enclosing them, and are \
-                                   usually found at the beginning of source files. Outer \
-                                   attributes and doc comments, like `#[test]` and
-                                   `/// My function`, annotate the item following them.")
+                            .note("inner attributes, like `#![no_std]`, annotate the item \
+                                   enclosing them, and are usually found at the beginning of \
+                                   source files. Outer attributes, like `#[test]`, annotate the \
+                                   item following them.")
                             .emit()
                     }
                     ast::AttrStyle::Inner
@@ -118,7 +117,7 @@ impl<'a> Parser<'a> {
                 };
 
                 self.expect(&token::OpenDelim(token::Bracket))?;
-                let (path, tokens) = self.parse_path_and_tokens()?;
+                let (path, tokens) = self.parse_meta_item_unrestricted()?;
                 self.expect(&token::CloseDelim(token::Bracket))?;
                 let hi = self.prev_span;
 
@@ -130,15 +129,6 @@ impl<'a> Parser<'a> {
             }
         };
 
-        if inner_parse_policy == InnerAttributeParsePolicy::Permitted &&
-           self.token == token::Semi {
-            self.bump();
-            self.span_warn(span,
-                           "this inner attribute syntax is deprecated. The new syntax is \
-                            `#![foo]`, with a bang and no semicolon");
-            style = ast::AttrStyle::Inner;
-        }
-
         Ok(ast::Attribute {
             id: attr::mk_attr_id(),
             style,
@@ -149,9 +139,18 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub fn parse_path_and_tokens(&mut self) -> PResult<'a, (ast::Path, TokenStream)> {
-        let meta = match self.token {
-            token::Interpolated(ref nt) => match nt.0 {
+    /// Parse an inner part of attribute - path and following tokens.
+    /// The tokens must be either a delimited token stream, or empty token stream,
+    /// or the "legacy" key-value form.
+    /// PATH `(` TOKEN_STREAM `)`
+    /// PATH `[` TOKEN_STREAM `]`
+    /// PATH `{` TOKEN_STREAM `}`
+    /// PATH
+    /// PATH `=` TOKEN_TREE
+    /// The delimiters or `=` are still put into the resulting token stream.
+    crate fn parse_meta_item_unrestricted(&mut self) -> PResult<'a, (ast::Path, TokenStream)> {
+        let meta = match self.token.kind {
+            token::Interpolated(ref nt) => match **nt {
                 Nonterminal::NtMeta(ref meta) => Some(meta.clone()),
                 _ => None,
             },
@@ -159,10 +158,34 @@ impl<'a> Parser<'a> {
         };
         Ok(if let Some(meta) = meta {
             self.bump();
-            (ast::Path::from_ident(meta.span, ast::Ident::with_empty_ctxt(meta.name)),
-             meta.node.tokens(meta.span))
+            (meta.path, meta.node.tokens(meta.span))
         } else {
-            (self.parse_path(PathStyle::Mod)?, self.parse_tokens())
+            let path = self.parse_path(PathStyle::Mod)?;
+            let tokens = if self.check(&token::OpenDelim(DelimToken::Paren)) ||
+               self.check(&token::OpenDelim(DelimToken::Bracket)) ||
+               self.check(&token::OpenDelim(DelimToken::Brace)) {
+                   self.parse_token_tree().into()
+            } else if self.eat(&token::Eq) {
+                let eq = TokenTree::token(token::Eq, self.prev_span);
+                let mut is_interpolated_expr = false;
+                if let token::Interpolated(nt) = &self.token.kind {
+                    if let token::NtExpr(..) = **nt {
+                        is_interpolated_expr = true;
+                    }
+                }
+                let tokens = if is_interpolated_expr {
+                    // We need to accept arbitrary interpolated expressions to continue
+                    // supporting things like `doc = $expr` that work on stable.
+                    // Non-literal interpolated expressions are rejected after expansion.
+                    self.parse_token_tree().into()
+                } else {
+                    self.parse_unsuffixed_lit()?.tokens()
+                };
+                TokenStream::from_streams(smallvec![eq.into(), tokens])
+            } else {
+                TokenStream::empty()
+            };
+            (path, tokens)
         })
     }
 
@@ -171,10 +194,10 @@ impl<'a> Parser<'a> {
     /// terminated by a semicolon.
 
     /// matches inner_attrs*
-    pub fn parse_inner_attributes(&mut self) -> PResult<'a, Vec<ast::Attribute>> {
+    crate fn parse_inner_attributes(&mut self) -> PResult<'a, Vec<ast::Attribute>> {
         let mut attrs: Vec<ast::Attribute> = vec![];
         loop {
-            match self.token {
+            match self.token.kind {
                 token::Pound => {
                     // Don't even try to parse if it's not an inner attribute.
                     if !self.look_ahead(1, |t| t == &token::Not) {
@@ -187,7 +210,7 @@ impl<'a> Parser<'a> {
                 }
                 token::DocComment(s) => {
                     // we need to get the position of this token before we bump.
-                    let attr = attr::mk_sugared_doc_attr(attr::mk_attr_id(), s, self.span);
+                    let attr = attr::mk_sugared_doc_attr(attr::mk_attr_id(), s, self.token.span);
                     if attr.style == ast::AttrStyle::Inner {
                         attrs.push(attr);
                         self.bump();
@@ -222,8 +245,8 @@ impl<'a> Parser<'a> {
     /// meta_item : IDENT ( '=' UNSUFFIXED_LIT | '(' meta_item_inner? ')' )? ;
     /// meta_item_inner : (meta_item | UNSUFFIXED_LIT) (',' meta_item_inner)? ;
     pub fn parse_meta_item(&mut self) -> PResult<'a, ast::MetaItem> {
-        let nt_meta = match self.token {
-            token::Interpolated(ref nt) => match nt.0 {
+        let nt_meta = match self.token.kind {
+            token::Interpolated(ref nt) => match **nt {
                 token::NtMeta(ref e) => Some(e.clone()),
                 _ => None,
             },
@@ -235,13 +258,14 @@ impl<'a> Parser<'a> {
             return Ok(meta);
         }
 
-        let lo = self.span;
-        let ident = self.parse_ident()?;
+        let lo = self.token.span;
+        let path = self.parse_path(PathStyle::Mod)?;
         let node = self.parse_meta_item_kind()?;
-        Ok(ast::MetaItem { name: ident.name, node: node, span: lo.to(self.prev_span) })
+        let span = lo.to(self.prev_span);
+        Ok(ast::MetaItem { path, node, span })
     }
 
-    pub fn parse_meta_item_kind(&mut self) -> PResult<'a, ast::MetaItemKind> {
+    crate fn parse_meta_item_kind(&mut self) -> PResult<'a, ast::MetaItemKind> {
         Ok(if self.eat(&token::Eq) {
             ast::MetaItemKind::NameValue(self.parse_unsuffixed_lit()?)
         } else if self.eat(&token::OpenDelim(token::Paren)) {
@@ -253,25 +277,23 @@ impl<'a> Parser<'a> {
 
     /// matches meta_item_inner : (meta_item | UNSUFFIXED_LIT) ;
     fn parse_meta_item_inner(&mut self) -> PResult<'a, ast::NestedMetaItem> {
-        let lo = self.span;
-
         match self.parse_unsuffixed_lit() {
             Ok(lit) => {
-                return Ok(respan(lo.to(self.prev_span), ast::NestedMetaItemKind::Literal(lit)))
+                return Ok(ast::NestedMetaItem::Literal(lit))
             }
             Err(ref mut err) => self.diagnostic().cancel(err)
         }
 
         match self.parse_meta_item() {
             Ok(mi) => {
-                return Ok(respan(lo.to(self.prev_span), ast::NestedMetaItemKind::MetaItem(mi)))
+                return Ok(ast::NestedMetaItem::MetaItem(mi))
             }
             Err(ref mut err) => self.diagnostic().cancel(err)
         }
 
         let found = self.this_token_to_string();
-        let msg = format!("expected unsuffixed literal or identifier, found {}", found);
-        Err(self.diagnostic().struct_span_err(lo, &msg))
+        let msg = format!("expected unsuffixed literal or identifier, found `{}`", found);
+        Err(self.diagnostic().struct_span_err(self.token.span, &msg))
     }
 
     /// matches meta_seq = ( COMMASEP(meta_item_inner) )

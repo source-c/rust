@@ -1,21 +1,10 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use cell::UnsafeCell;
-use fmt;
-use marker;
-use mem;
-use ops::{Deref, DerefMut};
-use ptr;
-use sys_common::poison::{self, LockResult, TryLockError, TryLockResult};
-use sys_common::rwlock as sys;
+use crate::cell::UnsafeCell;
+use crate::fmt;
+use crate::mem;
+use crate::ops::{Deref, DerefMut};
+use crate::ptr;
+use crate::sys_common::poison::{self, LockResult, TryLockError, TryLockResult};
+use crate::sys_common::rwlock as sys;
 
 /// A reader-writer lock
 ///
@@ -25,8 +14,8 @@ use sys_common::rwlock as sys;
 /// typically allows for read-only access (shared access).
 ///
 /// In comparison, a [`Mutex`] does not distinguish between readers or writers
-/// that aquire the lock, therefore blocking any threads waiting for the lock to
-/// become available. An `RwLock` will allow any number of readers to aquire the
+/// that acquire the lock, therefore blocking any threads waiting for the lock to
+/// become available. An `RwLock` will allow any number of readers to acquire the
 /// lock as long as a writer is not holding the lock.
 ///
 /// The priority policy of the lock is dependent on the underlying operating
@@ -37,7 +26,7 @@ use sys_common::rwlock as sys;
 /// required that `T` satisfies [`Send`] to be shared across threads and
 /// [`Sync`] to allow concurrent access through readers. The RAII guards
 /// returned from the locking methods implement [`Deref`][] (and [`DerefMut`]
-/// for the `write` methods) to allow access to the contained of the lock.
+/// for the `write` methods) to allow access to the content of the lock.
 ///
 /// # Poisoning
 ///
@@ -82,7 +71,7 @@ pub struct RwLock<T: ?Sized> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-unsafe impl<T: ?Sized + Send + Sync> Send for RwLock<T> {}
+unsafe impl<T: ?Sized + Send> Send for RwLock<T> {}
 #[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl<T: ?Sized + Send + Sync> Sync for RwLock<T> {}
 
@@ -95,14 +84,17 @@ unsafe impl<T: ?Sized + Send + Sync> Sync for RwLock<T> {}
 /// [`read`]: struct.RwLock.html#method.read
 /// [`try_read`]: struct.RwLock.html#method.try_read
 /// [`RwLock`]: struct.RwLock.html
-#[must_use]
+#[must_use = "if unused the RwLock will immediately unlock"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct RwLockReadGuard<'a, T: ?Sized + 'a> {
     __lock: &'a RwLock<T>,
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> !marker::Send for RwLockReadGuard<'a, T> {}
+impl<T: ?Sized> !Send for RwLockReadGuard<'_, T> {}
+
+#[stable(feature = "rwlock_guard_sync", since = "1.23.0")]
+unsafe impl<T: ?Sized + Sync> Sync for RwLockReadGuard<'_, T> {}
 
 /// RAII structure used to release the exclusive write access of a lock when
 /// dropped.
@@ -113,7 +105,7 @@ impl<'a, T: ?Sized> !marker::Send for RwLockReadGuard<'a, T> {}
 /// [`write`]: struct.RwLock.html#method.write
 /// [`try_write`]: struct.RwLock.html#method.try_write
 /// [`RwLock`]: struct.RwLock.html
-#[must_use]
+#[must_use = "if unused the RwLock will immediately unlock"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct RwLockWriteGuard<'a, T: ?Sized + 'a> {
     __lock: &'a RwLock<T>,
@@ -121,7 +113,10 @@ pub struct RwLockWriteGuard<'a, T: ?Sized + 'a> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> !marker::Send for RwLockWriteGuard<'a, T> {}
+impl<T: ?Sized> !Send for RwLockWriteGuard<'_, T> {}
+
+#[stable(feature = "rwlock_guard_sync", since = "1.23.0")]
+unsafe impl<T: ?Sized + Sync> Sync for RwLockWriteGuard<'_, T> {}
 
 impl<T> RwLock<T> {
     /// Creates a new instance of an `RwLock<T>` which is unlocked.
@@ -185,7 +180,7 @@ impl<T: ?Sized> RwLock<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn read(&self) -> LockResult<RwLockReadGuard<T>> {
+    pub fn read(&self) -> LockResult<RwLockReadGuard<'_, T>> {
         unsafe {
             self.inner.read();
             RwLockReadGuard::new(self)
@@ -224,7 +219,7 @@ impl<T: ?Sized> RwLock<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn try_read(&self) -> TryLockResult<RwLockReadGuard<T>> {
+    pub fn try_read(&self) -> TryLockResult<RwLockReadGuard<'_, T>> {
         unsafe {
             if self.inner.try_read() {
                 Ok(RwLockReadGuard::new(self)?)
@@ -267,7 +262,7 @@ impl<T: ?Sized> RwLock<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn write(&self) -> LockResult<RwLockWriteGuard<T>> {
+    pub fn write(&self) -> LockResult<RwLockWriteGuard<'_, T>> {
         unsafe {
             self.inner.write();
             RwLockWriteGuard::new(self)
@@ -306,7 +301,7 @@ impl<T: ?Sized> RwLock<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn try_write(&self) -> TryLockResult<RwLockWriteGuard<T>> {
+    pub fn try_write(&self) -> TryLockResult<RwLockWriteGuard<'_, T>> {
         unsafe {
             if self.inner.try_write() {
                 Ok(RwLockWriteGuard::new(self)?)
@@ -319,7 +314,7 @@ impl<T: ?Sized> RwLock<T> {
     /// Determines whether the lock is poisoned.
     ///
     /// If another thread is active, the lock can still become poisoned at any
-    /// time.  You should not trust a `false` value for program correctness
+    /// time. You should not trust a `false` value for program correctness
     /// without additional synchronization.
     ///
     /// # Examples
@@ -389,7 +384,7 @@ impl<T: ?Sized> RwLock<T> {
     /// Returns a mutable reference to the underlying data.
     ///
     /// Since this call borrows the `RwLock` mutably, no actual locking needs to
-    /// take place---the mutable borrow statically guarantees no locks exist.
+    /// take place -- the mutable borrow statically guarantees no locks exist.
     ///
     /// # Errors
     ///
@@ -426,13 +421,22 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for RwLock<T> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized + fmt::Debug> fmt::Debug for RwLock<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.try_read() {
-            Ok(guard) => write!(f, "RwLock {{ data: {:?} }}", &*guard),
+            Ok(guard) => f.debug_struct("RwLock").field("data", &&*guard).finish(),
             Err(TryLockError::Poisoned(err)) => {
-                write!(f, "RwLock {{ data: Poisoned({:?}) }}", &**err.get_ref())
+                f.debug_struct("RwLock").field("data", &&**err.get_ref()).finish()
             },
-            Err(TryLockError::WouldBlock) => write!(f, "RwLock {{ <locked> }}")
+            Err(TryLockError::WouldBlock) => {
+                struct LockedPlaceholder;
+                impl fmt::Debug for LockedPlaceholder {
+                    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        f.write_str("<locked>")
+                    }
+                }
+
+                f.debug_struct("RwLock").field("data", &LockedPlaceholder).finish()
+            }
         }
     }
 }
@@ -442,6 +446,17 @@ impl<T: Default> Default for RwLock<T> {
     /// Creates a new `RwLock<T>`, with the `Default` value for T.
     fn default() -> RwLock<T> {
         RwLock::new(Default::default())
+    }
+}
+
+#[stable(feature = "rw_lock_from", since = "1.24.0")]
+impl<T> From<T> for RwLock<T> {
+    /// Creates a new instance of an `RwLock<T>` which is unlocked.
+    /// This is equivalent to [`RwLock::new`].
+    ///
+    /// [`RwLock::new`]: ../../std/sync/struct.RwLock.html#method.new
+    fn from(t: T) -> Self {
+        RwLock::new(t)
     }
 }
 
@@ -469,8 +484,8 @@ impl<'rwlock, T: ?Sized> RwLockWriteGuard<'rwlock, T> {
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
-impl<'a, T: fmt::Debug> fmt::Debug for RwLockReadGuard<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl<T: fmt::Debug> fmt::Debug for RwLockReadGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RwLockReadGuard")
             .field("lock", &self.__lock)
             .finish()
@@ -478,15 +493,15 @@ impl<'a, T: fmt::Debug> fmt::Debug for RwLockReadGuard<'a, T> {
 }
 
 #[stable(feature = "std_guard_impls", since = "1.20.0")]
-impl<'a, T: ?Sized + fmt::Display> fmt::Display for RwLockReadGuard<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl<T: ?Sized + fmt::Display> fmt::Display for RwLockReadGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         (**self).fmt(f)
     }
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
-impl<'a, T: fmt::Debug> fmt::Debug for RwLockWriteGuard<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl<T: fmt::Debug> fmt::Debug for RwLockWriteGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RwLockWriteGuard")
             .field("lock", &self.__lock)
             .finish()
@@ -494,14 +509,14 @@ impl<'a, T: fmt::Debug> fmt::Debug for RwLockWriteGuard<'a, T> {
 }
 
 #[stable(feature = "std_guard_impls", since = "1.20.0")]
-impl<'a, T: ?Sized + fmt::Display> fmt::Display for RwLockWriteGuard<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl<T: ?Sized + fmt::Display> fmt::Display for RwLockWriteGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         (**self).fmt(f)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'rwlock, T: ?Sized> Deref for RwLockReadGuard<'rwlock, T> {
+impl<T: ?Sized> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -510,7 +525,7 @@ impl<'rwlock, T: ?Sized> Deref for RwLockReadGuard<'rwlock, T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'rwlock, T: ?Sized> Deref for RwLockWriteGuard<'rwlock, T> {
+impl<T: ?Sized> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -519,21 +534,21 @@ impl<'rwlock, T: ?Sized> Deref for RwLockWriteGuard<'rwlock, T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'rwlock, T: ?Sized> DerefMut for RwLockWriteGuard<'rwlock, T> {
+impl<T: ?Sized> DerefMut for RwLockWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.__lock.data.get() }
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> Drop for RwLockReadGuard<'a, T> {
+impl<T: ?Sized> Drop for RwLockReadGuard<'_, T> {
     fn drop(&mut self) {
         unsafe { self.__lock.inner.read_unlock(); }
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> Drop for RwLockWriteGuard<'a, T> {
+impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
     fn drop(&mut self) {
         self.__lock.poison.done(&self.__poison);
         unsafe { self.__lock.inner.write_unlock(); }
@@ -542,13 +557,11 @@ impl<'a, T: ?Sized> Drop for RwLockWriteGuard<'a, T> {
 
 #[cfg(all(test, not(target_os = "emscripten")))]
 mod tests {
-    #![allow(deprecated)] // rand
-
     use rand::{self, Rng};
-    use sync::mpsc::channel;
-    use thread;
-    use sync::{Arc, RwLock, TryLockError};
-    use sync::atomic::{AtomicUsize, Ordering};
+    use crate::sync::mpsc::channel;
+    use crate::thread;
+    use crate::sync::{Arc, RwLock, TryLockError};
+    use crate::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Eq, PartialEq, Debug)]
     struct NonCopy(i32);
@@ -564,7 +577,7 @@ mod tests {
 
     #[test]
     fn frob() {
-        const N: usize = 10;
+        const N: u32 = 10;
         const M: usize = 1000;
 
         let r = Arc::new(RwLock::new(()));
@@ -576,7 +589,7 @@ mod tests {
             thread::spawn(move || {
                 let mut rng = rand::thread_rng();
                 for _ in 0..M {
-                    if rng.gen_weighted_bool(N) {
+                    if rng.gen_bool(1.0 / (N as f64)) {
                         drop(r.write().unwrap());
                     } else {
                         drop(r.read().unwrap());

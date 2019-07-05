@@ -1,36 +1,27 @@
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::deriving::path_std;
+use crate::deriving::generic::*;
+use crate::deriving::generic::ty::*;
 
-use deriving::generic::*;
-use deriving::generic::ty::*;
-
-use syntax::ast::{self, Expr, MetaItem};
+use syntax::ast::{self, Expr, MetaItem, GenericArg};
 use syntax::ext::base::{Annotatable, ExtCtxt};
 use syntax::ext::build::AstBuilder;
 use syntax::ptr::P;
-use syntax::symbol::Symbol;
+use syntax::symbol::{sym, Symbol};
 use syntax_pos::Span;
 
-pub fn expand_deriving_eq(cx: &mut ExtCtxt,
+pub fn expand_deriving_eq(cx: &mut ExtCtxt<'_>,
                           span: Span,
                           mitem: &MetaItem,
                           item: &Annotatable,
-                          push: &mut FnMut(Annotatable)) {
-    let inline = cx.meta_word(span, Symbol::intern("inline"));
-    let hidden = cx.meta_list_item_word(span, Symbol::intern("hidden"));
-    let doc = cx.meta_list(span, Symbol::intern("doc"), vec![hidden]);
+                          push: &mut dyn FnMut(Annotatable)) {
+    let inline = cx.meta_word(span, sym::inline);
+    let hidden = cx.meta_list_item_word(span, sym::hidden);
+    let doc = cx.meta_list(span, sym::doc, vec![hidden]);
     let attrs = vec![cx.attribute(span, inline), cx.attribute(span, doc)];
     let trait_def = TraitDef {
         span,
         attributes: Vec::new(),
-        path: path_std!(cx, core::cmp::Eq),
+        path: path_std!(cx, cmp::Eq),
         additional_bounds: Vec::new(),
         generics: LifetimeBounds::empty(),
         is_unsafe: false,
@@ -53,18 +44,23 @@ pub fn expand_deriving_eq(cx: &mut ExtCtxt,
     trait_def.expand_ext(cx, mitem, item, push, true)
 }
 
-fn cs_total_eq_assert(cx: &mut ExtCtxt, trait_span: Span, substr: &Substructure) -> P<Expr> {
-    fn assert_ty_bounds(cx: &mut ExtCtxt, stmts: &mut Vec<ast::Stmt>,
+fn cs_total_eq_assert(cx: &mut ExtCtxt<'_>,
+                      trait_span: Span,
+                      substr: &Substructure<'_>)
+                      -> P<Expr> {
+    fn assert_ty_bounds(cx: &mut ExtCtxt<'_>, stmts: &mut Vec<ast::Stmt>,
                         ty: P<ast::Ty>, span: Span, helper_name: &str) {
         // Generate statement `let _: helper_name<ty>;`,
         // set the expn ID so we can use the unstable struct.
         let span = span.with_ctxt(cx.backtrace());
         let assert_path = cx.path_all(span, true,
-                                        cx.std_path(&["cmp", helper_name]),
-                                        vec![], vec![ty], vec![]);
+                                        cx.std_path(&[sym::cmp, Symbol::intern(helper_name)]),
+                                        vec![GenericArg::Type(ty)], vec![]);
         stmts.push(cx.stmt_let_type_only(span, cx.ty_path(assert_path)));
     }
-    fn process_variant(cx: &mut ExtCtxt, stmts: &mut Vec<ast::Stmt>, variant: &ast::VariantData) {
+    fn process_variant(cx: &mut ExtCtxt<'_>,
+                       stmts: &mut Vec<ast::Stmt>,
+                       variant: &ast::VariantData) {
         for field in variant.fields() {
             // let _: AssertParamIsEq<FieldTy>;
             assert_ty_bounds(cx, stmts, field.ty.clone(), field.span, "AssertParamIsEq");

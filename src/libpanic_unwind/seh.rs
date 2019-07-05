@@ -1,18 +1,8 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Windows SEH
 //!
 //! On Windows (currently only on MSVC), the default exception handling
 //! mechanism is Structured Exception Handling (SEH). This is quite different
-//! than Dwarf-based exception handling (e.g. what other unix platforms use) in
+//! than Dwarf-based exception handling (e.g., what other unix platforms use) in
 //! terms of compiler internals, so LLVM is required to have a good deal of
 //! extra support for SEH.
 //!
@@ -43,7 +33,7 @@
 //!   throwing. Note that throwing an exception into Rust is undefined behavior
 //!   anyway, so this should be fine.
 //! * We've got some data to transmit across the unwinding boundary,
-//!   specifically a `Box<Any + Send>`. Like with Dwarf exceptions
+//!   specifically a `Box<dyn Any + Send>`. Like with Dwarf exceptions
 //!   these two pointers are stored as a payload in the exception itself. On
 //!   MSVC, however, there's no need for an extra heap allocation because the
 //!   call stack is preserved while filter functions are being executed. This
@@ -54,7 +44,7 @@
 //! [win64]: http://msdn.microsoft.com/en-us/library/1eyas8tf.aspx
 //! [llvm]: http://llvm.org/docs/ExceptionHandling.html#background-on-windows-exceptions
 
-#![allow(bad_style)]
+#![allow(nonstandard_style)]
 #![allow(private_no_mangle_fns)]
 
 use alloc::boxed::Box;
@@ -62,7 +52,7 @@ use core::any::Any;
 use core::mem;
 use core::raw;
 
-use windows as c;
+use crate::windows as c;
 use libc::{c_int, c_uint};
 
 // First up, a whole bunch of type definitions. There's a few platform-specific
@@ -114,12 +104,12 @@ mod imp {
     pub const NAME2: [u8; 7] = [b'.', b'P', b'A', b'X', 0, 0, 0];
 
     macro_rules! ptr {
-        (0) => (0 as *mut u8);
+        (0) => (core::ptr::null_mut());
         ($e:expr) => ($e as *mut u8);
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "arm"))]
 #[macro_use]
 mod imp {
     pub type ptr_t = u32;
@@ -142,7 +132,7 @@ mod imp {
 
 #[repr(C)]
 pub struct _ThrowInfo {
-    pub attribues: c_uint,
+    pub attributes: c_uint,
     pub pnfnUnwind: imp::ptr_t,
     pub pForwardCompat: imp::ptr_t,
     pub pCatchableTypeArray: imp::ptr_t,
@@ -178,7 +168,7 @@ pub struct _TypeDescriptor {
 }
 
 static mut THROW_INFO: _ThrowInfo = _ThrowInfo {
-    attribues: 0,
+    attributes: 0,
     pnfnUnwind: ptr!(0),
     pForwardCompat: ptr!(0),
     pCatchableTypeArray: ptr!(0),
@@ -233,17 +223,17 @@ extern "C" {
 #[cfg_attr(not(test), lang = "msvc_try_filter")]
 static mut TYPE_DESCRIPTOR1: _TypeDescriptor = _TypeDescriptor {
     pVFTable: unsafe { &TYPE_INFO_VTABLE } as *const _ as *const _,
-    spare: 0 as *mut _,
+    spare: core::ptr::null_mut(),
     name: imp::NAME1,
 };
 
 static mut TYPE_DESCRIPTOR2: _TypeDescriptor = _TypeDescriptor {
     pVFTable: unsafe { &TYPE_INFO_VTABLE } as *const _ as *const _,
-    spare: 0 as *mut _,
+    spare: core::ptr::null_mut(),
     name: imp::NAME2,
 };
 
-pub unsafe fn panic(data: Box<Any + Send>) -> u32 {
+pub unsafe fn panic(data: Box<dyn Any + Send>) -> u32 {
     use core::intrinsics::atomic_store;
 
     // _CxxThrowException executes entirely on this stack frame, so there's no
@@ -297,19 +287,19 @@ pub fn payload() -> [u64; 2] {
     [0; 2]
 }
 
-pub unsafe fn cleanup(payload: [u64; 2]) -> Box<Any + Send> {
+pub unsafe fn cleanup(payload: [u64; 2]) -> Box<dyn Any + Send> {
     mem::transmute(raw::TraitObject {
         data: payload[0] as *mut _,
         vtable: payload[1] as *mut _,
     })
 }
 
-// This is required by the compiler to exist (e.g. it's a lang item), but
+// This is required by the compiler to exist (e.g., it's a lang item), but
 // it's never actually called by the compiler because __C_specific_handler
 // or _except_handler3 is the personality function that is always used.
 // Hence this is just an aborting stub.
 #[lang = "eh_personality"]
 #[cfg(not(test))]
 fn rust_eh_personality() {
-    unsafe { ::core::intrinsics::abort() }
+    unsafe { core::intrinsics::abort() }
 }

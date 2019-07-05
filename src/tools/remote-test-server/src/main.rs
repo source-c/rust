@@ -1,12 +1,4 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+#![deny(rust_2018_idioms)]
 
 /// This is a small server which is intended to run inside of an emulator or
 /// on a remote test device. This server pairs with the `remote-test-client`
@@ -30,7 +22,7 @@ use std::os::unix::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str;
-use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -41,7 +33,7 @@ macro_rules! t {
     })
 }
 
-static TEST: AtomicUsize = ATOMIC_USIZE_INIT;
+static TEST: AtomicUsize = AtomicUsize::new(0);
 
 struct Config {
     pub remote: bool,
@@ -130,7 +122,7 @@ struct RemoveOnDrop<'a> {
     inner: &'a Path,
 }
 
-impl<'a> Drop for RemoveOnDrop<'a> {
+impl Drop for RemoveOnDrop<'_> {
     fn drop(&mut self) {
         t!(fs::remove_dir_all(self.inner));
     }
@@ -184,7 +176,7 @@ fn handle_run(socket: TcpStream, work: &Path, lock: &Mutex<()>) {
     // other thread created a child process with the file open for writing, and
     // we attempt to execute it, so we get an error.
     //
-    // This race is resolve by ensuring that only one thread can writ ethe file
+    // This race is resolve by ensuring that only one thread can write the file
     // and spawn a child process at once. Kinda an unfortunate solution, but we
     // don't have many other choices with this sort of setup!
     //
@@ -267,10 +259,10 @@ fn recv<B: BufRead>(dir: &Path, io: &mut B) -> PathBuf {
     t!(io::copy(&mut io.take(amt),
                 &mut t!(File::create(&dst))));
     t!(fs::set_permissions(&dst, Permissions::from_mode(0o755)));
-    return dst
+    dst
 }
 
-fn my_copy(src: &mut Read, which: u8, dst: &Mutex<Write>) {
+fn my_copy(src: &mut dyn Read, which: u8, dst: &Mutex<dyn Write>) {
     let mut b = [0; 1024];
     loop {
         let n = t!(src.read(&mut b));
@@ -290,7 +282,7 @@ fn my_copy(src: &mut Read, which: u8, dst: &Mutex<Write>) {
     }
 }
 
-fn read_u32(r: &mut Read) -> u32 {
+fn read_u32(r: &mut dyn Read) -> u32 {
     let mut len = [0; 4];
     t!(r.read_exact(&mut len));
     ((len[0] as u32) << 24) |

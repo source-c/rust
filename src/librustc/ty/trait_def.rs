@@ -1,29 +1,22 @@
-// Copyright 2012-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use hir;
-use hir::def_id::DefId;
-use hir::map::DefPathHash;
-use ich::{self, StableHashingContext};
-use traits::specialization_graph;
-use ty::fast_reject;
-use ty::fold::TypeFoldable;
-use ty::{Ty, TyCtxt};
+use crate::hir;
+use crate::hir::def_id::DefId;
+use crate::hir::map::DefPathHash;
+use crate::ich::{self, StableHashingContext};
+use crate::traits::specialization_graph;
+use crate::ty::fast_reject;
+use crate::ty::fold::TypeFoldable;
+use crate::ty::{Ty, TyCtxt};
 
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher,
                                            StableHasherResult};
-use std::rc::Rc;
+use rustc_macros::HashStable;
 
 /// A trait's definition with type information.
+#[derive(HashStable)]
 pub struct TraitDef {
+    // We already have the def_path_hash below, no need to hash it twice
+    #[stable_hasher(ignore)]
     pub def_id: DefId,
 
     pub unsafety: hir::Unsafety,
@@ -34,43 +27,53 @@ pub struct TraitDef {
     /// be usable with the sugar (or without it).
     pub paren_sugar: bool,
 
-    pub has_default_impl: bool,
+    pub has_auto_impl: bool,
+
+    /// If `true`, then this trait has the `#[marker]` attribute, indicating
+    /// that all its associated items have defaults that cannot be overridden,
+    /// and thus `impl`s of it are allowed to overlap.
+    pub is_marker: bool,
 
     /// The ICH of this trait's DefPath, cached here so it doesn't have to be
     /// recomputed all the time.
     pub def_path_hash: DefPathHash,
 }
 
+#[derive(Default)]
 pub struct TraitImpls {
     blanket_impls: Vec<DefId>,
-    /// Impls indexed by their simplified self-type, for fast lookup.
+    /// Impls indexed by their simplified self type, for fast lookup.
     non_blanket_impls: FxHashMap<fast_reject::SimplifiedType, Vec<DefId>>,
 }
 
-impl<'a, 'gcx, 'tcx> TraitDef {
+impl<'tcx> TraitDef {
     pub fn new(def_id: DefId,
                unsafety: hir::Unsafety,
                paren_sugar: bool,
-               has_default_impl: bool,
+               has_auto_impl: bool,
+               is_marker: bool,
                def_path_hash: DefPathHash)
                -> TraitDef {
         TraitDef {
             def_id,
-            paren_sugar,
             unsafety,
-            has_default_impl,
+            paren_sugar,
+            has_auto_impl,
+            is_marker,
             def_path_hash,
         }
     }
 
-    pub fn ancestors(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                     of_impl: DefId)
-                     -> specialization_graph::Ancestors {
+    pub fn ancestors(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        of_impl: DefId,
+    ) -> specialization_graph::Ancestors<'tcx> {
         specialization_graph::ancestors(tcx, self.def_id, of_impl)
     }
 }
 
-impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
+impl<'tcx> TyCtxt<'tcx> {
     pub fn for_each_impl<F: FnMut(DefId)>(self, def_id: DefId, mut f: F) {
         let impls = self.trait_impls_of(def_id);
 
@@ -86,7 +89,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     }
 
     /// Iterate over every impl that could possibly match the
-    /// self-type `self_ty`.
+    /// self type `self_ty`.
     pub fn for_each_relevant_impl<F: FnMut(DefId)>(self,
                                                    def_id: DefId,
                                                    self_ty: Ty<'tcx>,
@@ -130,65 +133,69 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 }
             }
         } else {
-            for v in impls.non_blanket_impls.values() {
-                for &impl_def_id in v {
-                    f(impl_def_id);
-                }
+            for &impl_def_id in impls.non_blanket_impls.values().flatten() {
+                f(impl_def_id);
             }
         }
+    }
+
+    /// Returns a vector containing all impls
+    pub fn all_impls(self, def_id: DefId) -> Vec<DefId> {
+        let impls = self.trait_impls_of(def_id);
+
+        impls.blanket_impls.iter().chain(
+            impls.non_blanket_impls.values().flatten()
+        ).cloned().collect()
     }
 }
 
 // Query provider for `trait_impls_of`.
-pub(super) fn trait_impls_of_provider<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                                trait_id: DefId)
-                                                -> Rc<TraitImpls> {
-    let mut remote_impls = Vec::new();
+pub(super) fn trait_impls_of_provider(
+    tcx: TyCtxt<'_>,
+    trait_id: DefId,
+) -> &TraitImpls {
+    let mut impls = TraitImpls::default();
 
-    // Traits defined in the current crate can't have impls in upstream
-    // crates, so we don't bother querying the cstore.
-    if !trait_id.is_local() {
-        for &cnum in tcx.crates().iter() {
-            let impls = tcx.implementations_of_trait((cnum, trait_id));
-            remote_impls.extend(impls.iter().cloned());
+    {
+        let mut add_impl = |impl_def_id| {
+            let impl_self_ty = tcx.type_of(impl_def_id);
+            if impl_def_id.is_local() && impl_self_ty.references_error() {
+                return;
+            }
+
+            if let Some(simplified_self_ty) =
+                fast_reject::simplify_type(tcx, impl_self_ty, false)
+            {
+                impls.non_blanket_impls
+                     .entry(simplified_self_ty)
+                     .or_default()
+                     .push(impl_def_id);
+            } else {
+                impls.blanket_impls.push(impl_def_id);
+            }
+        };
+
+        // Traits defined in the current crate can't have impls in upstream
+        // crates, so we don't bother querying the cstore.
+        if !trait_id.is_local() {
+            for &cnum in tcx.crates().iter() {
+                for &def_id in tcx.implementations_of_trait((cnum, trait_id)).iter() {
+                    add_impl(def_id);
+                }
+            }
+        }
+
+        for &hir_id in tcx.hir().trait_impls(trait_id) {
+            add_impl(tcx.hir().local_def_id_from_hir_id(hir_id));
         }
     }
 
-    let mut blanket_impls = Vec::new();
-    let mut non_blanket_impls = FxHashMap();
-
-    let local_impls = tcx.hir
-                         .trait_impls(trait_id)
-                         .into_iter()
-                         .map(|&node_id| tcx.hir.local_def_id(node_id));
-
-     for impl_def_id in local_impls.chain(remote_impls.into_iter()) {
-        let impl_self_ty = tcx.type_of(impl_def_id);
-        if impl_def_id.is_local() && impl_self_ty.references_error() {
-            continue
-        }
-
-        if let Some(simplified_self_ty) =
-            fast_reject::simplify_type(tcx, impl_self_ty, false)
-        {
-            non_blanket_impls
-                .entry(simplified_self_ty)
-                .or_insert(vec![])
-                .push(impl_def_id);
-        } else {
-            blanket_impls.push(impl_def_id);
-        }
-    }
-
-    Rc::new(TraitImpls {
-        blanket_impls: blanket_impls,
-        non_blanket_impls: non_blanket_impls,
-    })
+    tcx.arena.alloc(impls)
 }
 
-impl<'gcx> HashStable<StableHashingContext<'gcx>> for TraitImpls {
+impl<'a> HashStable<StableHashingContext<'a>> for TraitImpls {
     fn hash_stable<W: StableHasherResult>(&self,
-                                          hcx: &mut StableHashingContext<'gcx>,
+                                          hcx: &mut StableHashingContext<'a>,
                                           hasher: &mut StableHasher<W>) {
         let TraitImpls {
             ref blanket_impls,

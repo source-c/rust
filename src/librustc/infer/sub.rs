@@ -1,33 +1,26 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use super::SubregionOrigin;
-use super::combine::{CombineFields, RelationDir};
+use super::combine::{CombineFields, RelationDir, const_unification_error};
 
-use traits::Obligation;
-use ty::{self, Ty, TyCtxt};
-use ty::TyVar;
-use ty::fold::TypeFoldable;
-use ty::relate::{Cause, Relate, RelateResult, TypeRelation};
+use crate::traits::Obligation;
+use crate::ty::{self, Ty, TyCtxt, InferConst};
+use crate::ty::TyVar;
+use crate::ty::fold::TypeFoldable;
+use crate::ty::relate::{Cause, Relate, RelateResult, TypeRelation};
+use crate::infer::unify_key::replace_if_possible;
+use crate::mir::interpret::ConstValue;
 use std::mem;
 
 /// Ensures `a` is made a subtype of `b`. Returns `a` on success.
-pub struct Sub<'combine, 'infcx: 'combine, 'gcx: 'infcx+'tcx, 'tcx: 'infcx> {
-    fields: &'combine mut CombineFields<'infcx, 'gcx, 'tcx>,
+pub struct Sub<'combine, 'infcx, 'tcx> {
+    fields: &'combine mut CombineFields<'infcx, 'tcx>,
     a_is_expected: bool,
 }
 
-impl<'combine, 'infcx, 'gcx, 'tcx> Sub<'combine, 'infcx, 'gcx, 'tcx> {
-    pub fn new(f: &'combine mut CombineFields<'infcx, 'gcx, 'tcx>, a_is_expected: bool)
-        -> Sub<'combine, 'infcx, 'gcx, 'tcx>
-    {
+impl<'combine, 'infcx, 'tcx> Sub<'combine, 'infcx, 'tcx> {
+    pub fn new(
+        f: &'combine mut CombineFields<'infcx, 'tcx>,
+        a_is_expected: bool,
+    ) -> Sub<'combine, 'infcx, 'tcx> {
         Sub { fields: f, a_is_expected: a_is_expected }
     }
 
@@ -39,11 +32,9 @@ impl<'combine, 'infcx, 'gcx, 'tcx> Sub<'combine, 'infcx, 'gcx, 'tcx> {
     }
 }
 
-impl<'combine, 'infcx, 'gcx, 'tcx> TypeRelation<'infcx, 'gcx, 'tcx>
-    for Sub<'combine, 'infcx, 'gcx, 'tcx>
-{
+impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
     fn tag(&self) -> &'static str { "Sub" }
-    fn tcx(&self) -> TyCtxt<'infcx, 'gcx, 'tcx> { self.fields.infcx.tcx }
+    fn tcx(&self) -> TyCtxt<'tcx> { self.fields.infcx.tcx }
     fn a_is_expected(&self) -> bool { self.a_is_expected }
 
     fn with_cause<F,R>(&mut self, cause: Cause, f: F) -> R
@@ -80,12 +71,12 @@ impl<'combine, 'infcx, 'gcx, 'tcx> TypeRelation<'infcx, 'gcx, 'tcx>
         let a = infcx.type_variables.borrow_mut().replace_if_possible(a);
         let b = infcx.type_variables.borrow_mut().replace_if_possible(b);
         match (&a.sty, &b.sty) {
-            (&ty::TyInfer(TyVar(a_vid)), &ty::TyInfer(TyVar(b_vid))) => {
+            (&ty::Infer(TyVar(a_vid)), &ty::Infer(TyVar(b_vid))) => {
                 // Shouldn't have any LBR here, so we can safely put
                 // this under a binder below without fear of accidental
                 // capture.
-                assert!(!a.has_escaping_regions());
-                assert!(!b.has_escaping_regions());
+                assert!(!a.has_escaping_bound_vars());
+                assert!(!b.has_escaping_bound_vars());
 
                 // can't make progress on `A <: B` if both A and B are
                 // type variables, so record an obligation. We also
@@ -98,7 +89,7 @@ impl<'combine, 'infcx, 'gcx, 'tcx> TypeRelation<'infcx, 'gcx, 'tcx>
                         self.fields.trace.cause.clone(),
                         self.fields.param_env,
                         ty::Predicate::Subtype(
-                            ty::Binder(ty::SubtypePredicate {
+                            ty::Binder::dummy(ty::SubtypePredicate {
                                 a_is_expected: self.a_is_expected,
                                 a,
                                 b,
@@ -106,17 +97,17 @@ impl<'combine, 'infcx, 'gcx, 'tcx> TypeRelation<'infcx, 'gcx, 'tcx>
 
                 Ok(a)
             }
-            (&ty::TyInfer(TyVar(a_id)), _) => {
+            (&ty::Infer(TyVar(a_id)), _) => {
                 self.fields
                     .instantiate(b, RelationDir::SupertypeOf, a_id, !self.a_is_expected)?;
                 Ok(a)
             }
-            (_, &ty::TyInfer(TyVar(b_id))) => {
+            (_, &ty::Infer(TyVar(b_id))) => {
                 self.fields.instantiate(a, RelationDir::SubtypeOf, b_id, self.a_is_expected)?;
                 Ok(a)
             }
 
-            (&ty::TyError, _) | (_, &ty::TyError) => {
+            (&ty::Error, _) | (_, &ty::Error) => {
                 infcx.set_tainted_by_errors();
                 Ok(self.tcx().types.err)
             }
@@ -137,8 +128,51 @@ impl<'combine, 'infcx, 'gcx, 'tcx> TypeRelation<'infcx, 'gcx, 'tcx>
         // from the "cause" field, we could perhaps give more tailored
         // error messages.
         let origin = SubregionOrigin::Subtype(self.fields.trace.clone());
-        self.fields.infcx.region_vars.make_subregion(origin, a, b);
+        self.fields.infcx.borrow_region_constraints()
+                         .make_subregion(origin, a, b);
 
+        Ok(a)
+    }
+
+    fn consts(
+        &mut self,
+        a: &'tcx ty::Const<'tcx>,
+        b: &'tcx ty::Const<'tcx>,
+    ) -> RelateResult<'tcx, &'tcx ty::Const<'tcx>> {
+        debug!("{}.consts({:?}, {:?})", self.tag(), a, b);
+        if a == b { return Ok(a); }
+
+        let infcx = self.fields.infcx;
+        let a = replace_if_possible(infcx.const_unification_table.borrow_mut(), a);
+        let b = replace_if_possible(infcx.const_unification_table.borrow_mut(), b);
+
+        // Consts can only be equal or unequal to each other: there's no subtyping
+        // relation, so we're just going to perform equating here instead.
+        let a_is_expected = self.a_is_expected();
+        match (a.val, b.val) {
+            (ConstValue::Infer(InferConst::Var(a_vid)),
+                ConstValue::Infer(InferConst::Var(b_vid))) => {
+                infcx.const_unification_table
+                    .borrow_mut()
+                    .unify_var_var(a_vid, b_vid)
+                    .map_err(|e| const_unification_error(a_is_expected, e))?;
+                return Ok(a);
+            }
+
+            (ConstValue::Infer(InferConst::Var(a_id)), _) => {
+                self.fields.infcx.unify_const_variable(a_is_expected, a_id, b)?;
+                return Ok(a);
+            }
+
+            (_, ConstValue::Infer(InferConst::Var(b_id))) => {
+                self.fields.infcx.unify_const_variable(!a_is_expected, b_id, a)?;
+                return Ok(a);
+            }
+
+            _ => {}
+        }
+
+        self.fields.infcx.super_combine_consts(self, a, b)?;
         Ok(a)
     }
 

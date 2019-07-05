@@ -1,37 +1,26 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Implementation of `std::os` functionality for unix systems
 
 #![allow(unused_imports)] // lots of cfg code here
 
-use os::unix::prelude::*;
+use libc::c_char;
 
-use error::Error as StdError;
-use ffi::{OsString, OsStr};
-use fmt;
-use io::{self, Read, Write};
-use iter;
-use marker::PhantomData;
-use mem;
-use memchr;
-use path::{self, PathBuf};
-use ptr;
-use slice;
-use str;
-use sys_common::mutex::Mutex;
-use sys::{cvt, fd, syscall};
-use vec;
+use crate::os::unix::prelude::*;
 
-const TMPBUF_SZ: usize = 128;
-static ENV_LOCK: Mutex = Mutex::new();
+use crate::error::Error as StdError;
+use crate::ffi::{CStr, CString, OsStr, OsString};
+use crate::fmt;
+use crate::io::{self, Read, Write};
+use crate::iter;
+use crate::marker::PhantomData;
+use crate::mem;
+use crate::memchr;
+use crate::path::{self, PathBuf};
+use crate::ptr;
+use crate::slice;
+use crate::str;
+use crate::sys_common::mutex::Mutex;
+use crate::sys::{cvt, cvt_libc, fd, syscall};
+use crate::vec;
 
 extern {
     #[link_name = "__errno_location"]
@@ -69,7 +58,7 @@ pub struct SplitPaths<'a> {
                     fn(&'a [u8]) -> PathBuf>,
 }
 
-pub fn split_paths(unparsed: &OsStr) -> SplitPaths {
+pub fn split_paths(unparsed: &OsStr) -> SplitPaths<'_> {
     fn bytes_to_path(b: &[u8]) -> PathBuf {
         PathBuf::from(<OsStr as OsStrExt>::from_bytes(b))
     }
@@ -108,7 +97,7 @@ pub fn join_paths<I, T>(paths: I) -> Result<OsString, JoinPathsError>
 }
 
 impl fmt::Display for JoinPathsError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         "path segment contains separator `:`".fmt(f)
     }
 }
@@ -118,7 +107,7 @@ impl StdError for JoinPathsError {
 }
 
 pub fn current_exe() -> io::Result<PathBuf> {
-    use fs::File;
+    use crate::fs::File;
 
     let mut file = File::open("sys:exe")?;
 
@@ -132,6 +121,8 @@ pub fn current_exe() -> io::Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
+pub static ENV_LOCK: Mutex = Mutex::new();
+
 pub struct Env {
     iter: vec::IntoIter<(OsString, OsString)>,
     _dont_send_or_sync_me: PhantomData<*mut ()>,
@@ -143,52 +134,83 @@ impl Iterator for Env {
     fn size_hint(&self) -> (usize, Option<usize>) { self.iter.size_hint() }
 }
 
+pub unsafe fn environ() -> *mut *const *const c_char {
+    extern { static mut environ: *const *const c_char; }
+    &mut environ
+}
+
 /// Returns a vector of (variable, value) byte-vector pairs for all the
 /// environment variables of the current process.
 pub fn env() -> Env {
-    let mut variables: Vec<(OsString, OsString)> = Vec::new();
-    if let Ok(mut file) = ::fs::File::open("env:") {
-        let mut string = String::new();
-        if file.read_to_string(&mut string).is_ok() {
-            for line in string.lines() {
-                let mut parts = line.splitn(2, '=');
-                if let Some(name) = parts.next() {
-                    let value = parts.next().unwrap_or("");
-                    variables.push((OsString::from(name.to_string()),
-                                    OsString::from(value.to_string())));
-                }
+    unsafe {
+        let _guard = ENV_LOCK.lock();
+        let mut environ = *environ();
+        if environ == ptr::null() {
+            panic!("os::env() failure getting env string from OS: {}",
+                   io::Error::last_os_error());
+        }
+        let mut result = Vec::new();
+        while *environ != ptr::null() {
+            if let Some(key_value) = parse(CStr::from_ptr(*environ).to_bytes()) {
+                result.push(key_value);
             }
+            environ = environ.offset(1);
+        }
+        return Env {
+            iter: result.into_iter(),
+            _dont_send_or_sync_me: PhantomData,
         }
     }
-    Env { iter: variables.into_iter(), _dont_send_or_sync_me: PhantomData }
+
+    fn parse(input: &[u8]) -> Option<(OsString, OsString)> {
+        // Strategy (copied from glibc): Variable name and value are separated
+        // by an ASCII equals sign '='. Since a variable name must not be
+        // empty, allow variable names starting with an equals sign. Skip all
+        // malformed lines.
+        if input.is_empty() {
+            return None;
+        }
+        let pos = memchr::memchr(b'=', &input[1..]).map(|p| p + 1);
+        pos.map(|p| (
+            OsStringExt::from_vec(input[..p].to_vec()),
+            OsStringExt::from_vec(input[p+1..].to_vec()),
+        ))
+    }
 }
 
-pub fn getenv(key: &OsStr) -> io::Result<Option<OsString>> {
-    if ! key.is_empty() {
-        if let Ok(mut file) = ::fs::File::open(&("env:".to_owned() + key.to_str().unwrap())) {
-            let mut string = String::new();
-            file.read_to_string(&mut string)?;
-            Ok(Some(OsString::from(string)))
+pub fn getenv(k: &OsStr) -> io::Result<Option<OsString>> {
+    // environment variables with a nul byte can't be set, so their value is
+    // always None as well
+    let k = CString::new(k.as_bytes())?;
+    unsafe {
+        let _guard = ENV_LOCK.lock();
+        let s = libc::getenv(k.as_ptr()) as *const libc::c_char;
+        let ret = if s.is_null() {
+            None
         } else {
-            Ok(None)
-        }
-    } else {
-        Ok(None)
+            Some(OsStringExt::from_vec(CStr::from_ptr(s).to_bytes().to_vec()))
+        };
+        Ok(ret)
     }
 }
 
-pub fn setenv(key: &OsStr, value: &OsStr) -> io::Result<()> {
-    if ! key.is_empty() {
-        let mut file = ::fs::File::create(&("env:".to_owned() + key.to_str().unwrap()))?;
-        file.write_all(value.as_bytes())?;
-        file.set_len(value.len() as u64)?;
+pub fn setenv(k: &OsStr, v: &OsStr) -> io::Result<()> {
+    let k = CString::new(k.as_bytes())?;
+    let v = CString::new(v.as_bytes())?;
+
+    unsafe {
+        let _guard = ENV_LOCK.lock();
+        cvt_libc(libc::setenv(k.as_ptr(), v.as_ptr(), 1)).map(|_| ())
     }
-    Ok(())
 }
 
-pub fn unsetenv(key: &OsStr) -> io::Result<()> {
-    ::fs::remove_file(&("env:".to_owned() + key.to_str().unwrap()))?;
-    Ok(())
+pub fn unsetenv(n: &OsStr) -> io::Result<()> {
+    let nbuf = CString::new(n.as_bytes())?;
+
+    unsafe {
+        let _guard = ENV_LOCK.lock();
+        cvt_libc(libc::unsetenv(nbuf.as_ptr())).map(|_| ())
+    }
 }
 
 pub fn page_size() -> usize {
@@ -196,16 +218,24 @@ pub fn page_size() -> usize {
 }
 
 pub fn temp_dir() -> PathBuf {
-    ::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| {
+    crate::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from("/tmp")
     })
 }
 
 pub fn home_dir() -> Option<PathBuf> {
-    return ::env::var_os("HOME").map(PathBuf::from);
+    return crate::env::var_os("HOME").map(PathBuf::from);
 }
 
 pub fn exit(code: i32) -> ! {
     let _ = syscall::exit(code as usize);
     unreachable!();
+}
+
+pub fn getpid() -> u32 {
+    syscall::getpid().unwrap() as u32
+}
+
+pub fn getppid() -> u32 {
+    syscall::getppid().unwrap() as u32
 }

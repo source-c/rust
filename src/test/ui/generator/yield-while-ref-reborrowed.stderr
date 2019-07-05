@@ -1,16 +1,16 @@
 error[E0501]: cannot borrow `x` as immutable because previous closure requires unique access
-  --> $DIR/yield-while-ref-reborrowed.rs:45:20
+  --> $DIR/yield-while-ref-reborrowed.rs:36:20
    |
-40 |     let mut b = || {
-   |                 -- closure construction occurs here
-41 |         let a = &mut *x;
-   |                       - previous borrow occurs due to use of `x` in closure
+LL |     let mut b = || {
+   |                 -- generator construction occurs here
+LL |         let a = &mut *x;
+   |                       - first borrow occurs due to use of `x` in generator
 ...
-45 |     println!("{}", x); //~ ERROR
-   |                    ^ borrow occurs here
-46 |     b.resume();
-47 | }
-   | - borrow from closure ends here
+LL |     println!("{}", x);
+   |                    ^ second borrow occurs here
+LL |     Pin::new(&mut b).resume();
+   |              ------ first borrow later used here
 
 error: aborting due to previous error
 
+For more information about this error, try `rustc --explain E0501`.

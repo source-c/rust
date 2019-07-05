@@ -1,13 +1,3 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! A number of passes which remove various redundancies in the CFG.
 //!
 //! The `SimplifyCfg` pass gets rid of unnecessary blocks in the CFG, whereas the `SimplifyLocals`
@@ -15,7 +5,7 @@
 //!
 //! The `SimplifyLocals` pass is kinda expensive and therefore not very suitable to be run often.
 //! Most of the passes should not care or be impacted in meaningful ways due to extra locals
-//! either, so running the pass once, right before translation, should suffice.
+//! either, so running the pass once, right before codegen, should suffice.
 //!
 //! On the other side of the spectrum, the `SimplifyCfg` pass is considerably cheap to run, thus
 //! one should run it after every pass which may modify CFG in significant ways. This pass must
@@ -37,13 +27,14 @@
 //! naively generate still contains the `_a = ()` write in the unreachable block "after" the
 //! return.
 
-use rustc_data_structures::bitvec::BitVector;
+use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 use rustc::ty::TyCtxt;
 use rustc::mir::*;
-use rustc::mir::transform::{MirPass, MirSource};
-use rustc::mir::visit::{MutVisitor, Visitor, LvalueContext};
+use rustc::mir::visit::{MutVisitor, Visitor, PlaceContext};
+use rustc::session::config::DebugInfo;
 use std::borrow::Cow;
+use crate::transform::{MirPass, MirSource};
 
 pub struct SimplifyCfg { label: String }
 
@@ -53,50 +44,47 @@ impl SimplifyCfg {
     }
 }
 
-pub fn simplify_cfg(mir: &mut Mir) {
-    CfgSimplifier::new(mir).simplify();
-    remove_dead_blocks(mir);
+pub fn simplify_cfg(body: &mut Body<'_>) {
+    CfgSimplifier::new(body).simplify();
+    remove_dead_blocks(body);
 
     // FIXME: Should probably be moved into some kind of pass manager
-    mir.basic_blocks_mut().raw.shrink_to_fit();
+    body.basic_blocks_mut().raw.shrink_to_fit();
 }
 
 impl MirPass for SimplifyCfg {
-    fn name<'a>(&'a self) -> Cow<'a, str> {
+    fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.label)
     }
 
-    fn run_pass<'a, 'tcx>(&self,
-                          _tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                          _src: MirSource,
-                          mir: &mut Mir<'tcx>) {
-        debug!("SimplifyCfg({:?}) - simplifying {:?}", self.label, mir);
-        simplify_cfg(mir);
+    fn run_pass<'tcx>(&self, _tcx: TyCtxt<'tcx>, _src: MirSource<'tcx>, body: &mut Body<'tcx>) {
+        debug!("SimplifyCfg({:?}) - simplifying {:?}", self.label, body);
+        simplify_cfg(body);
     }
 }
 
-pub struct CfgSimplifier<'a, 'tcx: 'a> {
+pub struct CfgSimplifier<'a, 'tcx> {
     basic_blocks: &'a mut IndexVec<BasicBlock, BasicBlockData<'tcx>>,
     pred_count: IndexVec<BasicBlock, u32>
 }
 
-impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
-    pub fn new(mir: &'a mut Mir<'tcx>) -> Self {
-        let mut pred_count = IndexVec::from_elem(0u32, mir.basic_blocks());
+impl<'a, 'tcx> CfgSimplifier<'a, 'tcx> {
+    pub fn new(body: &'a mut Body<'tcx>) -> Self {
+        let mut pred_count = IndexVec::from_elem(0u32, body.basic_blocks());
 
         // we can't use mir.predecessors() here because that counts
         // dead blocks, which we don't want to.
         pred_count[START_BLOCK] = 1;
 
-        for (_, data) in traversal::preorder(mir) {
+        for (_, data) in traversal::preorder(body) {
             if let Some(ref term) = data.terminator {
-                for &tgt in term.successors().iter() {
+                for &tgt in term.successors() {
                     pred_count[tgt] += 1;
                 }
             }
         }
 
-        let basic_blocks = mir.basic_blocks_mut();
+        let basic_blocks = body.basic_blocks_mut();
 
         CfgSimplifier {
             basic_blocks,
@@ -107,10 +95,14 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
     pub fn simplify(mut self) {
         self.strip_nops();
 
+        let mut start = START_BLOCK;
+
         loop {
             let mut changed = false;
 
-            for bb in (0..self.basic_blocks.len()).map(BasicBlock::new) {
+            self.collapse_goto_chain(&mut start, &mut changed);
+
+            for bb in self.basic_blocks.indices() {
                 if self.pred_count[bb] == 0 {
                     continue
                 }
@@ -123,8 +115,6 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
                 for successor in terminator.successors_mut() {
                     self.collapse_goto_chain(successor, &mut changed);
                 }
-
-                changed |= self.simplify_unwind(&mut terminator);
 
                 let mut new_stmts = vec![];
                 let mut inner_changed = true;
@@ -142,6 +132,27 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
             }
 
             if !changed { break }
+        }
+
+        if start != START_BLOCK {
+            debug_assert!(self.pred_count[START_BLOCK] == 0);
+            self.basic_blocks.swap(START_BLOCK, start);
+            self.pred_count.swap(START_BLOCK, start);
+
+            // pred_count == 1 if the start block has no predecessor _blocks_.
+            if self.pred_count[START_BLOCK] > 1 {
+                for (bb, data) in self.basic_blocks.iter_enumerated_mut() {
+                    if self.pred_count[bb] == 0 {
+                        continue;
+                    }
+
+                    for target in data.terminator_mut().successors_mut() {
+                        if *target == start {
+                            *target = START_BLOCK;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -220,10 +231,10 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
         };
 
         let first_succ = {
-            let successors = terminator.successors();
-            if let Some(&first_succ) = terminator.successors().get(0) {
-                if successors.iter().all(|s| *s == first_succ) {
-                    self.pred_count[first_succ] -= (successors.len()-1) as u32;
+            if let Some(&first_succ) = terminator.successors().nth(0) {
+                if terminator.successors().all(|s| *s == first_succ) {
+                    let count = terminator.successors().count();
+                    self.pred_count[first_succ] -= (count - 1) as u32;
                     first_succ
                 } else {
                     return false
@@ -238,38 +249,6 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
         true
     }
 
-    // turn an unwind branch to a resume block into a None
-    fn simplify_unwind(&mut self, terminator: &mut Terminator<'tcx>) -> bool {
-        let unwind = match terminator.kind {
-            TerminatorKind::Drop { ref mut unwind, .. } |
-            TerminatorKind::DropAndReplace { ref mut unwind, .. } |
-            TerminatorKind::Call { cleanup: ref mut unwind, .. } |
-            TerminatorKind::Assert { cleanup: ref mut unwind, .. } =>
-                unwind,
-            _ => return false
-        };
-
-        if let &mut Some(unwind_block) = unwind {
-            let is_resume_block = match self.basic_blocks[unwind_block] {
-                BasicBlockData {
-                    ref statements,
-                    terminator: Some(Terminator {
-                        kind: TerminatorKind::Resume, ..
-                    }), ..
-                } if statements.is_empty() => true,
-                _ => false
-            };
-            if is_resume_block {
-                debug!("simplifying unwind to {:?} from {:?}",
-                       unwind_block, terminator.source_info);
-                *unwind = None;
-            }
-            return is_resume_block;
-        }
-
-        false
-    }
-
     fn strip_nops(&mut self) {
         for blk in self.basic_blocks.iter_mut() {
             blk.statements.retain(|stmt| if let StatementKind::Nop = stmt.kind {
@@ -281,13 +260,13 @@ impl<'a, 'tcx: 'a> CfgSimplifier<'a, 'tcx> {
     }
 }
 
-pub fn remove_dead_blocks(mir: &mut Mir) {
-    let mut seen = BitVector::new(mir.basic_blocks().len());
-    for (bb, _) in traversal::preorder(mir) {
+pub fn remove_dead_blocks(body: &mut Body<'_>) {
+    let mut seen = BitSet::new_empty(body.basic_blocks().len());
+    for (bb, _) in traversal::preorder(body) {
         seen.insert(bb.index());
     }
 
-    let basic_blocks = mir.basic_blocks_mut();
+    let basic_blocks = body.basic_blocks_mut();
 
     let num_blocks = basic_blocks.len();
     let mut replacements : Vec<_> = (0..num_blocks).map(BasicBlock::new).collect();
@@ -314,54 +293,64 @@ pub fn remove_dead_blocks(mir: &mut Mir) {
 pub struct SimplifyLocals;
 
 impl MirPass for SimplifyLocals {
-    fn run_pass<'a, 'tcx>(&self,
-                          _: TyCtxt<'a, 'tcx, 'tcx>,
-                          _: MirSource,
-                          mir: &mut Mir<'tcx>) {
-        let mut marker = DeclMarker { locals: BitVector::new(mir.local_decls.len()) };
-        marker.visit_mir(mir);
+    fn run_pass<'tcx>(&self, tcx: TyCtxt<'tcx>, _: MirSource<'tcx>, body: &mut Body<'tcx>) {
+        let mut marker = DeclMarker { locals: BitSet::new_empty(body.local_decls.len()) };
+        marker.visit_body(body);
         // Return pointer and arguments are always live
-        marker.locals.insert(0);
-        for idx in mir.args_iter() {
-            marker.locals.insert(idx.index());
+        marker.locals.insert(RETURN_PLACE);
+        for arg in body.args_iter() {
+            marker.locals.insert(arg);
         }
-        let map = make_local_map(&mut mir.local_decls, marker.locals);
+
+        // We may need to keep dead user variables live for debuginfo.
+        if tcx.sess.opts.debuginfo == DebugInfo::Full {
+            for local in body.vars_iter() {
+                marker.locals.insert(local);
+            }
+        }
+
+        let map = make_local_map(&mut body.local_decls, marker.locals);
         // Update references to all vars and tmps now
-        LocalUpdater { map: map }.visit_mir(mir);
-        mir.local_decls.shrink_to_fit();
+        LocalUpdater { map }.visit_body(body);
+        body.local_decls.shrink_to_fit();
     }
 }
 
 /// Construct the mapping while swapping out unused stuff out from the `vec`.
-fn make_local_map<'tcx, I: Idx, V>(vec: &mut IndexVec<I, V>, mask: BitVector) -> Vec<usize> {
-    let mut map: Vec<usize> = ::std::iter::repeat(!0).take(vec.len()).collect();
-    let mut used = 0;
+fn make_local_map<V>(
+    vec: &mut IndexVec<Local, V>,
+    mask: BitSet<Local>,
+) -> IndexVec<Local, Option<Local>> {
+    let mut map: IndexVec<Local, Option<Local>> = IndexVec::from_elem(None, &*vec);
+    let mut used = Local::new(0);
     for alive_index in mask.iter() {
-        map[alive_index] = used;
+        map[alive_index] = Some(used);
         if alive_index != used {
             vec.swap(alive_index, used);
         }
-        used += 1;
+        used.increment_by(1);
     }
-    vec.truncate(used);
+    vec.truncate(used.index());
     map
 }
 
 struct DeclMarker {
-    pub locals: BitVector,
+    pub locals: BitSet<Local>,
 }
 
 impl<'tcx> Visitor<'tcx> for DeclMarker {
-    fn visit_local(&mut self, local: &Local, ctx: LvalueContext<'tcx>, _: Location) {
-        // ignore these altogether, they get removed along with their otherwise unused decls.
-        if ctx != LvalueContext::StorageLive && ctx != LvalueContext::StorageDead {
-            self.locals.insert(local.index());
+    fn visit_local(&mut self, local: &Local, ctx: PlaceContext, _: Location) {
+        // Ignore storage markers altogether, they get removed along with their otherwise unused
+        // decls.
+        // FIXME: Extend this to all non-uses.
+        if !ctx.is_storage_marker() {
+            self.locals.insert(*local);
         }
     }
 }
 
 struct LocalUpdater {
-    map: Vec<usize>,
+    map: IndexVec<Local, Option<Local>>,
 }
 
 impl<'tcx> MutVisitor<'tcx> for LocalUpdater {
@@ -370,14 +359,14 @@ impl<'tcx> MutVisitor<'tcx> for LocalUpdater {
         data.statements.retain(|stmt| {
             match stmt.kind {
                 StatementKind::StorageLive(l) | StatementKind::StorageDead(l) => {
-                    self.map[l.index()] != !0
+                    self.map[l].is_some()
                 }
                 _ => true
             }
         });
         self.super_basic_block_data(block, data);
     }
-    fn visit_local(&mut self, l: &mut Local, _: LvalueContext<'tcx>, _: Location) {
-        *l = Local::new(self.map[l.index()]);
+    fn visit_local(&mut self, l: &mut Local, _: PlaceContext, _: Location) {
+        *l = self.map[*l].unwrap();
     }
 }

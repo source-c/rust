@@ -1,19 +1,10 @@
-// Copyright 2014-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::io::{self, Error, ErrorKind};
+use crate::ptr;
+use crate::sys::cvt;
+use crate::sys::process::process_common::*;
+use crate::sys;
 
-use io::{self, Error, ErrorKind};
-use libc::{self, c_int, gid_t, pid_t, uid_t};
-use ptr;
-
-use sys::cvt;
-use sys::process::process_common::*;
+use libc::{c_int, gid_t, pid_t, uid_t};
 
 ////////////////////////////////////////////////////////////////////////////////
 // Command
@@ -22,9 +13,9 @@ use sys::process::process_common::*;
 impl Command {
     pub fn spawn(&mut self, default: Stdio, needs_stdin: bool)
                  -> io::Result<(Process, StdioPipes)> {
-        use sys;
+        const CLOEXEC_MSG_FOOTER: &[u8] = b"NOEX";
 
-        const CLOEXEC_MSG_FOOTER: &'static [u8] = b"NOEX";
+        let envp = self.capture_env();
 
         if self.saw_nul() {
             return Err(io::Error::new(ErrorKind::InvalidInput,
@@ -32,13 +23,31 @@ impl Command {
         }
 
         let (ours, theirs) = self.setup_io(default, needs_stdin)?;
+
+        if let Some(ret) = self.posix_spawn(&theirs, envp.as_ref())? {
+            return Ok((ret, ours))
+        }
+
         let (input, output) = sys::pipe::anon_pipe()?;
 
+        // Whatever happens after the fork is almost for sure going to touch or
+        // look at the environment in one way or another (PATH in `execvp` or
+        // accessing the `environ` pointer ourselves). Make sure no other thread
+        // is accessing the environment when we do the fork itself.
+        //
+        // Note that as soon as we're done with the fork there's no need to hold
+        // a lock any more because the parent won't do anything and the child is
+        // in its own process.
+        let result = unsafe {
+            let _env_lock = sys::os::env_lock();
+            cvt(libc::fork())?
+        };
+
         let pid = unsafe {
-            match cvt(libc::fork())? {
+            match result {
                 0 => {
                     drop(input);
-                    let err = self.do_exec(theirs);
+                    let Err(err) = self.do_exec(theirs, envp.as_ref());
                     let errno = err.raw_os_error().unwrap_or(libc::EINVAL) as u32;
                     let bytes = [
                         (errno >> 24) as u8,
@@ -99,13 +108,25 @@ impl Command {
     }
 
     pub fn exec(&mut self, default: Stdio) -> io::Error {
+        let envp = self.capture_env();
+
         if self.saw_nul() {
             return io::Error::new(ErrorKind::InvalidInput,
                                   "nul byte found in provided data")
         }
 
         match self.setup_io(default, true) {
-            Ok((_, theirs)) => unsafe { self.do_exec(theirs) },
+            Ok((_, theirs)) => {
+                unsafe {
+                    // Similar to when forking, we want to ensure that access to
+                    // the environment is synchronized, so make sure to grab the
+                    // environment lock before we try to exec.
+                    let _lock = sys::os::env_lock();
+
+                    let Err(e) = self.do_exec(theirs, envp.as_ref());
+                    e
+                }
+            }
             Err(e) => e,
         }
     }
@@ -140,29 +161,26 @@ impl Command {
     // allocation). Instead we just close it manually. This will never
     // have the drop glue anyway because this code never returns (the
     // child will either exec() or invoke libc::exit)
-    unsafe fn do_exec(&mut self, stdio: ChildPipes) -> io::Error {
-        use sys::{self, cvt_r};
-
-        macro_rules! t {
-            ($e:expr) => (match $e {
-                Ok(e) => e,
-                Err(e) => return e,
-            })
-        }
+    unsafe fn do_exec(
+        &mut self,
+        stdio: ChildPipes,
+        maybe_envp: Option<&CStringArray>
+    ) -> Result<!, io::Error> {
+        use crate::sys::{self, cvt_r};
 
         if let Some(fd) = stdio.stdin.fd() {
-            t!(cvt_r(|| libc::dup2(fd, libc::STDIN_FILENO)));
+            cvt_r(|| libc::dup2(fd, libc::STDIN_FILENO))?;
         }
         if let Some(fd) = stdio.stdout.fd() {
-            t!(cvt_r(|| libc::dup2(fd, libc::STDOUT_FILENO)));
+            cvt_r(|| libc::dup2(fd, libc::STDOUT_FILENO))?;
         }
         if let Some(fd) = stdio.stderr.fd() {
-            t!(cvt_r(|| libc::dup2(fd, libc::STDERR_FILENO)));
+            cvt_r(|| libc::dup2(fd, libc::STDERR_FILENO))?;
         }
 
         if cfg!(not(any(target_os = "l4re"))) {
             if let Some(u) = self.get_gid() {
-                t!(cvt(libc::setgid(u as gid_t)));
+                cvt(libc::setgid(u as gid_t))?;
             }
             if let Some(u) = self.get_uid() {
                 // When dropping privileges from root, the `setgroups` call
@@ -174,20 +192,17 @@ impl Command {
                 // privilege dropping function.
                 let _ = libc::setgroups(0, ptr::null());
 
-                t!(cvt(libc::setuid(u as uid_t)));
+                cvt(libc::setuid(u as uid_t))?;
             }
         }
         if let Some(ref cwd) = *self.get_cwd() {
-            t!(cvt(libc::chdir(cwd.as_ptr())));
-        }
-        if let Some(ref envp) = *self.get_envp() {
-            *sys::os::environ() = envp.as_ptr();
+            cvt(libc::chdir(cwd.as_ptr()))?;
         }
 
-        // NaCl has no signal support.
-        #[cfg(not(any(target_os = "nacl", target_os = "emscripten")))]
+        // emscripten has no signal support.
+        #[cfg(not(any(target_os = "emscripten")))]
         {
-            use mem;
+            use crate::mem::MaybeUninit;
             // Reset signal handling so the child process starts in a
             // standardized state. libstd ignores SIGPIPE, and signal-handling
             // libraries often set a mask. Child processes inherit ignored
@@ -195,31 +210,185 @@ impl Command {
             // UNIX programs do not reset these things on their own, so we
             // need to clean things up now to avoid confusing the program
             // we're about to run.
-            let mut set: libc::sigset_t = mem::uninitialized();
+            let mut set = MaybeUninit::<libc::sigset_t>::uninit();
             if cfg!(target_os = "android") {
                 // Implementing sigemptyset allow us to support older Android
                 // versions. See the comment about Android and sig* functions in
                 // process_common.rs
-                libc::memset(&mut set as *mut _ as *mut _,
-                             0,
-                             mem::size_of::<libc::sigset_t>());
+                set.as_mut_ptr().write_bytes(0u8, 1);
             } else {
-                t!(cvt(libc::sigemptyset(&mut set)));
+                cvt(libc::sigemptyset(set.as_mut_ptr()))?;
             }
-            t!(cvt(libc::pthread_sigmask(libc::SIG_SETMASK, &set,
-                                         ptr::null_mut())));
+            cvt(libc::pthread_sigmask(libc::SIG_SETMASK, set.as_ptr(),
+                                         ptr::null_mut()))?;
             let ret = sys::signal(libc::SIGPIPE, libc::SIG_DFL);
             if ret == libc::SIG_ERR {
-                return io::Error::last_os_error()
+                return Err(io::Error::last_os_error())
             }
         }
 
         for callback in self.get_closures().iter_mut() {
-            t!(callback());
+            callback()?;
+        }
+
+        // Although we're performing an exec here we may also return with an
+        // error from this function (without actually exec'ing) in which case we
+        // want to be sure to restore the global environment back to what it
+        // once was, ensuring that our temporary override, when free'd, doesn't
+        // corrupt our process's environment.
+        let mut _reset = None;
+        if let Some(envp) = maybe_envp {
+            struct Reset(*const *const libc::c_char);
+
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    unsafe {
+                        *sys::os::environ() = self.0;
+                    }
+                }
+            }
+
+            _reset = Some(Reset(*sys::os::environ()));
+            *sys::os::environ() = envp.as_ptr();
         }
 
         libc::execvp(self.get_argv()[0], self.get_argv().as_ptr());
-        io::Error::last_os_error()
+        Err(io::Error::last_os_error())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd",
+                  all(target_os = "linux", target_env = "gnu"))))]
+    fn posix_spawn(&mut self, _: &ChildPipes, _: Option<&CStringArray>)
+        -> io::Result<Option<Process>>
+    {
+        Ok(None)
+    }
+
+    // Only support platforms for which posix_spawn() can return ENOENT
+    // directly.
+    #[cfg(any(target_os = "macos", target_os = "freebsd",
+              all(target_os = "linux", target_env = "gnu")))]
+    fn posix_spawn(&mut self, stdio: &ChildPipes, envp: Option<&CStringArray>)
+        -> io::Result<Option<Process>>
+    {
+        use crate::mem::MaybeUninit;
+        use crate::sys;
+
+        if self.get_gid().is_some() ||
+            self.get_uid().is_some() ||
+            self.env_saw_path() ||
+            self.get_closures().len() != 0 {
+            return Ok(None)
+        }
+
+        // Only glibc 2.24+ posix_spawn() supports returning ENOENT directly.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            if let Some(version) = sys::os::glibc_version() {
+                if version < (2, 24) {
+                    return Ok(None)
+                }
+            } else {
+                return Ok(None)
+            }
+        }
+
+        // Solaris and glibc 2.29+ can set a new working directory, and maybe
+        // others will gain this non-POSIX function too. We'll check for this
+        // weak symbol as soon as it's needed, so we can return early otherwise
+        // to do a manual chdir before exec.
+        weak! {
+            fn posix_spawn_file_actions_addchdir_np(
+                *mut libc::posix_spawn_file_actions_t,
+                *const libc::c_char
+            ) -> libc::c_int
+        }
+        let addchdir = match self.get_cwd() {
+            Some(cwd) => match posix_spawn_file_actions_addchdir_np.get() {
+                Some(f) => Some((f, cwd)),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+
+        let mut p = Process { pid: 0, status: None };
+
+        struct PosixSpawnFileActions(MaybeUninit<libc::posix_spawn_file_actions_t>);
+
+        impl Drop for PosixSpawnFileActions {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::posix_spawn_file_actions_destroy(self.0.as_mut_ptr());
+                }
+            }
+        }
+
+        struct PosixSpawnattr(MaybeUninit<libc::posix_spawnattr_t>);
+
+        impl Drop for PosixSpawnattr {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::posix_spawnattr_destroy(self.0.as_mut_ptr());
+                }
+            }
+        }
+
+        unsafe {
+            let mut file_actions = PosixSpawnFileActions(MaybeUninit::uninit());
+            let mut attrs = PosixSpawnattr(MaybeUninit::uninit());
+
+            libc::posix_spawnattr_init(attrs.0.as_mut_ptr());
+            libc::posix_spawn_file_actions_init(file_actions.0.as_mut_ptr());
+
+            if let Some(fd) = stdio.stdin.fd() {
+                cvt(libc::posix_spawn_file_actions_adddup2(file_actions.0.as_mut_ptr(),
+                                                           fd,
+                                                           libc::STDIN_FILENO))?;
+            }
+            if let Some(fd) = stdio.stdout.fd() {
+                cvt(libc::posix_spawn_file_actions_adddup2(file_actions.0.as_mut_ptr(),
+                                                           fd,
+                                                           libc::STDOUT_FILENO))?;
+            }
+            if let Some(fd) = stdio.stderr.fd() {
+                cvt(libc::posix_spawn_file_actions_adddup2(file_actions.0.as_mut_ptr(),
+                                                           fd,
+                                                           libc::STDERR_FILENO))?;
+            }
+            if let Some((f, cwd)) = addchdir {
+                cvt(f(file_actions.0.as_mut_ptr(), cwd.as_ptr()))?;
+            }
+
+            let mut set = MaybeUninit::<libc::sigset_t>::uninit();
+            cvt(libc::sigemptyset(set.as_mut_ptr()))?;
+            cvt(libc::posix_spawnattr_setsigmask(attrs.0.as_mut_ptr(),
+                                                 set.as_ptr()))?;
+            cvt(libc::sigaddset(set.as_mut_ptr(), libc::SIGPIPE))?;
+            cvt(libc::posix_spawnattr_setsigdefault(attrs.0.as_mut_ptr(),
+                                                    set.as_ptr()))?;
+
+            let flags = libc::POSIX_SPAWN_SETSIGDEF |
+                libc::POSIX_SPAWN_SETSIGMASK;
+            cvt(libc::posix_spawnattr_setflags(attrs.0.as_mut_ptr(), flags as _))?;
+
+            // Make sure we synchronize access to the global `environ` resource
+            let _env_lock = sys::os::env_lock();
+            let envp = envp.map(|c| c.as_ptr())
+                .unwrap_or_else(|| *sys::os::environ() as *const _);
+            let ret = libc::posix_spawnp(
+                &mut p.pid,
+                self.get_argv()[0],
+                file_actions.0.as_ptr(),
+                attrs.0.as_ptr(),
+                self.get_argv().as_ptr() as *const _,
+                envp as *const _,
+            );
+            if ret == 0 {
+                Ok(Some(p))
+            } else {
+                Err(io::Error::from_raw_os_error(ret))
+            }
+        }
     }
 }
 
@@ -227,7 +396,7 @@ impl Command {
 // Processes
 ////////////////////////////////////////////////////////////////////////////////
 
-/// The unique id of the process (this should never be negative).
+/// The unique ID of the process (this should never be negative).
 pub struct Process {
     pid: pid_t,
     status: Option<ExitStatus>,
@@ -251,7 +420,7 @@ impl Process {
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        use sys::cvt_r;
+        use crate::sys::cvt_r;
         if let Some(status) = self.status {
             return Ok(status)
         }

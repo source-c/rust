@@ -16,6 +16,7 @@ RUN sh /scripts/rustbuild-setup.sh
 USER rustbuild
 WORKDIR /tmp
 
+COPY dist-armv7-linux/patches/ /tmp/patches/
 COPY dist-armv7-linux/build-toolchains.sh dist-armv7-linux/armv7-linux-gnueabihf.config /tmp/
 RUN ./build-toolchains.sh
 
@@ -32,5 +33,5 @@ ENV CC_armv7_unknown_linux_gnueabihf=armv7-unknown-linux-gnueabihf-gcc \
 
 ENV HOSTS=armv7-unknown-linux-gnueabihf
 
-ENV RUST_CONFIGURE_ARGS --host=$HOSTS --enable-extended
+ENV RUST_CONFIGURE_ARGS --enable-extended --disable-docs
 ENV SCRIPT python2.7 ../x.py dist --host $HOSTS --target $HOSTS

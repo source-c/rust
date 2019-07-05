@@ -1,13 +1,3 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! The "main crate" of the Rust compiler. This crate contains common
 //! type definitions that are used by the other crates in the rustc
 //! "family". Some prominent examples (note that each of these modules
@@ -28,59 +18,78 @@
 //!   this code handles low-level equality and subtyping operations. The
 //!   type check pass in the compiler is found in the `librustc_typeck` crate.
 //!
-//! For a deeper explanation of how the compiler works and is
-//! organized, see the README.md file in this directory.
+//! For more information about how rustc works, see the [rustc guide].
+//!
+//! [rustc guide]: https://rust-lang.github.io/rustc-guide/
 //!
 //! # Note
 //!
 //! This API is completely unstable and subject to change.
 
-#![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
-       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
-       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 
+#![deny(rust_2018_idioms)]
+#![deny(internal)]
+#![deny(unused_lifetimes)]
+
+#![feature(arbitrary_self_types)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(conservative_impl_trait)]
+#![feature(const_fn)]
+#![feature(const_transmute)]
 #![feature(core_intrinsics)]
-#![feature(i128_type)]
+#![feature(drain_filter)]
+#![feature(inner_deref)]
 #![cfg_attr(windows, feature(libc))]
 #![feature(never_type)]
-#![feature(nonzero)]
-#![feature(quote)]
+#![feature(exhaustive_patterns)]
+#![feature(overlapping_marker_traits)]
+#![feature(extern_types)]
+#![feature(nll)]
+#![feature(non_exhaustive)]
+#![feature(proc_macro_internals)]
+#![feature(optin_builtin_traits)]
+#![feature(range_is_empty)]
 #![feature(rustc_diagnostic_macros)]
+#![feature(rustc_attrs)]
 #![feature(slice_patterns)]
 #![feature(specialization)]
 #![feature(unboxed_closures)]
+#![feature(thread_local)]
 #![feature(trace_macros)]
+#![feature(trusted_len)]
+#![feature(vec_remove_item)]
+#![feature(step_trait)]
+#![feature(stmt_expr_attributes)]
+#![feature(integer_atomics)]
 #![feature(test)]
+#![feature(in_band_lifetimes)]
+#![feature(crate_visibility_modifier)]
+#![feature(proc_macro_hygiene)]
+#![feature(log_syntax)]
+#![feature(mem_take)]
 
-#![cfg_attr(stage0, feature(const_fn))]
-#![cfg_attr(not(stage0), feature(const_atomic_bool_new))]
+#![recursion_limit="512"]
 
-#![recursion_limit="256"]
-
-extern crate arena;
 #[macro_use] extern crate bitflags;
-extern crate core;
-extern crate fmt_macros;
 extern crate getopts;
-extern crate graphviz;
+#[macro_use] extern crate lazy_static;
+#[macro_use] extern crate scoped_tls;
 #[cfg(windows)]
 extern crate libc;
-extern crate owning_ref;
-extern crate rustc_back;
-extern crate rustc_data_structures;
-extern crate serialize;
-extern crate rustc_const_math;
-extern crate rustc_errors as errors;
+#[macro_use] extern crate rustc_macros;
+#[macro_use] extern crate rustc_data_structures;
+
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
-extern crate syntax_pos;
-extern crate jobserver;
 
-extern crate serialize as rustc_serialize; // used by deriving
+// FIXME: This import is used by deriving `RustcDecodable` and `RustcEncodable`. Removing this
+// results in a bunch of "failed to resolve" errors. Hopefully, the compiler moves to serde or
+// something, and we can get rid of this.
+#[allow(rust_2018_idioms)]
+extern crate serialize as rustc_serialize;
+
+#[macro_use] extern crate smallvec;
 
 // Note that librustc doesn't actually depend on these crates, see the note in
 // `Cargo.toml` for this crate about why these are here.
@@ -92,10 +101,15 @@ extern crate test;
 #[macro_use]
 mod macros;
 
-// NB: This module needs to be declared first so diagnostics are
+// N.B., this module needs to be declared first so diagnostics are
 // registered before they are used.
-pub mod diagnostics;
+pub mod error_codes;
 
+#[macro_use]
+pub mod query;
+
+#[macro_use]
+pub mod arena;
 pub mod cfg;
 pub mod dep_graph;
 pub mod hir;
@@ -105,16 +119,16 @@ pub mod lint;
 
 pub mod middle {
     pub mod allocator;
+    pub mod borrowck;
     pub mod expr_use_visitor;
-    pub mod const_val;
     pub mod cstore;
-    pub mod dataflow;
     pub mod dead;
     pub mod dependency_format;
     pub mod entry;
     pub mod exported_symbols;
     pub mod free_region;
     pub mod intrinsicck;
+    pub mod lib_features;
     pub mod lang_items;
     pub mod liveness;
     pub mod mem_categorization;
@@ -124,7 +138,6 @@ pub mod middle {
     pub mod recursion_limit;
     pub mod resolve_lifetime;
     pub mod stability;
-    pub mod trans;
     pub mod weak_lang_items;
 }
 
@@ -134,20 +147,15 @@ pub mod traits;
 pub mod ty;
 
 pub mod util {
+    pub mod captures;
     pub mod common;
-    pub mod ppaux;
     pub mod nodemap;
-    pub mod fs;
+    pub mod profiling;
+    pub mod bug;
 }
 
-// A private module so that macro-expanded idents like
-// `::rustc::lint::Lint` will also work in `rustc` itself.
-//
-// `libstd` uses the same trick.
-#[doc(hidden)]
-mod rustc {
-    pub use lint;
-}
+// Allows macros to refer to this crate as `::rustc`
+extern crate self as rustc;
 
 // FIXME(#27438): right now the unit tests of librustc don't refer to any actual
 //                functions generated in librustc_data_structures (all

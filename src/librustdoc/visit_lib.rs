@@ -1,29 +1,20 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use rustc::middle::privacy::{AccessLevels, AccessLevel};
-use rustc::hir::def::Def;
+use rustc::hir::def::{Res, DefKind};
 use rustc::hir::def_id::{CrateNum, CRATE_DEF_INDEX, DefId};
 use rustc::ty::Visibility;
 use rustc::util::nodemap::FxHashSet;
+use syntax::symbol::sym;
 
 use std::cell::RefMut;
 
-use clean::{AttributesExt, NestedAttributesExt};
+use crate::clean::{AttributesExt, NestedAttributesExt};
 
 // FIXME: this may not be exhaustive, but is sufficient for rustdocs current uses
 
 /// Similar to `librustc_privacy::EmbargoVisitor`, but also takes
-/// specific rustdoc annotations into account (i.e. `doc(hidden)`)
-pub struct LibEmbargoVisitor<'a, 'b: 'a, 'tcx: 'b> {
-    cx: &'a ::core::DocContext<'b, 'tcx>,
+/// specific rustdoc annotations into account (i.e., `doc(hidden)`)
+pub struct LibEmbargoVisitor<'a, 'tcx> {
+    cx: &'a crate::core::DocContext<'tcx>,
     // Accessibility levels for reachable nodes
     access_levels: RefMut<'a, AccessLevels<DefId>>,
     // Previous accessibility level, None means unreachable
@@ -32,13 +23,15 @@ pub struct LibEmbargoVisitor<'a, 'b: 'a, 'tcx: 'b> {
     visited_mods: FxHashSet<DefId>,
 }
 
-impl<'a, 'b, 'tcx> LibEmbargoVisitor<'a, 'b, 'tcx> {
-    pub fn new(cx: &'a ::core::DocContext<'b, 'tcx>) -> LibEmbargoVisitor<'a, 'b, 'tcx> {
+impl<'a, 'tcx> LibEmbargoVisitor<'a, 'tcx> {
+    pub fn new(
+        cx: &'a crate::core::DocContext<'tcx>
+    ) -> LibEmbargoVisitor<'a, 'tcx> {
         LibEmbargoVisitor {
             cx,
-            access_levels: cx.access_levels.borrow_mut(),
+            access_levels: RefMut::map(cx.renderinfo.borrow_mut(), |ri| &mut ri.access_levels),
             prev_level: Some(AccessLevel::Public),
-            visited_mods: FxHashSet()
+            visited_mods: FxHashSet::default()
         }
     }
 
@@ -50,7 +43,7 @@ impl<'a, 'b, 'tcx> LibEmbargoVisitor<'a, 'b, 'tcx> {
 
     // Updates node level and returns the updated level
     fn update(&mut self, did: DefId, level: Option<AccessLevel>) -> Option<AccessLevel> {
-        let is_hidden = self.cx.tcx.get_attrs(did).lists("doc").has_word("hidden");
+        let is_hidden = self.cx.tcx.get_attrs(did).lists(sym::doc).has_word(sym::hidden);
 
         let old_level = self.access_levels.map.get(&did).cloned();
         // Accessibility levels can only grow
@@ -68,12 +61,17 @@ impl<'a, 'b, 'tcx> LibEmbargoVisitor<'a, 'b, 'tcx> {
         }
 
         for item in self.cx.tcx.item_children(def_id).iter() {
-            self.visit_item(item.def);
+            if let Some(def_id) = item.res.opt_def_id() {
+                if self.cx.tcx.def_key(def_id).parent.map_or(false, |d| d == def_id.index) ||
+                    item.vis == Visibility::Public {
+                    self.visit_item(item.res);
+                }
+            }
         }
     }
 
-    fn visit_item(&mut self, def: Def) {
-        let def_id = def.def_id();
+    fn visit_item(&mut self, res: Res) {
+        let def_id = res.def_id();
         let vis = self.cx.tcx.visibility(def_id);
         let inherited_item_level = if vis == Visibility::Public {
             self.prev_level
@@ -83,7 +81,7 @@ impl<'a, 'b, 'tcx> LibEmbargoVisitor<'a, 'b, 'tcx> {
 
         let item_level = self.update(def_id, inherited_item_level);
 
-        if let Def::Mod(..) = def {
+        if let Res::Def(DefKind::Mod, _) = res {
             let orig_level = self.prev_level;
 
             self.prev_level = item_level;

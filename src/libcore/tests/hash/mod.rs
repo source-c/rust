@@ -1,17 +1,8 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 mod sip;
 
 use std::hash::{Hash, Hasher};
 use std::default::Default;
+use std::rc::Rc;
 
 struct MyHasher {
     hash: u64,
@@ -64,18 +55,30 @@ fn test_writer_hasher() {
     assert_eq!(hash(& s), 97 + 0xFF);
     let s: Box<str> = String::from("a").into_boxed_str();
     assert_eq!(hash(& s), 97 + 0xFF);
+    let s: Rc<&str> = Rc::new("a");
+    assert_eq!(hash(&s), 97 + 0xFF);
     let cs: &[u8] = &[1, 2, 3];
     assert_eq!(hash(& cs), 9);
     let cs: Box<[u8]> = Box::new([1, 2, 3]);
     assert_eq!(hash(& cs), 9);
-
-    // FIXME (#18248) Add tests for hashing Rc<str> and Rc<[T]>
+    let cs: Rc<[u8]> = Rc::new([1, 2, 3]);
+    assert_eq!(hash(& cs), 9);
 
     let ptr = 5_usize as *const i32;
     assert_eq!(hash(&ptr), 5);
 
     let ptr = 5_usize as *mut i32;
     assert_eq!(hash(&ptr), 5);
+
+    let cs: &mut [u8] = &mut [1, 2, 3];
+    let ptr = cs.as_ptr();
+    let slice_ptr = cs as *const [u8];
+    #[cfg(not(miri))] // Miri cannot hash pointers
+    assert_eq!(hash(&slice_ptr), hash(&ptr) + cs.len() as u64);
+
+    let slice_ptr = cs as *mut [u8];
+    #[cfg(not(miri))] // Miri cannot hash pointers
+    assert_eq!(hash(&slice_ptr), hash(&ptr) + cs.len() as u64);
 }
 
 struct Custom { hash: u64 }
@@ -117,7 +120,7 @@ fn test_custom_state() {
 fn test_indirect_hasher() {
     let mut hasher = MyHasher { hash: 0 };
     {
-        let mut indirect_hasher: &mut Hasher = &mut hasher;
+        let mut indirect_hasher: &mut dyn Hasher = &mut hasher;
         5u32.hash(&mut indirect_hasher);
     }
     assert_eq!(hasher.hash, 5);

@@ -1,56 +1,48 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::cmp;
+use crate::ffi::CString;
+use crate::fmt;
+use crate::io::{self, Error, ErrorKind, IoSlice, IoSliceMut};
+use crate::mem;
+use crate::net::{SocketAddr, Shutdown, Ipv4Addr, Ipv6Addr};
+use crate::ptr;
+use crate::sys::net::{cvt, cvt_r, cvt_gai, Socket, init, wrlen_t};
+use crate::sys::net::netc as c;
+use crate::sys_common::{AsInner, FromInner, IntoInner};
+use crate::time::Duration;
+use crate::convert::{TryFrom, TryInto};
 
-use cmp;
-use ffi::CString;
-use fmt;
-use io::{self, Error, ErrorKind};
 use libc::{c_int, c_void};
-use mem;
-use net::{SocketAddr, Shutdown, Ipv4Addr, Ipv6Addr};
-use ptr;
-use sys::net::{cvt, cvt_r, cvt_gai, Socket, init, wrlen_t};
-use sys::net::netc as c;
-use sys_common::{AsInner, FromInner, IntoInner};
-use time::Duration;
 
 #[cfg(any(target_os = "dragonfly", target_os = "freebsd",
           target_os = "ios", target_os = "macos",
           target_os = "openbsd", target_os = "netbsd",
           target_os = "solaris", target_os = "haiku", target_os = "l4re"))]
-use sys::net::netc::IPV6_JOIN_GROUP as IPV6_ADD_MEMBERSHIP;
+use crate::sys::net::netc::IPV6_JOIN_GROUP as IPV6_ADD_MEMBERSHIP;
 #[cfg(not(any(target_os = "dragonfly", target_os = "freebsd",
               target_os = "ios", target_os = "macos",
               target_os = "openbsd", target_os = "netbsd",
               target_os = "solaris", target_os = "haiku", target_os = "l4re")))]
-use sys::net::netc::IPV6_ADD_MEMBERSHIP;
+use crate::sys::net::netc::IPV6_ADD_MEMBERSHIP;
 #[cfg(any(target_os = "dragonfly", target_os = "freebsd",
           target_os = "ios", target_os = "macos",
           target_os = "openbsd", target_os = "netbsd",
           target_os = "solaris", target_os = "haiku", target_os = "l4re"))]
-use sys::net::netc::IPV6_LEAVE_GROUP as IPV6_DROP_MEMBERSHIP;
+use crate::sys::net::netc::IPV6_LEAVE_GROUP as IPV6_DROP_MEMBERSHIP;
 #[cfg(not(any(target_os = "dragonfly", target_os = "freebsd",
               target_os = "ios", target_os = "macos",
               target_os = "openbsd", target_os = "netbsd",
               target_os = "solaris", target_os = "haiku", target_os = "l4re")))]
-use sys::net::netc::IPV6_DROP_MEMBERSHIP;
+use crate::sys::net::netc::IPV6_DROP_MEMBERSHIP;
 
 #[cfg(any(target_os = "linux", target_os = "android",
           target_os = "dragonfly", target_os = "freebsd",
           target_os = "openbsd", target_os = "netbsd",
-          target_os = "haiku", target_os = "bitrig"))]
+          target_os = "haiku"))]
 use libc::MSG_NOSIGNAL;
 #[cfg(not(any(target_os = "linux", target_os = "android",
               target_os = "dragonfly", target_os = "freebsd",
               target_os = "openbsd", target_os = "netbsd",
-              target_os = "haiku", target_os = "bitrig")))]
+              target_os = "haiku")))]
 const MSG_NOSIGNAL: c_int = 0x0;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -118,8 +110,8 @@ fn to_ipv6mr_interface(value: u32) -> c_int {
 }
 
 #[cfg(not(target_os = "android"))]
-fn to_ipv6mr_interface(value: u32) -> ::libc::c_uint {
-    value as ::libc::c_uint
+fn to_ipv6mr_interface(value: u32) -> libc::c_uint {
+    value as libc::c_uint
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -129,6 +121,13 @@ fn to_ipv6mr_interface(value: u32) -> ::libc::c_uint {
 pub struct LookupHost {
     original: *mut c::addrinfo,
     cur: *mut c::addrinfo,
+    port: u16
+}
+
+impl LookupHost {
+    pub fn port(&self) -> u16 {
+        self.port
+    }
 }
 
 impl Iterator for LookupHost {
@@ -136,10 +135,7 @@ impl Iterator for LookupHost {
     fn next(&mut self) -> Option<SocketAddr> {
         loop {
             unsafe {
-                let cur = match self.cur.as_ref() {
-                    None => return None,
-                    Some(c) => c,
-                };
+                let cur = self.cur.as_ref()?;
                 self.cur = cur.ai_next;
                 match sockaddr_to_addr(mem::transmute(cur.ai_addr),
                                        cur.ai_addrlen as usize)
@@ -161,29 +157,44 @@ impl Drop for LookupHost {
     }
 }
 
-pub fn lookup_host(host: &str) -> io::Result<LookupHost> {
-    init();
+impl TryFrom<&str> for LookupHost {
+    type Error = io::Error;
 
-    let c_host = CString::new(host)?;
-    let mut hints: c::addrinfo = unsafe { mem::zeroed() };
-    hints.ai_socktype = c::SOCK_STREAM;
-    let mut res = ptr::null_mut();
-    unsafe {
-        match cvt_gai(c::getaddrinfo(c_host.as_ptr(), ptr::null(), &hints, &mut res)) {
-            Ok(_) => {
-                Ok(LookupHost { original: res, cur: res })
-            },
-            #[cfg(unix)]
-            Err(e) => {
-                // The lookup failure could be caused by using a stale /etc/resolv.conf.
-                // See https://github.com/rust-lang/rust/issues/41570.
-                // We therefore force a reload of the nameserver information.
-                c::res_init();
-                Err(e)
-            },
-            // the cfg is needed here to avoid an "unreachable pattern" warning
-            #[cfg(not(unix))]
-            Err(e) => Err(e),
+    fn try_from(s: &str) -> io::Result<LookupHost> {
+        macro_rules! try_opt {
+            ($e:expr, $msg:expr) => (
+                match $e {
+                    Some(r) => r,
+                    None => return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                      $msg)),
+                }
+            )
+        }
+
+        // split the string by ':' and convert the second part to u16
+        let mut parts_iter = s.rsplitn(2, ':');
+        let port_str = try_opt!(parts_iter.next(), "invalid socket address");
+        let host = try_opt!(parts_iter.next(), "invalid socket address");
+        let port: u16 = try_opt!(port_str.parse().ok(), "invalid port value");
+
+        (host, port).try_into()
+    }
+}
+
+impl<'a> TryFrom<(&'a str, u16)> for LookupHost {
+    type Error = io::Error;
+
+    fn try_from((host, port): (&'a str, u16)) -> io::Result<LookupHost> {
+        init();
+
+        let c_host = CString::new(host)?;
+        let mut hints: c::addrinfo = unsafe { mem::zeroed() };
+        hints.ai_socktype = c::SOCK_STREAM;
+        let mut res = ptr::null_mut();
+        unsafe {
+            cvt_gai(c::getaddrinfo(c_host.as_ptr(), ptr::null(), &hints, &mut res)).map(|_| {
+                LookupHost { original: res, cur: res, port }
+            })
         }
     }
 }
@@ -197,7 +208,9 @@ pub struct TcpStream {
 }
 
 impl TcpStream {
-    pub fn connect(addr: &SocketAddr) -> io::Result<TcpStream> {
+    pub fn connect(addr: io::Result<&SocketAddr>) -> io::Result<TcpStream> {
+        let addr = addr?;
+
         init();
 
         let sock = Socket::new(addr, c::SOCK_STREAM)?;
@@ -243,6 +256,10 @@ impl TcpStream {
         self.inner.read(buf)
     }
 
+    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.inner.read_vectored(bufs)
+    }
+
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         let len = cmp::min(buf.len(), <wrlen_t>::max_value() as usize) as wrlen_t;
         let ret = cvt(unsafe {
@@ -252,6 +269,10 @@ impl TcpStream {
                     MSG_NOSIGNAL)
         })?;
         Ok(ret as usize)
+    }
+
+    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.inner.write_vectored(bufs)
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
@@ -307,7 +328,7 @@ impl FromInner<Socket> for TcpStream {
 }
 
 impl fmt::Debug for TcpStream {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut res = f.debug_struct("TcpStream");
 
         if let Ok(addr) = self.socket_addr() {
@@ -333,7 +354,9 @@ pub struct TcpListener {
 }
 
 impl TcpListener {
-    pub fn bind(addr: &SocketAddr) -> io::Result<TcpListener> {
+    pub fn bind(addr: io::Result<&SocketAddr>) -> io::Result<TcpListener> {
+        let addr = addr?;
+
         init();
 
         let sock = Socket::new(addr, c::SOCK_STREAM)?;
@@ -412,7 +435,7 @@ impl FromInner<Socket> for TcpListener {
 }
 
 impl fmt::Debug for TcpListener {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut res = f.debug_struct("TcpListener");
 
         if let Ok(addr) = self.socket_addr() {
@@ -434,7 +457,9 @@ pub struct UdpSocket {
 }
 
 impl UdpSocket {
-    pub fn bind(addr: &SocketAddr) -> io::Result<UdpSocket> {
+    pub fn bind(addr: io::Result<&SocketAddr>) -> io::Result<UdpSocket> {
+        let addr = addr?;
+
         init();
 
         let sock = Socket::new(addr, c::SOCK_DGRAM)?;
@@ -446,6 +471,12 @@ impl UdpSocket {
     pub fn socket(&self) -> &Socket { &self.inner }
 
     pub fn into_socket(self) -> Socket { self.inner }
+
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        sockname(|buf, len| unsafe {
+            c::getpeername(*self.inner.as_inner(), buf, len)
+        })
+    }
 
     pub fn socket_addr(&self) -> io::Result<SocketAddr> {
         sockname(|buf, len| unsafe {
@@ -600,8 +631,8 @@ impl UdpSocket {
         Ok(ret as usize)
     }
 
-    pub fn connect(&self, addr: &SocketAddr) -> io::Result<()> {
-        let (addrp, len) = addr.into_inner();
+    pub fn connect(&self, addr: io::Result<&SocketAddr>) -> io::Result<()> {
+        let (addrp, len) = addr?.into_inner();
         cvt_r(|| unsafe { c::connect(*self.inner.as_inner(), addrp, len) }).map(|_| ())
     }
 }
@@ -613,7 +644,7 @@ impl FromInner<Socket> for UdpSocket {
 }
 
 impl fmt::Debug for UdpSocket {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut res = f.debug_struct("UdpSocket");
 
         if let Ok(addr) = self.socket_addr() {
@@ -629,16 +660,17 @@ impl fmt::Debug for UdpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use collections::HashMap;
+    use crate::collections::HashMap;
 
     #[test]
     fn no_lookup_host_duplicates() {
         let mut addrs = HashMap::new();
-        let lh = match lookup_host("localhost") {
+        let lh = match LookupHost::try_from(("localhost", 0)) {
             Ok(lh) => lh,
             Err(e) => panic!("couldn't resolve `localhost': {}", e)
         };
-        let _na = lh.map(|sa| *addrs.entry(sa).or_insert(0) += 1).count();
-        assert!(addrs.values().filter(|&&v| v > 1).count() == 0);
+        for sa in lh { *addrs.entry(sa).or_insert(0) += 1; };
+        assert_eq!(addrs.iter().filter(|&(_, &v)| v > 1).collect::<Vec<_>>(), vec![],
+                   "There should be no duplicate localhost entries");
     }
 }

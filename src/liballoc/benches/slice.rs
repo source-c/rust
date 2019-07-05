@@ -1,18 +1,8 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use std::{mem, ptr};
 
-use std::__rand::{thread_rng};
-use std::mem;
-use std::ptr;
-
-use rand::{Rng, SeedableRng, XorShiftRng};
+use rand::{thread_rng, Rng, SeedableRng};
+use rand::distributions::{Standard, Alphanumeric};
+use rand_xorshift::XorShiftRng;
 use test::{Bencher, black_box};
 
 #[bench]
@@ -192,18 +182,20 @@ fn gen_descending(len: usize) -> Vec<u64> {
     (0..len as u64).rev().collect()
 }
 
+const SEED: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
 fn gen_random(len: usize) -> Vec<u64> {
-    let mut rng = XorShiftRng::from_seed([0, 1, 2, 3]);
-    rng.gen_iter::<u64>().take(len).collect()
+    let mut rng = XorShiftRng::from_seed(SEED);
+    rng.sample_iter(&Standard).take(len).collect()
 }
 
 fn gen_random_bytes(len: usize) -> Vec<u8> {
-    let mut rng = XorShiftRng::from_seed([0, 1, 2, 3]);
-    rng.gen_iter::<u8>().take(len).collect()
+    let mut rng = XorShiftRng::from_seed(SEED);
+    rng.sample_iter(&Standard).take(len).collect()
 }
 
 fn gen_mostly_ascending(len: usize) -> Vec<u64> {
-    let mut rng = XorShiftRng::from_seed([0, 1, 2, 3]);
+    let mut rng = XorShiftRng::from_seed(SEED);
     let mut v = gen_ascending(len);
     for _ in (0usize..).take_while(|x| x * x <= len) {
         let x = rng.gen::<usize>() % len;
@@ -214,7 +206,7 @@ fn gen_mostly_ascending(len: usize) -> Vec<u64> {
 }
 
 fn gen_mostly_descending(len: usize) -> Vec<u64> {
-    let mut rng = XorShiftRng::from_seed([0, 1, 2, 3]);
+    let mut rng = XorShiftRng::from_seed(SEED);
     let mut v = gen_descending(len);
     for _ in (0usize..).take_while(|x| x * x <= len) {
         let x = rng.gen::<usize>() % len;
@@ -225,18 +217,18 @@ fn gen_mostly_descending(len: usize) -> Vec<u64> {
 }
 
 fn gen_strings(len: usize) -> Vec<String> {
-    let mut rng = XorShiftRng::from_seed([0, 1, 2, 3]);
+    let mut rng = XorShiftRng::from_seed(SEED);
     let mut v = vec![];
     for _ in 0..len {
         let n = rng.gen::<usize>() % 20 + 1;
-        v.push(rng.gen_ascii_chars().take(n).collect());
+        v.push(rng.sample_iter(&Alphanumeric).take(n).collect());
     }
     v
 }
 
 fn gen_big_random(len: usize) -> Vec<[u64; 16]> {
-    let mut rng = XorShiftRng::from_seed([0, 1, 2, 3]);
-    rng.gen_iter().map(|x| [x; 16]).take(len).collect()
+    let mut rng = XorShiftRng::from_seed(SEED);
+    rng.sample_iter(&Standard).map(|x| [x; 16]).take(len).collect()
 }
 
 macro_rules! sort {
@@ -284,6 +276,17 @@ macro_rules! sort_expensive {
     }
 }
 
+macro_rules! sort_lexicographic {
+    ($f:ident, $name:ident, $gen:expr, $len:expr) => {
+        #[bench]
+        fn $name(b: &mut Bencher) {
+            let v = $gen($len);
+            b.iter(|| v.clone().$f(|x| x.to_string()));
+            b.bytes = $len * mem::size_of_val(&$gen(1)[0]) as u64;
+        }
+    }
+}
+
 sort!(sort, sort_small_ascending, gen_ascending, 10);
 sort!(sort, sort_small_descending, gen_descending, 10);
 sort!(sort, sort_small_random, gen_random, 10);
@@ -311,6 +314,10 @@ sort!(sort_unstable, sort_unstable_large_random, gen_random, 10000);
 sort!(sort_unstable, sort_unstable_large_big, gen_big_random, 10000);
 sort_strings!(sort_unstable, sort_unstable_large_strings, gen_strings, 10000);
 sort_expensive!(sort_unstable_by, sort_unstable_large_expensive, gen_random, 10000);
+
+sort_lexicographic!(sort_by_key, sort_by_key_lexicographic, gen_random, 10000);
+sort_lexicographic!(sort_unstable_by_key, sort_unstable_by_key_lexicographic, gen_random, 10000);
+sort_lexicographic!(sort_by_cached_key, sort_by_cached_key_lexicographic, gen_random, 10000);
 
 macro_rules! reverse {
     ($name:ident, $ty:ty, $f:expr) => {
@@ -343,7 +350,7 @@ macro_rules! rotate {
         fn $name(b: &mut Bencher) {
             let size = mem::size_of_val(&$gen(1)[0]);
             let mut v = $gen($len * 8 / size);
-            b.iter(|| black_box(&mut v).rotate(($mid*8+size-1)/size));
+            b.iter(|| black_box(&mut v).rotate_left(($mid*8+size-1)/size));
             b.bytes = (v.len() * size) as u64;
         }
     }

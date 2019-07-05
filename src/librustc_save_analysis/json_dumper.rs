@@ -1,21 +1,17 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use std::io::Write;
 
-use rustc_serialize::json::as_json;
-
-use rls_data::{self, Analysis, Import, Def, DefKind, Ref, RefKind, MacroRef,
-               Relation, CratePreludeData};
 use rls_data::config::Config;
+use rls_data::{self, Analysis, CompilationOptions, CratePreludeData, Def, DefKind, Impl, Import,
+               MacroRef, Ref, RefKind, Relation};
 use rls_span::{Column, Row};
+
+use log::error;
+
+#[derive(Debug)]
+pub struct Access {
+    pub reachable: bool,
+    pub public: bool,
+}
 
 pub struct JsonDumper<O: DumpOutput> {
     result: Analysis,
@@ -27,20 +23,20 @@ pub trait DumpOutput {
     fn dump(&mut self, result: &Analysis);
 }
 
-pub struct WriteOutput<'b, W: Write + 'b> {
+pub struct WriteOutput<'b, W: Write> {
     output: &'b mut W,
 }
 
 impl<'b, W: Write> DumpOutput for WriteOutput<'b, W> {
     fn dump(&mut self, result: &Analysis) {
-        if let Err(_) = write!(self.output, "{}", as_json(&result)) {
-            error!("Error writing output");
+        if let Err(e) = serde_json::to_writer(self.output.by_ref(), result) {
+            error!("Can't serialize save-analysis: {:?}", e);
         }
     }
 }
 
 pub struct CallbackOutput<'b> {
-    callback: &'b mut FnMut(&Analysis),
+    callback: &'b mut dyn FnMut(&Analysis),
 }
 
 impl<'b> DumpOutput for CallbackOutput<'b> {
@@ -54,17 +50,18 @@ impl<'b, W: Write> JsonDumper<WriteOutput<'b, W>> {
         JsonDumper {
             output: WriteOutput { output: writer },
             config: config.clone(),
-            result: Analysis::new(config)
+            result: Analysis::new(config),
         }
     }
 }
 
 impl<'b> JsonDumper<CallbackOutput<'b>> {
-    pub fn with_callback(callback: &'b mut FnMut(&Analysis),
-                         config: Config)
-                         -> JsonDumper<CallbackOutput<'b>> {
+    pub fn with_callback(
+        callback: &'b mut dyn FnMut(&Analysis),
+        config: Config,
+    ) -> JsonDumper<CallbackOutput<'b>> {
         JsonDumper {
-            output: CallbackOutput { callback: callback },
+            output: CallbackOutput { callback },
             config: config.clone(),
             result: Analysis::new(config),
         }
@@ -82,34 +79,40 @@ impl<'b, O: DumpOutput + 'b> JsonDumper<O> {
         self.result.prelude = Some(data)
     }
 
-    pub fn macro_use(&mut self, data: MacroRef) {
-        if self.config.pub_only {
+    pub fn compilation_opts(&mut self, data: CompilationOptions) {
+        self.result.compilation = Some(data);
+    }
+
+    pub fn _macro_use(&mut self, data: MacroRef) {
+        if self.config.pub_only || self.config.reachable_only {
             return;
         }
         self.result.macro_refs.push(data);
     }
 
-    pub fn import(&mut self, public: bool, import: Import) {
-        if !public && self.config.pub_only {
+    pub fn import(&mut self, access: &Access, import: Import) {
+        if !access.public && self.config.pub_only
+            || !access.reachable && self.config.reachable_only {
             return;
         }
         self.result.imports.push(import);
     }
 
     pub fn dump_ref(&mut self, data: Ref) {
-        if self.config.pub_only {
+        if self.config.pub_only || self.config.reachable_only {
             return;
         }
         self.result.refs.push(data);
     }
 
-    pub fn dump_def(&mut self, public: bool, mut data: Def) {
-        if !public && self.config.pub_only {
+    pub fn dump_def(&mut self, access: &Access, mut data: Def) {
+        if !access.public && self.config.pub_only
+            || !access.reachable && self.config.reachable_only {
             return;
         }
         if data.kind == DefKind::Mod && data.span.file_name.to_str().unwrap() != data.value {
-            // If the module is an out-of-line defintion, then we'll make the
-            // definition the first character in the module's file and turn the
+            // If the module is an out-of-line definition, then we'll make the
+            // definition the first character in the module's file and turn
             // the declaration into a reference to it.
             let rf = Ref {
                 kind: RefKind::Mod,
@@ -132,5 +135,9 @@ impl<'b, O: DumpOutput + 'b> JsonDumper<O> {
 
     pub fn dump_relation(&mut self, data: Relation) {
         self.result.relations.push(data);
+    }
+
+    pub fn dump_impl(&mut self, data: Impl) {
+        self.result.impls.push(data);
     }
 }

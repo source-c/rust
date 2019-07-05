@@ -1,23 +1,12 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 #![unstable(issue = "0", feature = "windows_handle")]
 
-use cmp;
-use io::{ErrorKind, Read};
-use io;
-use mem;
-use ops::Deref;
-use ptr;
-use sys::c;
-use sys::cvt;
+use crate::cmp;
+use crate::io::{self, ErrorKind, Read, IoSlice, IoSliceMut};
+use crate::mem;
+use crate::ops::Deref;
+use crate::ptr;
+use crate::sys::c;
+use crate::sys::cvt;
 
 /// An owned container for `HANDLE` object, closing them on Drop.
 ///
@@ -100,6 +89,10 @@ impl RawHandle {
         }
     }
 
+    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        crate::io::default_read_vectored(|buf| self.read(buf), bufs)
+    }
+
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         let mut read = 0;
         let len = cmp::min(buf.len(), <c::DWORD>::max_value() as usize) as c::DWORD;
@@ -170,11 +163,6 @@ impl RawHandle {
         }
     }
 
-    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        let mut me = self;
-        (&mut me).read_to_end(buf)
-    }
-
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         let mut amt = 0;
         let len = cmp::min(buf.len(), <c::DWORD>::max_value() as usize) as c::DWORD;
@@ -183,6 +171,10 @@ impl RawHandle {
                          len, &mut amt, ptr::null_mut())
         })?;
         Ok(amt as usize)
+    }
+
+    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        crate::io::default_write_vectored(|buf| self.write(buf), bufs)
     }
 
     pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
@@ -214,5 +206,9 @@ impl RawHandle {
 impl<'a> Read for &'a RawHandle {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         (**self).read(buf)
+    }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        (**self).read_vectored(bufs)
     }
 }

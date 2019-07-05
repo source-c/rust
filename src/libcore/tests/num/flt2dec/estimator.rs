@@ -1,18 +1,3 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-// FIXME https://github.com/kripken/emscripten/issues/4563
-// NB we have to actually not compile this test to avoid
-// an undefined symbol error
-#![cfg(not(target_os = "emscripten"))]
-
 use core::num::flt2dec::estimator::*;
 
 #[test]
@@ -62,4 +47,3 @@ fn test_estimate_scaling_factor() {
         assert_almost_eq!(estimate_scaling_factor(1, i as i16), expected as i16);
     }
 }
-

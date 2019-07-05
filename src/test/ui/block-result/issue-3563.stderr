@@ -1,21 +1,9 @@
 error[E0599]: no method named `b` found for type `&Self` in the current scope
-  --> $DIR/issue-3563.rs:13:17
+  --> $DIR/issue-3563.rs:3:17
    |
-13 |         || self.b()
-   |                 ^
-   |
-   = help: did you mean `a`?
+LL |         || self.b()
+   |                 ^ help: there is a method with a similar name: `a`
 
-error[E0308]: mismatched types
-  --> $DIR/issue-3563.rs:13:9
-   |
-12 |     fn a(&self) {
-   |                 - possibly return type missing here?
-13 |         || self.b()
-   |         ^^^^^^^^^^^ expected (), found closure
-   |
-   = note: expected type `()`
-              found type `[closure@$DIR/issue-3563.rs:13:9: 13:20 self:_]`
+error: aborting due to previous error
 
-error: aborting due to 2 previous errors
-
+For more information about this error, try `rustc --explain E0599`.

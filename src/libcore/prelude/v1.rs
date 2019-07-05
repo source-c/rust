@@ -1,13 +1,3 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! The core prelude
 //!
 //! This module is intended for users of libcore which do not link to libstd as
@@ -16,52 +6,41 @@
 
 #![stable(feature = "core_prelude", since = "1.4.0")]
 
-// Reexported core operators
+// Re-exported core operators
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use marker::{Copy, Send, Sized, Sync};
+pub use crate::marker::{Copy, Send, Sized, Sync, Unpin};
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use ops::{Drop, Fn, FnMut, FnOnce};
+pub use crate::ops::{Drop, Fn, FnMut, FnOnce};
 
-// Reexported functions
+// Re-exported functions
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use mem::drop;
+pub use crate::mem::drop;
 
-// Reexported types and traits
+// Re-exported types and traits
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use clone::Clone;
+pub use crate::clone::Clone;
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use cmp::{PartialEq, PartialOrd, Eq, Ord};
+pub use crate::cmp::{PartialEq, PartialOrd, Eq, Ord};
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use convert::{AsRef, AsMut, Into, From};
+pub use crate::convert::{AsRef, AsMut, Into, From};
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use default::Default;
+pub use crate::default::Default;
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use iter::{Iterator, Extend, IntoIterator};
+pub use crate::iter::{Iterator, Extend, IntoIterator};
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use iter::{DoubleEndedIterator, ExactSizeIterator};
+pub use crate::iter::{DoubleEndedIterator, ExactSizeIterator};
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use option::Option::{self, Some, None};
+pub use crate::option::Option::{self, Some, None};
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
-pub use result::Result::{self, Ok, Err};
-
-// Reexported extension traits for primitive types
-#[stable(feature = "core_prelude", since = "1.4.0")]
-#[doc(no_inline)]
-pub use slice::SliceExt;
-#[stable(feature = "core_prelude", since = "1.4.0")]
-#[doc(no_inline)]
-pub use str::StrExt;
-#[stable(feature = "core_prelude", since = "1.4.0")]
-#[doc(no_inline)]
-pub use char::CharExt;
+pub use crate::result::Result::{self, Ok, Err};

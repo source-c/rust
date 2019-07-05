@@ -1,16 +1,8 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 // ignore-android FIXME #17520
+// ignore-cloudabi spawning processes is not supported
 // ignore-emscripten spawning processes is not supported
 // ignore-openbsd no support for libbacktrace without filename
+// ignore-sgx no processes
 // compile-flags:-g
 
 use std::env;
@@ -50,6 +42,21 @@ fn expected(fn_name: &str) -> String {
     format!(" backtrace::{}", fn_name)
 }
 
+fn contains_verbose_expected(s: &str, fn_name: &str) -> bool {
+    // HACK(eddyb) work around the fact that verbosely demangled stack traces
+    // (from `RUST_BACKTRACE=full`, or, as is the case here, panic-in-panic)
+    // may contain symbols with hashes in them, i.e. `backtrace[...]::`.
+    let prefix = " backtrace";
+    let suffix = &format!("::{}", fn_name);
+    s.match_indices(prefix).any(|(i, _)| {
+        s[i + prefix.len()..]
+            .trim_start_matches('[')
+            .trim_start_matches(char::is_alphanumeric)
+            .trim_start_matches(']')
+            .starts_with(suffix)
+    })
+}
+
 fn runtest(me: &str) {
     // Make sure that the stack trace is printed
     let p = template(me).arg("fail").env("RUST_BACKTRACE", "1").spawn().unwrap();
@@ -87,7 +94,7 @@ fn runtest(me: &str) {
     let s = str::from_utf8(&out.stderr).unwrap();
     // loosened the following from double::h to double:: due to
     // spurious failures on mac, 32bit, optimized
-    assert!(s.contains("stack backtrace") && s.contains(&expected("double")),
+    assert!(s.contains("stack backtrace") && contains_verbose_expected(s, "double"),
             "bad output3: {}", s);
 
     // Make sure a stack trace isn't printed too many times

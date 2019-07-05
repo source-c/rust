@@ -1,13 +1,3 @@
-// Copyright 2012-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Code for debugging the dep-graph.
 
 use super::dep_node::DepNode;
@@ -32,7 +22,7 @@ impl DepNodeFilter {
         }
     }
 
-    /// True if all nodes always pass the filter.
+    /// Returns `true` if all nodes always pass the filter.
     pub fn accepts_all(&self) -> bool {
         self.text.is_empty()
     }
@@ -40,7 +30,7 @@ impl DepNodeFilter {
     /// Tests whether `node` meets the filter, returning true if so.
     pub fn test(&self, node: &DepNode) -> bool {
         let debug_str = format!("{:?}", node);
-        self.text.split("&")
+        self.text.split('&')
                  .map(|s| s.trim())
                  .all(|f| debug_str.contains(f))
     }
@@ -54,7 +44,7 @@ pub struct EdgeFilter {
 }
 
 impl EdgeFilter {
-    pub fn new(test: &str) -> Result<EdgeFilter, Box<Error>> {
+    pub fn new(test: &str) -> Result<EdgeFilter, Box<dyn Error>> {
         let parts: Vec<_> = test.split("->").collect();
         if parts.len() != 2 {
             Err(format!("expected a filter like `a&b -> c&d`, not `{}`", test).into())

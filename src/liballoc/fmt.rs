@@ -1,14 +1,4 @@
-// Copyright 2013-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-//! Utilities for formatting and printing `String`s
+//! Utilities for formatting and printing `String`s.
 //!
 //! This module contains the runtime support for the [`format!`] syntax extension.
 //! This macro is implemented in the compiler to emit calls to this module in
@@ -36,6 +26,9 @@
 //! variable passed in (in order to perform validity checking). The compiler
 //! will then parse the format string and determine if the list of arguments
 //! provided is suitable to pass to this format string.
+//!
+//! To convert a single value to a string, use the [`to_string`] method. This
+//! will use the [`Display`] formatting trait.
 //!
 //! ## Positional parameters
 //!
@@ -109,10 +102,12 @@
 //! When requesting that an argument be formatted with a particular type, you
 //! are actually requesting that an argument ascribes to a particular trait.
 //! This allows multiple actual types to be formatted via `{:x}` (like [`i8`] as
-//! well as [`isize`]).  The current mapping of types to traits is:
+//! well as [`isize`]). The current mapping of types to traits is:
 //!
 //! * *nothing* ⇒ [`Display`]
 //! * `?` ⇒ [`Debug`]
+//! * `x?` ⇒ [`Debug`] with lower-case hexadecimal integers
+//! * `X?` ⇒ [`Debug`] with upper-case hexadecimal integers
 //! * `o` ⇒ [`Octal`](trait.Octal.html)
 //! * `x` ⇒ [`LowerHex`](trait.LowerHex.html)
 //! * `X` ⇒ [`UpperHex`](trait.UpperHex.html)
@@ -150,7 +145,7 @@
 //! Additionally, the return value of this function is [`fmt::Result`] which is a
 //! type alias of [`Result`]`<(), `[`std::fmt::Error`]`>`. Formatting implementations
 //! should ensure that they propagate errors from the [`Formatter`][`Formatter`] (e.g., when
-//! calling [`write!`]) however, they should never return errors spuriously. That
+//! calling [`write!`]). However, they should never return errors spuriously. That
 //! is, a formatting implementation must and may only return an error if the
 //! passed-in [`Formatter`] returns an error. This is because, contrary to what
 //! the function signature might suggest, string formatting is an infallible
@@ -236,6 +231,8 @@
 //! writeln!     // same as write but appends a newline
 //! print!       // the format string is printed to the standard output
 //! println!     // same as print but appends a newline
+//! eprint!      // the format string is printed to the standard error
+//! eprintln!    // same as eprint but appends a newline
 //! format_args! // described below.
 //! ```
 //!
@@ -264,6 +261,11 @@
 //! print!("Hello {}!", "world");
 //! println!("I have a newline {}", "character at the end");
 //! ```
+//! ### `eprint!`
+//!
+//! The [`eprint!`] and [`eprintln!`] macros are identical to
+//! [`print!`] and [`println!`], respectively, except they emit their
+//! output to stderr.
 //!
 //! ### `format_args!`
 //!
@@ -317,7 +319,7 @@
 //! sign := '+' | '-'
 //! width := count
 //! precision := count | '*'
-//! type := identifier | ''
+//! type := identifier | '?' | ''
 //! count := parameter | integer
 //! parameter := argument '$'
 //! ```
@@ -326,12 +328,12 @@
 //!
 //! Each argument being formatted can be transformed by a number of formatting
 //! parameters (corresponding to `format_spec` in the syntax above). These
-//! parameters affect the string representation of what's being formatted. This
-//! syntax draws heavily from Python's, so it may seem a bit familiar.
+//! parameters affect the string representation of what's being formatted.
 //!
 //! ## Fill/Alignment
 //!
-//! The fill character is provided normally in conjunction with the `width`
+//! The fill character is provided normally in conjunction with the
+//! [`width`](#width)
 //! parameter. This indicates that if the value being formatted is smaller than
 //! `width` some extra characters will be printed around it. The extra
 //! characters are specified by `fill`, and the alignment can be one of the
@@ -341,9 +343,10 @@
 //! * `^` - the argument is center-aligned in `width` columns
 //! * `>` - the argument is right-aligned in `width` columns
 //!
-//! Note that alignment may not be implemented by some types. A good way
-//! to ensure padding is applied is to format your input, then use this
-//! resulting string to pad your output.
+//! Note that alignment may not be implemented by some types. In particular, it
+//! is not generally implemented for the `Debug` trait.  A good way to ensure
+//! padding is applied is to format your input, then use this resulting string
+//! to pad your output.
 //!
 //! ## Sign/`#`/`0`
 //!
@@ -379,7 +382,8 @@
 //! padding specified by fill/alignment will be used to take up the required
 //! space.
 //!
-//! The default fill/alignment for non-numerics is a space and left-aligned. The
+//! The default [fill/alignment](#fillalignment) for non-numerics is a space and
+//! left-aligned. The
 //! defaults for numeric formatters is also a space but with right-alignment. If
 //! the `0` flag is specified for numerics, then the implicit fill character is
 //! `0`.
@@ -424,7 +428,7 @@
 //! 3. An asterisk `.*`:
 //!
 //!    `.*` means that this `{...}` is associated with *two* format inputs rather than one: the
-//!    first input holds the `usize` precision, and the second holds the value to print.  Note that
+//!    first input holds the `usize` precision, and the second holds the value to print. Note that
 //!    in this case, if one uses the format string `{<arg>:<spec>.*}`, then the `<arg>` part refers
 //!    to the *value* to print, and the `precision` must come in the input preceding `<arg>`.
 //!
@@ -475,7 +479,6 @@
 //! them with the same character. For example, the `{` character is escaped with
 //! `{{` and the `}` character is escaped with `}}`.
 //!
-//! [`format!`]: ../../macro.format.html
 //! [`usize`]: ../../std/primitive.usize.html
 //! [`isize`]: ../../std/primitive.isize.html
 //! [`i8`]: ../../std/primitive.i8.html
@@ -488,10 +491,14 @@
 //! [`write!`]: ../../std/macro.write.html
 //! [`Debug`]: trait.Debug.html
 //! [`format!`]: ../../std/macro.format.html
+//! [`to_string`]: ../../std/string/trait.ToString.html
 //! [`writeln!`]: ../../std/macro.writeln.html
 //! [`write_fmt`]: ../../std/io/trait.Write.html#method.write_fmt
 //! [`std::io::Write`]: ../../std/io/trait.Write.html
+//! [`print!`]: ../../std/macro.print.html
 //! [`println!`]: ../../std/macro.println.html
+//! [`eprint!`]: ../../std/macro.eprint.html
+//! [`eprintln!`]: ../../std/macro.eprintln.html
 //! [`write!`]: ../../std/macro.write.html
 //! [`format_args!`]: ../../std/macro.format_args.html
 //! [`fmt::Arguments`]: struct.Arguments.html
@@ -505,21 +512,23 @@ pub use core::fmt::rt;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{Formatter, Result, Write};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::fmt::{Octal, Binary};
+pub use core::fmt::{Binary, Octal};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::fmt::{Display, Debug};
+pub use core::fmt::{Debug, Display};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::fmt::{LowerHex, UpperHex, Pointer};
+pub use core::fmt::{LowerHex, Pointer, UpperHex};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{LowerExp, UpperExp};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::Error;
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::fmt::{ArgumentV1, Arguments, write};
+pub use core::fmt::{write, ArgumentV1, Arguments};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{DebugList, DebugMap, DebugSet, DebugStruct, DebugTuple};
+#[stable(feature = "fmt_flags_align", since = "1.28.0")]
+pub use core::fmt::{Alignment};
 
-use string;
+use crate::string;
 
 /// The `format` function takes an [`Arguments`] struct and returns the resulting
 /// formatted string.
@@ -537,7 +546,7 @@ use string;
 /// assert_eq!(s, "Hello, world!");
 /// ```
 ///
-/// Please note that using [`format!`] might be preferrable.
+/// Please note that using [`format!`] might be preferable.
 /// Example:
 ///
 /// ```
@@ -549,10 +558,11 @@ use string;
 /// [`format_args!`]: ../../std/macro.format_args.html
 /// [`format!`]: ../../std/macro.format.html
 #[stable(feature = "rust1", since = "1.0.0")]
-pub fn format(args: Arguments) -> string::String {
+pub fn format(args: Arguments<'_>) -> string::String {
     let capacity = args.estimated_capacity();
     let mut output = string::String::with_capacity(capacity);
-    output.write_fmt(args)
-          .expect("a formatting trait implementation returned an error");
+    output
+        .write_fmt(args)
+        .expect("a formatting trait implementation returned an error");
     output
 }

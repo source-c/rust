@@ -1,20 +1,10 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Utility functions for bignums that don't make too much sense to turn into methods.
 
 // FIXME This module's name is a bit unfortunate, since other modules also import `core::num`.
 
-use cmp::Ordering::{self, Less, Equal, Greater};
+use crate::cmp::Ordering::{self, Less, Equal, Greater};
 
-pub use num::bignum::Big32x40 as Big;
+pub use crate::num::bignum::Big32x40 as Big;
 
 /// Test whether truncating all bits less significant than `ones_place` introduces
 /// a relative error less, equal, or greater than 0.5 ULP.
@@ -37,7 +27,7 @@ pub fn compare_with_half_ulp(f: &Big, ones_place: usize) -> Ordering {
     Equal
 }
 
-/// Convert an ASCII string containing only decimal digits to a `u64`.
+/// Converts an ASCII string containing only decimal digits to a `u64`.
 ///
 /// Does not perform checks for overflow or invalid characters, so if the caller is not careful,
 /// the result is bogus and can panic (though it won't be `unsafe`). Additionally, empty strings
@@ -54,7 +44,7 @@ pub fn from_str_unchecked<'a, T>(bytes: T) -> u64 where T : IntoIterator<Item=&'
     result
 }
 
-/// Convert a string of ASCII digits into a bignum.
+/// Converts a string of ASCII digits into a bignum.
 ///
 /// Like `from_str_unchecked`, this function relies on the parser to weed out non-digits.
 pub fn digits_to_big(integral: &[u8], fractional: &[u8]) -> Big {
@@ -79,7 +69,7 @@ pub fn to_u64(x: &Big) -> u64 {
 }
 
 
-/// Extract a range of bits.
+/// Extracts a range of bits.
 
 /// Index 0 is the least significant bit and the range is half-open as usual.
 /// Panics if asked to extract more bits than fit into the return type.

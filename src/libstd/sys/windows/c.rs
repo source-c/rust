@@ -1,29 +1,13 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! C definitions used by libnative that don't belong in liblibc
 
-#![allow(bad_style)]
+#![allow(nonstandard_style)]
 #![cfg_attr(test, allow(dead_code))]
 #![unstable(issue = "0", feature = "windows_c")]
 
-use os::raw::{c_int, c_uint, c_ulong, c_long, c_longlong, c_ushort, c_char};
-#[cfg(target_arch = "x86_64")]
-use os::raw::c_ulonglong;
-use libc::{wchar_t, size_t, c_void};
-use ptr;
+use crate::os::raw::{c_int, c_uint, c_ulong, c_long, c_longlong, c_ushort, c_char};
+use crate::ptr;
 
-#[repr(simd)]
-#[repr(C)]
-#[cfg(target_arch = "x86_64")]
-struct u64x2(u64, u64);
+use libc::{wchar_t, size_t, c_void};
 
 pub use self::FILE_INFO_BY_HANDLE_CLASS::*;
 pub use self::EXCEPTION_DISPOSITION::*;
@@ -37,7 +21,6 @@ pub type BOOL = c_int;
 pub type BYTE = u8;
 pub type BOOLEAN = BYTE;
 pub type GROUP = c_uint;
-pub type LONG_PTR = isize;
 pub type LARGE_INTEGER = c_longlong;
 pub type LONG = c_long;
 pub type UINT = c_uint;
@@ -46,13 +29,8 @@ pub type USHORT = c_ushort;
 pub type SIZE_T = usize;
 pub type WORD = u16;
 pub type CHAR = c_char;
-pub type HCRYPTPROV = LONG_PTR;
 pub type ULONG_PTR = usize;
 pub type ULONG = c_ulong;
-#[cfg(target_arch = "x86_64")]
-pub type ULONGLONG = u64;
-#[cfg(target_arch = "x86_64")]
-pub type DWORDLONG = ULONGLONG;
 
 pub type LPBOOL = *mut BOOL;
 pub type LPBYTE = *mut BYTE;
@@ -74,12 +52,15 @@ pub type LPWSAPROTOCOL_INFO = *mut WSAPROTOCOL_INFO;
 pub type LPSTR = *mut CHAR;
 pub type LPWSTR = *mut WCHAR;
 pub type LPFILETIME = *mut FILETIME;
+pub type LPWSABUF = *mut WSABUF;
+pub type LPWSAOVERLAPPED = *mut c_void;
+pub type LPWSAOVERLAPPED_COMPLETION_ROUTINE = *mut c_void;
 
 pub type PCONDITION_VARIABLE = *mut CONDITION_VARIABLE;
 pub type PLARGE_INTEGER = *mut c_longlong;
 pub type PSRWLOCK = *mut SRWLOCK;
 
-pub type SOCKET = ::os::windows::raw::SOCKET;
+pub type SOCKET = crate::os::windows::raw::SOCKET;
 pub type socklen_t = c_int;
 pub type ADDRESS_FAMILY = USHORT;
 
@@ -278,17 +259,6 @@ pub const WAIT_OBJECT_0: DWORD = 0x00000000;
 pub const WAIT_TIMEOUT: DWORD = 258;
 pub const WAIT_FAILED: DWORD = 0xFFFFFFFF;
 
-#[cfg(target_env = "msvc")]
-pub const MAX_SYM_NAME: usize = 2000;
-#[cfg(target_arch = "x86")]
-pub const IMAGE_FILE_MACHINE_I386: DWORD = 0x014c;
-#[cfg(target_arch = "x86_64")]
-pub const IMAGE_FILE_MACHINE_AMD64: DWORD = 0x8664;
-
-pub const PROV_RSA_FULL: DWORD = 1;
-pub const CRYPT_SILENT: DWORD = 64;
-pub const CRYPT_VERIFYCONTEXT: DWORD = 0xF0000000;
-
 pub const EXCEPTION_CONTINUE_SEARCH: LONG = 0;
 pub const EXCEPTION_STACK_OVERFLOW: DWORD = 0xc00000fd;
 pub const EXCEPTION_MAXIMUM_PARAMETERS: usize = 15;
@@ -303,6 +273,10 @@ pub const PIPE_REJECT_REMOTE_CLIENTS: DWORD = 0x00000008;
 pub const PIPE_READMODE_BYTE: DWORD = 0x00000000;
 
 pub const FD_SETSIZE: usize = 64;
+
+pub const STACK_SIZE_PARAM_IS_A_RESERVATION: DWORD = 0x00010000;
+
+pub const HEAP_ZERO_MEMORY: DWORD = 0x00000008;
 
 #[repr(C)]
 #[cfg(not(target_pointer_width = "64"))]
@@ -325,6 +299,12 @@ pub struct WSADATA {
     pub lpVendorInfo: *mut u8,
     pub szDescription: [u8; WSADESCRIPTION_LEN + 1],
     pub szSystemStatus: [u8; WSASYS_STATUS_LEN + 1],
+}
+
+#[repr(C)]
+pub struct WSABUF {
+    pub len: ULONG,
+    pub buf: *mut CHAR,
 }
 
 #[repr(C)]
@@ -444,7 +424,7 @@ pub struct MOUNT_POINT_REPARSE_BUFFER {
     pub PathBuffer: WCHAR,
 }
 
-pub type LPPROGRESS_ROUTINE = ::option::Option<unsafe extern "system" fn(
+pub type LPPROGRESS_ROUTINE = crate::option::Option<unsafe extern "system" fn(
     TotalFileSize: LARGE_INTEGER,
     TotalBytesTransferred: LARGE_INTEGER,
     StreamSize: LARGE_INTEGER,
@@ -574,39 +554,6 @@ pub struct OVERLAPPED {
 }
 
 #[repr(C)]
-#[cfg(target_env = "msvc")]
-pub struct SYMBOL_INFO {
-    pub SizeOfStruct: c_ulong,
-    pub TypeIndex: c_ulong,
-    pub Reserved: [u64; 2],
-    pub Index: c_ulong,
-    pub Size: c_ulong,
-    pub ModBase: u64,
-    pub Flags: c_ulong,
-    pub Value: u64,
-    pub Address: u64,
-    pub Register: c_ulong,
-    pub Scope: c_ulong,
-    pub Tag: c_ulong,
-    pub NameLen: c_ulong,
-    pub MaxNameLen: c_ulong,
-    // note that windows has this as 1, but it basically just means that
-    // the name is inline at the end of the struct. For us, we just bump
-    // the struct size up to MAX_SYM_NAME.
-    pub Name: [c_char; MAX_SYM_NAME],
-}
-
-#[repr(C)]
-#[cfg(target_env = "msvc")]
-pub struct IMAGEHLP_LINE64 {
-    pub SizeOfStruct: u32,
-    pub Key: *const c_void,
-    pub LineNumber: u32,
-    pub Filename: *const c_char,
-    pub Address: u64,
-}
-
-#[repr(C)]
 #[allow(dead_code)] // we only use some variants
 pub enum ADDRESS_MODE {
     AddrMode1616,
@@ -615,169 +562,6 @@ pub enum ADDRESS_MODE {
     AddrModeFlat,
 }
 
-#[repr(C)]
-pub struct ADDRESS64 {
-    pub Offset: u64,
-    pub Segment: u16,
-    pub Mode: ADDRESS_MODE,
-}
-
-#[repr(C)]
-pub struct STACKFRAME64 {
-    pub AddrPC: ADDRESS64,
-    pub AddrReturn: ADDRESS64,
-    pub AddrFrame: ADDRESS64,
-    pub AddrStack: ADDRESS64,
-    pub AddrBStore: ADDRESS64,
-    pub FuncTableEntry: *mut c_void,
-    pub Params: [u64; 4],
-    pub Far: BOOL,
-    pub Virtual: BOOL,
-    pub Reserved: [u64; 3],
-    pub KdHelp: KDHELP64,
-}
-
-#[repr(C)]
-pub struct KDHELP64 {
-    pub Thread: u64,
-    pub ThCallbackStack: DWORD,
-    pub ThCallbackBStore: DWORD,
-    pub NextCallback: DWORD,
-    pub FramePointer: DWORD,
-    pub KiCallUserMode: u64,
-    pub KeUserCallbackDispatcher: u64,
-    pub SystemRangeStart: u64,
-    pub KiUserExceptionDispatcher: u64,
-    pub StackBase: u64,
-    pub StackLimit: u64,
-    pub Reserved: [u64; 5],
-}
-
-#[cfg(target_arch = "x86")]
-#[repr(C)]
-pub struct CONTEXT {
-    pub ContextFlags: DWORD,
-    pub Dr0: DWORD,
-    pub Dr1: DWORD,
-    pub Dr2: DWORD,
-    pub Dr3: DWORD,
-    pub Dr6: DWORD,
-    pub Dr7: DWORD,
-    pub FloatSave: FLOATING_SAVE_AREA,
-    pub SegGs: DWORD,
-    pub SegFs: DWORD,
-    pub SegEs: DWORD,
-    pub SegDs: DWORD,
-    pub Edi: DWORD,
-    pub Esi: DWORD,
-    pub Ebx: DWORD,
-    pub Edx: DWORD,
-    pub Ecx: DWORD,
-    pub Eax: DWORD,
-    pub Ebp: DWORD,
-    pub Eip: DWORD,
-    pub SegCs: DWORD,
-    pub EFlags: DWORD,
-    pub Esp: DWORD,
-    pub SegSs: DWORD,
-    pub ExtendedRegisters: [u8; 512],
-}
-
-#[cfg(target_arch = "x86")]
-#[repr(C)]
-pub struct FLOATING_SAVE_AREA {
-    pub ControlWord: DWORD,
-    pub StatusWord: DWORD,
-    pub TagWord: DWORD,
-    pub ErrorOffset: DWORD,
-    pub ErrorSelector: DWORD,
-    pub DataOffset: DWORD,
-    pub DataSelector: DWORD,
-    pub RegisterArea: [u8; 80],
-    pub Cr0NpxState: DWORD,
-}
-
-#[cfg(target_arch = "x86_64")]
-#[repr(C)]
-pub struct CONTEXT {
-    _align_hack: [u64x2; 0], // FIXME align on 16-byte
-    pub P1Home: DWORDLONG,
-    pub P2Home: DWORDLONG,
-    pub P3Home: DWORDLONG,
-    pub P4Home: DWORDLONG,
-    pub P5Home: DWORDLONG,
-    pub P6Home: DWORDLONG,
-
-    pub ContextFlags: DWORD,
-    pub MxCsr: DWORD,
-
-    pub SegCs: WORD,
-    pub SegDs: WORD,
-    pub SegEs: WORD,
-    pub SegFs: WORD,
-    pub SegGs: WORD,
-    pub SegSs: WORD,
-    pub EFlags: DWORD,
-
-    pub Dr0: DWORDLONG,
-    pub Dr1: DWORDLONG,
-    pub Dr2: DWORDLONG,
-    pub Dr3: DWORDLONG,
-    pub Dr6: DWORDLONG,
-    pub Dr7: DWORDLONG,
-
-    pub Rax: DWORDLONG,
-    pub Rcx: DWORDLONG,
-    pub Rdx: DWORDLONG,
-    pub Rbx: DWORDLONG,
-    pub Rsp: DWORDLONG,
-    pub Rbp: DWORDLONG,
-    pub Rsi: DWORDLONG,
-    pub Rdi: DWORDLONG,
-    pub R8:  DWORDLONG,
-    pub R9:  DWORDLONG,
-    pub R10: DWORDLONG,
-    pub R11: DWORDLONG,
-    pub R12: DWORDLONG,
-    pub R13: DWORDLONG,
-    pub R14: DWORDLONG,
-    pub R15: DWORDLONG,
-
-    pub Rip: DWORDLONG,
-
-    pub FltSave: FLOATING_SAVE_AREA,
-
-    pub VectorRegister: [M128A; 26],
-    pub VectorControl: DWORDLONG,
-
-    pub DebugControl: DWORDLONG,
-    pub LastBranchToRip: DWORDLONG,
-    pub LastBranchFromRip: DWORDLONG,
-    pub LastExceptionToRip: DWORDLONG,
-    pub LastExceptionFromRip: DWORDLONG,
-}
-
-#[cfg(target_arch = "x86_64")]
-#[repr(C)]
-pub struct M128A {
-    _align_hack: [u64x2; 0], // FIXME align on 16-byte
-    pub Low:  c_ulonglong,
-    pub High: c_longlong
-}
-
-#[cfg(target_arch = "x86_64")]
-#[repr(C)]
-pub struct FLOATING_SAVE_AREA {
-    _align_hack: [u64x2; 0], // FIXME align on 16-byte
-    _Dummy: [u8; 512] // FIXME: Fill this out
-}
-
-// FIXME(#43348): This structure is used for backtrace only, and a fake
-// definition is provided here only to allow rustdoc to pass type-check. This
-// will not appear in the final documentation. This should be also defined for
-// other architectures supported by Windows such as ARM, and for historical
-// interest, maybe MIPS and PowerPC as well.
-#[cfg(all(dox, not(any(target_arch = "x86_64", target_arch = "x86"))))]
 pub enum CONTEXT {}
 
 #[repr(C)]
@@ -880,6 +664,22 @@ extern "system" {
                                dwProcessId: DWORD,
                                lpProtocolInfo: LPWSAPROTOCOL_INFO)
                                -> c_int;
+    pub fn WSASend(s: SOCKET,
+                   lpBuffers: LPWSABUF,
+                   dwBufferCount: DWORD,
+                   lpNumberOfBytesSent: LPDWORD,
+                   dwFlags: DWORD,
+                   lpOverlapped: LPWSAOVERLAPPED,
+                   lpCompletionRoutine: LPWSAOVERLAPPED_COMPLETION_ROUTINE)
+                   -> c_int;
+    pub fn WSARecv(s: SOCKET,
+                   lpBuffers: LPWSABUF,
+                   dwBufferCount: DWORD,
+                   lpNumberOfBytesRecvd: LPDWORD,
+                   lpFlags: LPDWORD,
+                   lpOverlapped: LPWSAOVERLAPPED,
+                   lpCompletionRoutine: LPWSAOVERLAPPED_COMPLETION_ROUTINE)
+                   -> c_int;
     pub fn GetCurrentProcessId() -> DWORD;
     pub fn WSASocketW(af: c_int,
                       kind: c_int,
@@ -917,9 +717,6 @@ extern "system" {
 
     pub fn SetLastError(dwErrCode: DWORD);
     pub fn GetCommandLineW() -> *mut LPCWSTR;
-    pub fn LocalFree(ptr: *mut c_void);
-    pub fn CommandLineToArgvW(lpCmdLine: *mut LPCWSTR,
-                              pNumArgs: *mut c_int) -> *mut *mut u16;
     pub fn GetTempPathW(nBufferLength: DWORD,
                         lpBuffer: LPCWSTR) -> DWORD;
     pub fn OpenProcessToken(ProcessHandle: HANDLE,
@@ -1089,7 +886,6 @@ extern "system" {
     pub fn FindNextFileW(findFile: HANDLE, findFileData: LPWIN32_FIND_DATAW)
                          -> BOOL;
     pub fn FindClose(findFile: HANDLE) -> BOOL;
-    pub fn RtlCaptureContext(ctx: *mut CONTEXT);
     pub fn getsockopt(s: SOCKET,
                       level: c_int,
                       optname: c_int,
@@ -1120,20 +916,9 @@ extern "system" {
                        res: *mut *mut ADDRINFOA) -> c_int;
     pub fn freeaddrinfo(res: *mut ADDRINFOA);
 
-    pub fn LoadLibraryW(name: LPCWSTR) -> HMODULE;
-    pub fn FreeLibrary(handle: HMODULE) -> BOOL;
     pub fn GetProcAddress(handle: HMODULE,
                           name: LPCSTR) -> *mut c_void;
     pub fn GetModuleHandleW(lpModuleName: LPCWSTR) -> HMODULE;
-    pub fn CryptAcquireContextA(phProv: *mut HCRYPTPROV,
-                                pszContainer: LPCSTR,
-                                pszProvider: LPCSTR,
-                                dwProvType: DWORD,
-                                dwFlags: DWORD) -> BOOL;
-    pub fn CryptGenRandom(hProv: HCRYPTPROV,
-                          dwLen: DWORD,
-                          pbBuffer: *mut BYTE) -> BOOL;
-    pub fn CryptReleaseContext(hProv: HCRYPTPROV, dwFlags: DWORD) -> BOOL;
 
     pub fn GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: LPFILETIME);
 
@@ -1164,6 +949,14 @@ extern "system" {
                   writefds: *mut fd_set,
                   exceptfds: *mut fd_set,
                   timeout: *const timeval) -> c_int;
+
+    #[link_name = "SystemFunction036"]
+    pub fn RtlGenRandom(RandomBuffer: *mut u8, RandomBufferLength: ULONG) -> BOOLEAN;
+
+    pub fn GetProcessHeap() -> HANDLE;
+    pub fn HeapAlloc(hHeap: HANDLE, dwFlags: DWORD, dwBytes: SIZE_T) -> LPVOID;
+    pub fn HeapReAlloc(hHeap: HANDLE, dwFlags: DWORD, lpMem: LPVOID, dwBytes: SIZE_T) -> LPVOID;
+    pub fn HeapFree(hHeap: HANDLE, dwFlags: DWORD, lpMem: LPVOID) -> BOOL;
 }
 
 // Functions that aren't available on every version of Windows that we support,
@@ -1228,34 +1021,3 @@ compat_fn! {
         panic!("rwlocks not available")
     }
 }
-
-#[cfg(target_env = "gnu")]
-mod gnu {
-    use super::*;
-
-    pub const PROCESS_QUERY_INFORMATION: DWORD = 0x0400;
-
-    pub const CP_ACP: UINT = 0;
-
-    pub const WC_NO_BEST_FIT_CHARS: DWORD = 0x00000400;
-
-    extern "system" {
-        pub fn OpenProcess(dwDesiredAccess: DWORD,
-                           bInheritHandle: BOOL,
-                           dwProcessId: DWORD) -> HANDLE;
-    }
-
-    compat_fn! {
-        kernel32:
-
-        pub fn QueryFullProcessImageNameW(_hProcess: HANDLE,
-                                          _dwFlags: DWORD,
-                                          _lpExeName: LPWSTR,
-                                          _lpdwSize: LPDWORD) -> BOOL {
-            SetLastError(ERROR_CALL_NOT_IMPLEMENTED as DWORD); 0
-        }
-    }
-}
-
-#[cfg(target_env = "gnu")]
-pub use self::gnu::*;

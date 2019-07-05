@@ -1,28 +1,17 @@
-// Copyright 2012-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! This module provides constants which are specific to the implementation
-//! of the `f64` floating point data type. Mathematically significant
-//! numbers are provided in the `consts` sub-module.
+//! of the `f64` floating point data type.
 //!
-//! *[See also the `f64` primitive type](../primitive.f64.html).*
+//! *[See also the `f64` primitive type](../../std/primitive.f64.html).*
+//!
+//! Mathematically significant numbers are provided in the `consts` sub-module.
 
 #![stable(feature = "rust1", since = "1.0.0")]
 #![allow(missing_docs)]
 
 #[cfg(not(test))]
-use core::num;
+use crate::intrinsics;
 #[cfg(not(test))]
-use intrinsics;
-#[cfg(not(test))]
-use num::FpCategory;
+use crate::sys::cmath;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::f64::{RADIX, MANTISSA_DIGITS, DIGITS, EPSILON};
@@ -35,163 +24,21 @@ pub use core::f64::{MIN, MIN_POSITIVE, MAX};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::f64::consts;
 
-#[allow(dead_code)]
-mod cmath {
-    use libc::{c_double, c_int};
-
-    #[link_name = "m"]
-    extern {
-        pub fn acos(n: c_double) -> c_double;
-        pub fn asin(n: c_double) -> c_double;
-        pub fn atan(n: c_double) -> c_double;
-        pub fn atan2(a: c_double, b: c_double) -> c_double;
-        pub fn cbrt(n: c_double) -> c_double;
-        pub fn cosh(n: c_double) -> c_double;
-        pub fn erf(n: c_double) -> c_double;
-        pub fn erfc(n: c_double) -> c_double;
-        pub fn expm1(n: c_double) -> c_double;
-        pub fn fdim(a: c_double, b: c_double) -> c_double;
-        pub fn fmod(a: c_double, b: c_double) -> c_double;
-        pub fn frexp(n: c_double, value: &mut c_int) -> c_double;
-        pub fn ilogb(n: c_double) -> c_int;
-        pub fn ldexp(x: c_double, n: c_int) -> c_double;
-        pub fn logb(n: c_double) -> c_double;
-        pub fn log1p(n: c_double) -> c_double;
-        pub fn nextafter(x: c_double, y: c_double) -> c_double;
-        pub fn modf(n: c_double, iptr: &mut c_double) -> c_double;
-        pub fn sinh(n: c_double) -> c_double;
-        pub fn tan(n: c_double) -> c_double;
-        pub fn tanh(n: c_double) -> c_double;
-        pub fn tgamma(n: c_double) -> c_double;
-
-        // These are commonly only available for doubles
-
-        pub fn j0(n: c_double) -> c_double;
-        pub fn j1(n: c_double) -> c_double;
-        pub fn jn(i: c_int, n: c_double) -> c_double;
-
-        pub fn y0(n: c_double) -> c_double;
-        pub fn y1(n: c_double) -> c_double;
-        pub fn yn(i: c_int, n: c_double) -> c_double;
-
-        #[cfg_attr(all(windows, target_env = "msvc"), link_name = "__lgamma_r")]
-        pub fn lgamma_r(n: c_double, sign: &mut c_int) -> c_double;
-
-        #[cfg_attr(all(windows, target_env = "msvc"), link_name = "_hypot")]
-        pub fn hypot(x: c_double, y: c_double) -> c_double;
-    }
-}
-
 #[cfg(not(test))]
-#[lang = "f64"]
+#[lang = "f64_runtime"]
 impl f64 {
-    /// Returns `true` if this value is `NaN` and false otherwise.
-    ///
-    /// ```
-    /// use std::f64;
-    ///
-    /// let nan = f64::NAN;
-    /// let f = 7.0_f64;
-    ///
-    /// assert!(nan.is_nan());
-    /// assert!(!f.is_nan());
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn is_nan(self) -> bool { num::Float::is_nan(self) }
-
-    /// Returns `true` if this value is positive infinity or negative infinity and
-    /// false otherwise.
-    ///
-    /// ```
-    /// use std::f64;
-    ///
-    /// let f = 7.0f64;
-    /// let inf = f64::INFINITY;
-    /// let neg_inf = f64::NEG_INFINITY;
-    /// let nan = f64::NAN;
-    ///
-    /// assert!(!f.is_infinite());
-    /// assert!(!nan.is_infinite());
-    ///
-    /// assert!(inf.is_infinite());
-    /// assert!(neg_inf.is_infinite());
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn is_infinite(self) -> bool { num::Float::is_infinite(self) }
-
-    /// Returns `true` if this number is neither infinite nor `NaN`.
-    ///
-    /// ```
-    /// use std::f64;
-    ///
-    /// let f = 7.0f64;
-    /// let inf: f64 = f64::INFINITY;
-    /// let neg_inf: f64 = f64::NEG_INFINITY;
-    /// let nan: f64 = f64::NAN;
-    ///
-    /// assert!(f.is_finite());
-    ///
-    /// assert!(!nan.is_finite());
-    /// assert!(!inf.is_finite());
-    /// assert!(!neg_inf.is_finite());
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn is_finite(self) -> bool { num::Float::is_finite(self) }
-
-    /// Returns `true` if the number is neither zero, infinite,
-    /// [subnormal][subnormal], or `NaN`.
-    ///
-    /// ```
-    /// use std::f64;
-    ///
-    /// let min = f64::MIN_POSITIVE; // 2.2250738585072014e-308f64
-    /// let max = f64::MAX;
-    /// let lower_than_min = 1.0e-308_f64;
-    /// let zero = 0.0f64;
-    ///
-    /// assert!(min.is_normal());
-    /// assert!(max.is_normal());
-    ///
-    /// assert!(!zero.is_normal());
-    /// assert!(!f64::NAN.is_normal());
-    /// assert!(!f64::INFINITY.is_normal());
-    /// // Values between `0` and `min` are Subnormal.
-    /// assert!(!lower_than_min.is_normal());
-    /// ```
-    /// [subnormal]: https://en.wikipedia.org/wiki/Denormal_number
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn is_normal(self) -> bool { num::Float::is_normal(self) }
-
-    /// Returns the floating point category of the number. If only one property
-    /// is going to be tested, it is generally faster to use the specific
-    /// predicate instead.
-    ///
-    /// ```
-    /// use std::num::FpCategory;
-    /// use std::f64;
-    ///
-    /// let num = 12.4_f64;
-    /// let inf = f64::INFINITY;
-    ///
-    /// assert_eq!(num.classify(), FpCategory::Normal);
-    /// assert_eq!(inf.classify(), FpCategory::Infinite);
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn classify(self) -> FpCategory { num::Float::classify(self) }
-
     /// Returns the largest integer less than or equal to a number.
     ///
+    /// # Examples
+    ///
     /// ```
-    /// let f = 3.99_f64;
+    /// let f = 3.7_f64;
     /// let g = 3.0_f64;
+    /// let h = -3.7_f64;
     ///
     /// assert_eq!(f.floor(), 3.0);
     /// assert_eq!(g.floor(), 3.0);
+    /// assert_eq!(h.floor(), -4.0);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -200,6 +47,8 @@ impl f64 {
     }
 
     /// Returns the smallest integer greater than or equal to a number.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let f = 3.01_f64;
@@ -217,6 +66,8 @@ impl f64 {
     /// Returns the nearest integer to a number. Round half-way cases away from
     /// `0.0`.
     ///
+    /// # Examples
+    ///
     /// ```
     /// let f = 3.3_f64;
     /// let g = -3.3_f64;
@@ -232,12 +83,16 @@ impl f64 {
 
     /// Returns the integer part of a number.
     ///
+    /// # Examples
+    ///
     /// ```
-    /// let f = 3.3_f64;
-    /// let g = -3.7_f64;
+    /// let f = 3.7_f64;
+    /// let g = 3.0_f64;
+    /// let h = -3.7_f64;
     ///
     /// assert_eq!(f.trunc(), 3.0);
-    /// assert_eq!(g.trunc(), -3.0);
+    /// assert_eq!(g.trunc(), 3.0);
+    /// assert_eq!(h.trunc(), -3.0);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -246,6 +101,8 @@ impl f64 {
     }
 
     /// Returns the fractional part of a number.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let x = 3.5_f64;
@@ -263,6 +120,8 @@ impl f64 {
     /// Computes the absolute value of `self`. Returns `NAN` if the
     /// number is `NAN`.
     ///
+    /// # Examples
+    ///
     /// ```
     /// use std::f64;
     ///
@@ -279,13 +138,17 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn abs(self) -> f64 { num::Float::abs(self) }
+    pub fn abs(self) -> f64 {
+        unsafe { intrinsics::fabsf64(self) }
+    }
 
     /// Returns a number that represents the sign of `self`.
     ///
     /// - `1.0` if the number is positive, `+0.0` or `INFINITY`
     /// - `-1.0` if the number is negative, `-0.0` or `NEG_INFINITY`
     /// - `NAN` if the number is `NAN`
+    ///
+    /// # Examples
     ///
     /// ```
     /// use std::f64;
@@ -299,49 +162,49 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn signum(self) -> f64 { num::Float::signum(self) }
+    pub fn signum(self) -> f64 {
+        if self.is_nan() {
+            NAN
+        } else {
+            1.0_f64.copysign(self)
+        }
+    }
 
-    /// Returns `true` if and only if `self` has a positive sign, including `+0.0`, `NaN`s with
-    /// positive sign bit and positive infinity.
+    /// Returns a number composed of the magnitude of `self` and the sign of
+    /// `sign`.
+    ///
+    /// Equal to `self` if the sign of `self` and `sign` are the same, otherwise
+    /// equal to `-self`. If `self` is a `NAN`, then a `NAN` with the sign of
+    /// `sign` is returned.
+    ///
+    /// # Examples
     ///
     /// ```
-    /// let f = 7.0_f64;
-    /// let g = -7.0_f64;
+    /// use std::f64;
     ///
-    /// assert!(f.is_sign_positive());
-    /// assert!(!g.is_sign_positive());
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn is_sign_positive(self) -> bool { num::Float::is_sign_positive(self) }
-
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_deprecated(since = "1.0.0", reason = "renamed to is_sign_positive")]
-    #[inline]
-    pub fn is_positive(self) -> bool { num::Float::is_sign_positive(self) }
-
-    /// Returns `true` if and only if `self` has a negative sign, including `-0.0`, `NaN`s with
-    /// negative sign bit and negative infinity.
+    /// let f = 3.5_f64;
     ///
-    /// ```
-    /// let f = 7.0_f64;
-    /// let g = -7.0_f64;
+    /// assert_eq!(f.copysign(0.42), 3.5_f64);
+    /// assert_eq!(f.copysign(-0.42), -3.5_f64);
+    /// assert_eq!((-f).copysign(0.42), 3.5_f64);
+    /// assert_eq!((-f).copysign(-0.42), -3.5_f64);
     ///
-    /// assert!(!f.is_sign_negative());
-    /// assert!(g.is_sign_negative());
+    /// assert!(f64::NAN.copysign(1.0).is_nan());
     /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn is_sign_negative(self) -> bool { num::Float::is_sign_negative(self) }
-
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_deprecated(since = "1.0.0", reason = "renamed to is_sign_negative")]
-    #[inline]
-    pub fn is_negative(self) -> bool { num::Float::is_sign_negative(self) }
+    #[must_use]
+    #[stable(feature = "copysign", since = "1.35.0")]
+    pub fn copysign(self, sign: f64) -> f64 {
+        unsafe { intrinsics::copysignf64(self, sign) }
+    }
 
     /// Fused multiply-add. Computes `(self * a) + b` with only one rounding
-    /// error. This produces a more accurate result with better performance than
-    /// a separate multiplication operation followed by an add.
+    /// error, yielding a more accurate result than an unfused multiply-add.
+    ///
+    /// Using `mul_add` can be more performant than an unfused multiply-add if
+    /// the target architecture has a dedicated `fma` CPU instruction.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let m = 10.0_f64;
@@ -359,21 +222,74 @@ impl f64 {
         unsafe { intrinsics::fmaf64(self, a, b) }
     }
 
-    /// Takes the reciprocal (inverse) of a number, `1/x`.
+    /// Calculates Euclidean division, the matching method for `rem_euclid`.
+    ///
+    /// This computes the integer `n` such that
+    /// `self = n * rhs + self.rem_euclid(rhs)`.
+    /// In other words, the result is `self / rhs` rounded to the integer `n`
+    /// such that `self >= n * rhs`.
+    ///
+    /// # Examples
     ///
     /// ```
-    /// let x = 2.0_f64;
-    /// let abs_difference = (x.recip() - (1.0/x)).abs();
-    ///
-    /// assert!(abs_difference < 1e-10);
+    /// #![feature(euclidean_division)]
+    /// let a: f64 = 7.0;
+    /// let b = 4.0;
+    /// assert_eq!(a.div_euclid(b), 1.0); // 7.0 > 4.0 * 1.0
+    /// assert_eq!((-a).div_euclid(b), -2.0); // -7.0 >= 4.0 * -2.0
+    /// assert_eq!(a.div_euclid(-b), -1.0); // 7.0 >= -4.0 * -1.0
+    /// assert_eq!((-a).div_euclid(-b), 2.0); // -7.0 >= -4.0 * 2.0
     /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn recip(self) -> f64 { num::Float::recip(self) }
+    #[unstable(feature = "euclidean_division", issue = "49048")]
+    pub fn div_euclid(self, rhs: f64) -> f64 {
+        let q = (self / rhs).trunc();
+        if self % rhs < 0.0 {
+            return if rhs > 0.0 { q - 1.0 } else { q + 1.0 }
+        }
+        q
+    }
+
+    /// Calculates the least nonnegative remainder of `self (mod rhs)`.
+    ///
+    /// In particular, the return value `r` satisfies `0.0 <= r < rhs.abs()` in
+    /// most cases. However, due to a floating point round-off error it can
+    /// result in `r == rhs.abs()`, violating the mathematical definition, if
+    /// `self` is much smaller than `rhs.abs()` in magnitude and `self < 0.0`.
+    /// This result is not an element of the function's codomain, but it is the
+    /// closest floating point number in the real numbers and thus fulfills the
+    /// property `self == self.div_euclid(rhs) * rhs + self.rem_euclid(rhs)`
+    /// approximatively.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(euclidean_division)]
+    /// let a: f64 = 7.0;
+    /// let b = 4.0;
+    /// assert_eq!(a.rem_euclid(b), 3.0);
+    /// assert_eq!((-a).rem_euclid(b), 1.0);
+    /// assert_eq!(a.rem_euclid(-b), 3.0);
+    /// assert_eq!((-a).rem_euclid(-b), 1.0);
+    /// // limitation due to round-off error
+    /// assert!((-std::f64::EPSILON).rem_euclid(3.0) != 0.0);
+    /// ```
+    #[inline]
+    #[unstable(feature = "euclidean_division", issue = "49048")]
+    pub fn rem_euclid(self, rhs: f64) -> f64 {
+        let r = self % rhs;
+        if r < 0.0 {
+            r + rhs.abs()
+        } else {
+            r
+        }
+    }
 
     /// Raises a number to an integer power.
     ///
     /// Using this function is generally faster than using `powf`
+    ///
+    /// # Examples
     ///
     /// ```
     /// let x = 2.0_f64;
@@ -383,9 +299,13 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn powi(self, n: i32) -> f64 { num::Float::powi(self, n) }
+    pub fn powi(self, n: i32) -> f64 {
+        unsafe { intrinsics::powif64(self, n) }
+    }
 
     /// Raises a number to a floating point power.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let x = 2.0_f64;
@@ -402,6 +322,8 @@ impl f64 {
     /// Takes the square root of a number.
     ///
     /// Returns NaN if `self` is a negative number.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let positive = 4.0_f64;
@@ -424,6 +346,8 @@ impl f64 {
 
     /// Returns `e^(self)`, (the exponential function).
     ///
+    /// # Examples
+    ///
     /// ```
     /// let one = 1.0_f64;
     /// // e^1
@@ -442,6 +366,8 @@ impl f64 {
 
     /// Returns `2^(self)`.
     ///
+    /// # Examples
+    ///
     /// ```
     /// let f = 2.0_f64;
     ///
@@ -457,6 +383,8 @@ impl f64 {
     }
 
     /// Returns the natural logarithm of the number.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let one = 1.0_f64;
@@ -476,24 +404,27 @@ impl f64 {
 
     /// Returns the logarithm of the number with respect to an arbitrary base.
     ///
+    /// The result may not be correctly rounded owing to implementation details;
+    /// `self.log2()` can produce more accurate results for base 2, and
+    /// `self.log10()` can produce more accurate results for base 10.
+    ///
+    /// # Examples
+    ///
     /// ```
-    /// let ten = 10.0_f64;
-    /// let two = 2.0_f64;
+    /// let five = 5.0_f64;
     ///
-    /// // log10(10) - 1 == 0
-    /// let abs_difference_10 = (ten.log(10.0) - 1.0).abs();
+    /// // log5(5) - 1 == 0
+    /// let abs_difference = (five.log(5.0) - 1.0).abs();
     ///
-    /// // log2(2) - 1 == 0
-    /// let abs_difference_2 = (two.log(2.0) - 1.0).abs();
-    ///
-    /// assert!(abs_difference_10 < 1e-10);
-    /// assert!(abs_difference_2 < 1e-10);
+    /// assert!(abs_difference < 1e-10);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn log(self, base: f64) -> f64 { self.ln() / base.ln() }
 
     /// Returns the base 2 logarithm of the number.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let two = 2.0_f64;
@@ -508,13 +439,15 @@ impl f64 {
     pub fn log2(self) -> f64 {
         self.log_wrapper(|n| {
             #[cfg(target_os = "android")]
-            return ::sys::android::log2f64(n);
+            return crate::sys::android::log2f64(n);
             #[cfg(not(target_os = "android"))]
             return unsafe { intrinsics::log2f64(n) };
         })
     }
 
     /// Returns the base 10 logarithm of the number.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let ten = 10.0_f64;
@@ -530,72 +463,12 @@ impl f64 {
         self.log_wrapper(|n| { unsafe { intrinsics::log10f64(n) } })
     }
 
-    /// Converts radians to degrees.
-    ///
-    /// ```
-    /// use std::f64::consts;
-    ///
-    /// let angle = consts::PI;
-    ///
-    /// let abs_difference = (angle.to_degrees() - 180.0).abs();
-    ///
-    /// assert!(abs_difference < 1e-10);
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn to_degrees(self) -> f64 { num::Float::to_degrees(self) }
-
-    /// Converts degrees to radians.
-    ///
-    /// ```
-    /// use std::f64::consts;
-    ///
-    /// let angle = 180.0_f64;
-    ///
-    /// let abs_difference = (angle.to_radians() - consts::PI).abs();
-    ///
-    /// assert!(abs_difference < 1e-10);
-    /// ```
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn to_radians(self) -> f64 { num::Float::to_radians(self) }
-
-    /// Returns the maximum of the two numbers.
-    ///
-    /// ```
-    /// let x = 1.0_f64;
-    /// let y = 2.0_f64;
-    ///
-    /// assert_eq!(x.max(y), y);
-    /// ```
-    ///
-    /// If one of the arguments is NaN, then the other argument is returned.
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn max(self, other: f64) -> f64 {
-        num::Float::max(self, other)
-    }
-
-    /// Returns the minimum of the two numbers.
-    ///
-    /// ```
-    /// let x = 1.0_f64;
-    /// let y = 2.0_f64;
-    ///
-    /// assert_eq!(x.min(y), x);
-    /// ```
-    ///
-    /// If one of the arguments is NaN, then the other argument is returned.
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[inline]
-    pub fn min(self, other: f64) -> f64 {
-        num::Float::min(self, other)
-    }
-
     /// The positive difference of two numbers.
     ///
     /// * If `self <= other`: `0:0`
     /// * Else: `self - other`
+    ///
+    /// # Examples
     ///
     /// ```
     /// let x = 3.0_f64;
@@ -611,7 +484,8 @@ impl f64 {
     #[inline]
     #[rustc_deprecated(since = "1.10.0",
                        reason = "you probably meant `(self - other).abs()`: \
-                                 this operation is `(self - other).max(0.0)` (also \
+                                 this operation is `(self - other).max(0.0)` \
+                                 except that `abs_sub` also propagates NaNs (also \
                                  known as `fdim` in C). If you truly need the positive \
                                  difference, consider using that expression or the C function \
                                  `fdim`, depending on how you wish to handle NaN (please consider \
@@ -621,6 +495,8 @@ impl f64 {
      }
 
     /// Takes the cubic root of a number.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let x = 8.0_f64;
@@ -639,6 +515,8 @@ impl f64 {
     /// Calculates the length of the hypotenuse of a right-angle triangle given
     /// legs of length `x` and `y`.
     ///
+    /// # Examples
+    ///
     /// ```
     /// let x = 2.0_f64;
     /// let y = 3.0_f64;
@@ -655,6 +533,8 @@ impl f64 {
     }
 
     /// Computes the sine of a number (in radians).
+    ///
+    /// # Examples
     ///
     /// ```
     /// use std::f64;
@@ -673,6 +553,8 @@ impl f64 {
 
     /// Computes the cosine of a number (in radians).
     ///
+    /// # Examples
+    ///
     /// ```
     /// use std::f64;
     ///
@@ -689,6 +571,8 @@ impl f64 {
     }
 
     /// Computes the tangent of a number (in radians).
+    ///
+    /// # Examples
     ///
     /// ```
     /// use std::f64;
@@ -707,6 +591,8 @@ impl f64 {
     /// Computes the arcsine of a number. Return value is in radians in
     /// the range [-pi/2, pi/2] or NaN if the number is outside the range
     /// [-1, 1].
+    ///
+    /// # Examples
     ///
     /// ```
     /// use std::f64;
@@ -728,6 +614,8 @@ impl f64 {
     /// the range [0, pi] or NaN if the number is outside the range
     /// [-1, 1].
     ///
+    /// # Examples
+    ///
     /// ```
     /// use std::f64;
     ///
@@ -747,6 +635,8 @@ impl f64 {
     /// Computes the arctangent of a number. Return value is in radians in the
     /// range [-pi/2, pi/2];
     ///
+    /// # Examples
+    ///
     /// ```
     /// let f = 1.0_f64;
     ///
@@ -761,23 +651,26 @@ impl f64 {
         unsafe { cmath::atan(self) }
     }
 
-    /// Computes the four quadrant arctangent of `self` (`y`) and `other` (`x`).
+    /// Computes the four quadrant arctangent of `self` (`y`) and `other` (`x`) in radians.
     ///
     /// * `x = 0`, `y = 0`: `0`
     /// * `x >= 0`: `arctan(y/x)` -> `[-pi/2, pi/2]`
     /// * `y >= 0`: `arctan(y/x) + pi` -> `(pi/2, pi]`
     /// * `y < 0`: `arctan(y/x) - pi` -> `(-pi, -pi/2)`
     ///
+    /// # Examples
+    ///
     /// ```
     /// use std::f64;
     ///
     /// let pi = f64::consts::PI;
-    /// // All angles from horizontal right (+x)
-    /// // 45 deg counter-clockwise
+    /// // Positive angles measured counter-clockwise
+    /// // from positive x axis
+    /// // -pi/4 radians (45 deg clockwise)
     /// let x1 = 3.0_f64;
     /// let y1 = -3.0_f64;
     ///
-    /// // 135 deg clockwise
+    /// // 3pi/4 radians (135 deg counter-clockwise)
     /// let x2 = -3.0_f64;
     /// let y2 = 3.0_f64;
     ///
@@ -795,6 +688,8 @@ impl f64 {
 
     /// Simultaneously computes the sine and cosine of the number, `x`. Returns
     /// `(sin(x), cos(x))`.
+    ///
+    /// # Examples
     ///
     /// ```
     /// use std::f64;
@@ -817,6 +712,8 @@ impl f64 {
     /// Returns `e^(self) - 1` in a way that is accurate even if the
     /// number is close to zero.
     ///
+    /// # Examples
+    ///
     /// ```
     /// let x = 7.0_f64;
     ///
@@ -833,6 +730,8 @@ impl f64 {
 
     /// Returns `ln(1+n)` (natural logarithm) more accurately than if
     /// the operations were performed separately.
+    ///
+    /// # Examples
     ///
     /// ```
     /// use std::f64;
@@ -851,6 +750,8 @@ impl f64 {
     }
 
     /// Hyperbolic sine function.
+    ///
+    /// # Examples
     ///
     /// ```
     /// use std::f64;
@@ -873,6 +774,8 @@ impl f64 {
 
     /// Hyperbolic cosine function.
     ///
+    /// # Examples
+    ///
     /// ```
     /// use std::f64;
     ///
@@ -893,6 +796,8 @@ impl f64 {
     }
 
     /// Hyperbolic tangent function.
+    ///
+    /// # Examples
     ///
     /// ```
     /// use std::f64;
@@ -915,6 +820,8 @@ impl f64 {
 
     /// Inverse hyperbolic sine function.
     ///
+    /// # Examples
+    ///
     /// ```
     /// let x = 1.0_f64;
     /// let f = x.sinh().asinh();
@@ -935,6 +842,8 @@ impl f64 {
 
     /// Inverse hyperbolic cosine function.
     ///
+    /// # Examples
+    ///
     /// ```
     /// let x = 1.0_f64;
     /// let f = x.cosh().acosh();
@@ -954,6 +863,8 @@ impl f64 {
 
     /// Inverse hyperbolic tangent function.
     ///
+    /// # Examples
+    ///
     /// ```
     /// use std::f64;
     ///
@@ -970,8 +881,39 @@ impl f64 {
         0.5 * ((2.0 * self) / (1.0 - self)).ln_1p()
     }
 
+    /// Restrict a value to a certain interval unless it is NaN.
+    ///
+    /// Returns `max` if `self` is greater than `max`, and `min` if `self` is
+    /// less than `min`. Otherwise this returns `self`.
+    ///
+    /// Not that this function returns NaN if the initial value was NaN as
+    /// well.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `min > max`, `min` is NaN, or `max` is NaN.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(clamp)]
+    /// assert!((-3.0f64).clamp(-2.0, 1.0) == -2.0);
+    /// assert!((0.0f64).clamp(-2.0, 1.0) == 0.0);
+    /// assert!((2.0f64).clamp(-2.0, 1.0) == 1.0);
+    /// assert!((std::f64::NAN).clamp(-2.0, 1.0).is_nan());
+    /// ```
+    #[unstable(feature = "clamp", issue = "44095")]
+    #[inline]
+    pub fn clamp(self, min: f64, max: f64) -> f64 {
+        assert!(min <= max);
+        let mut x = self;
+        if x < min { x = min; }
+        if x > max { x = max; }
+        x
+    }
+
     // Solaris/Illumos requires a wrapper around log, log2, and log10 functions
-    // because of their non-standard behavior (e.g. log(-n) returns -Inf instead
+    // because of their non-standard behavior (e.g., log(-n) returns -Inf instead
     // of expected NaN).
     fn log_wrapper<F: Fn(f64) -> f64>(self, log_fn: F) -> f64 {
         if !cfg!(target_os = "solaris") {
@@ -994,77 +936,14 @@ impl f64 {
             }
         }
     }
-
-    /// Raw transmutation to `u64`.
-    ///
-    /// Converts the `f64` into its raw memory representation,
-    /// similar to the `transmute` function.
-    ///
-    /// Note that this function is distinct from casting.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// assert!((1f64).to_bits() != 1f64 as u64); // to_bits() is not casting!
-    /// assert_eq!((12.5f64).to_bits(), 0x4029000000000000);
-    ///
-    /// ```
-    #[stable(feature = "float_bits_conv", since = "1.20.0")]
-    #[inline]
-    pub fn to_bits(self) -> u64 {
-        unsafe { ::mem::transmute(self) }
-    }
-
-    /// Raw transmutation from `u64`.
-    ///
-    /// Converts the given `u64` containing the float's raw memory
-    /// representation into the `f64` type, similar to the
-    /// `transmute` function.
-    ///
-    /// There is only one difference to a bare `transmute`:
-    /// Due to the implications onto Rust's safety promises being
-    /// uncertain, if the representation of a signaling NaN "sNaN" float
-    /// is passed to the function, the implementation is allowed to
-    /// return a quiet NaN instead.
-    ///
-    /// Note that this function is distinct from casting.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::f64;
-    /// let v = f64::from_bits(0x4029000000000000);
-    /// let difference = (v - 12.5).abs();
-    /// assert!(difference <= 1e-5);
-    /// // Example for a signaling NaN value:
-    /// let snan = 0x7FF0000000000001;
-    /// assert_ne!(f64::from_bits(snan).to_bits(), snan);
-    /// ```
-    #[stable(feature = "float_bits_conv", since = "1.20.0")]
-    #[inline]
-    pub fn from_bits(mut v: u64) -> Self {
-        const EXP_MASK: u64   = 0x7FF0000000000000;
-        const FRACT_MASK: u64 = 0x000FFFFFFFFFFFFF;
-        if v & EXP_MASK == EXP_MASK && v & FRACT_MASK != 0 {
-            // While IEEE 754-2008 specifies encodings for quiet NaNs
-            // and signaling ones, certain MIPS and PA-RISC
-            // CPUs treat signaling NaNs differently.
-            // Therefore to be safe, we pass a known quiet NaN
-            // if v is any kind of NaN.
-            // The check above only assumes IEEE 754-1985 to be
-            // valid.
-            v = unsafe { ::mem::transmute(NAN) };
-        }
-        unsafe { ::mem::transmute(v) }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use f64;
-    use f64::*;
-    use num::*;
-    use num::FpCategory as Fp;
+    use crate::f64;
+    use crate::f64::*;
+    use crate::num::*;
+    use crate::num::FpCategory as Fp;
 
     #[test]
     fn test_num_f64() {
@@ -1641,5 +1520,33 @@ mod tests {
         assert_approx_eq!(f64::from_bits(0x4029000000000000), 12.5);
         assert_approx_eq!(f64::from_bits(0x4094e40000000000), 1337.0);
         assert_approx_eq!(f64::from_bits(0xc02c800000000000), -14.25);
+
+        // Check that NaNs roundtrip their bits regardless of signalingness
+        // 0xA is 0b1010; 0x5 is 0b0101 -- so these two together clobbers all the mantissa bits
+        let masked_nan1 = f64::NAN.to_bits() ^ 0x000A_AAAA_AAAA_AAAA;
+        let masked_nan2 = f64::NAN.to_bits() ^ 0x0005_5555_5555_5555;
+        assert!(f64::from_bits(masked_nan1).is_nan());
+        assert!(f64::from_bits(masked_nan2).is_nan());
+
+        assert_eq!(f64::from_bits(masked_nan1).to_bits(), masked_nan1);
+        assert_eq!(f64::from_bits(masked_nan2).to_bits(), masked_nan2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_clamp_min_greater_than_max() {
+        1.0f64.clamp(3.0, 1.0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_clamp_min_is_nan() {
+        1.0f64.clamp(NAN, 1.0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_clamp_max_is_nan() {
+        1.0f64.clamp(3.0, NAN);
     }
 }

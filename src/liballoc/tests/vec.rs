@@ -1,24 +1,14 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use std::ascii::AsciiExt;
 use std::borrow::Cow;
 use std::mem::size_of;
-use std::panic;
+use std::{usize, isize};
 use std::vec::{Drain, IntoIter};
+use std::collections::CollectionAllocErr::*;
 
 struct DropCounter<'a> {
     count: &'a mut u32,
 }
 
-impl<'a> Drop for DropCounter<'a> {
+impl Drop for DropCounter<'_> {
     fn drop(&mut self) {
         *self.count += 1;
     }
@@ -77,6 +67,11 @@ fn test_reserve() {
 
     v.reserve(16);
     assert!(v.capacity() >= 33)
+}
+
+#[test]
+fn test_zst_capacity() {
+    assert_eq!(Vec::<()>::new().capacity(), usize::max_value());
 }
 
 #[test]
@@ -537,27 +532,27 @@ fn test_drain_range() {
 #[test]
 fn test_drain_inclusive_range() {
     let mut v = vec!['a', 'b', 'c', 'd', 'e'];
-    for _ in v.drain(1...3) {
+    for _ in v.drain(1..=3) {
     }
     assert_eq!(v, &['a', 'e']);
 
-    let mut v: Vec<_> = (0...5).map(|x| x.to_string()).collect();
-    for _ in v.drain(1...5) {
+    let mut v: Vec<_> = (0..=5).map(|x| x.to_string()).collect();
+    for _ in v.drain(1..=5) {
     }
     assert_eq!(v, &["0".to_string()]);
 
-    let mut v: Vec<String> = (0...5).map(|x| x.to_string()).collect();
-    for _ in v.drain(0...5) {
+    let mut v: Vec<String> = (0..=5).map(|x| x.to_string()).collect();
+    for _ in v.drain(0..=5) {
     }
     assert_eq!(v, Vec::<String>::new());
 
-    let mut v: Vec<_> = (0...5).map(|x| x.to_string()).collect();
-    for _ in v.drain(0...3) {
+    let mut v: Vec<_> = (0..=5).map(|x| x.to_string()).collect();
+    for _ in v.drain(0..=3) {
     }
     assert_eq!(v, &["4".to_string(), "5".to_string()]);
 
-    let mut v: Vec<_> = (0...1).map(|x| x.to_string()).collect();
-    for _ in v.drain(...0) {
+    let mut v: Vec<_> = (0..=1).map(|x| x.to_string()).collect();
+    for _ in v.drain(..=0) {
     }
     assert_eq!(v, &["1".to_string()]);
 }
@@ -572,7 +567,7 @@ fn test_drain_max_vec_size() {
 
     let mut v = Vec::<()>::with_capacity(usize::max_value());
     unsafe { v.set_len(usize::max_value()); }
-    for _ in v.drain(usize::max_value() - 1...usize::max_value() - 1) {
+    for _ in v.drain(usize::max_value() - 1..=usize::max_value() - 1) {
     }
     assert_eq!(v.len(), usize::max_value() - 1);
 }
@@ -581,7 +576,7 @@ fn test_drain_max_vec_size() {
 #[should_panic]
 fn test_drain_inclusive_out_of_bounds() {
     let mut v = vec![1, 2, 3, 4, 5];
-    v.drain(5...5);
+    v.drain(5..=5);
 }
 
 #[test]
@@ -598,10 +593,10 @@ fn test_splice() {
 fn test_splice_inclusive_range() {
     let mut v = vec![1, 2, 3, 4, 5];
     let a = [10, 11, 12];
-    let t1: Vec<_> = v.splice(2...3, a.iter().cloned()).collect();
+    let t1: Vec<_> = v.splice(2..=3, a.iter().cloned()).collect();
     assert_eq!(v, &[1, 2, 10, 11, 12, 5]);
     assert_eq!(t1, &[3, 4]);
-    let t2: Vec<_> = v.splice(1...2, Some(20)).collect();
+    let t2: Vec<_> = v.splice(1..=2, Some(20)).collect();
     assert_eq!(v, &[1, 20, 11, 12, 5]);
     assert_eq!(t2, &[2, 10]);
 }
@@ -619,7 +614,7 @@ fn test_splice_out_of_bounds() {
 fn test_splice_inclusive_out_of_bounds() {
     let mut v = vec![1, 2, 3, 4, 5];
     let a = [10, 11, 12];
-    v.splice(5...5, a.iter().cloned());
+    v.splice(5..=5, a.iter().cloned());
 }
 
 #[test]
@@ -643,7 +638,7 @@ fn test_splice_unbounded() {
 fn test_splice_forget() {
     let mut v = vec![1, 2, 3, 4, 5];
     let a = [10, 11, 12];
-    ::std::mem::forget(v.splice(2..4, a.iter().cloned()));
+    std::mem::forget(v.splice(2..4, a.iter().cloned()));
     assert_eq!(v, &[1, 2]);
 }
 
@@ -751,24 +746,6 @@ fn assert_covariance() {
     fn into_iter<'new>(i: IntoIter<&'static str>) -> IntoIter<&'new str> {
         i
     }
-}
-
-#[test]
-fn test_placement() {
-    let mut vec = vec![1];
-    assert_eq!(vec.place_back() <- 2, &2);
-    assert_eq!(vec.len(), 2);
-    assert_eq!(vec.place_back() <- 3, &3);
-    assert_eq!(vec.len(), 3);
-    assert_eq!(&vec, &[1, 2, 3]);
-}
-
-#[test]
-fn test_placement_panic() {
-    let mut vec = vec![1, 2, 3];
-    fn mkpanic() -> usize { panic!() }
-    let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| { vec.place_back() <- mkpanic(); }));
-    assert_eq!(vec.len(), 3);
 }
 
 #[test]
@@ -967,4 +944,231 @@ fn drain_filter_complex() {
     }
 }
 
+#[test]
+fn test_reserve_exact() {
+    // This is all the same as test_reserve
 
+    let mut v = Vec::new();
+    assert_eq!(v.capacity(), 0);
+
+    v.reserve_exact(2);
+    assert!(v.capacity() >= 2);
+
+    for i in 0..16 {
+        v.push(i);
+    }
+
+    assert!(v.capacity() >= 16);
+    v.reserve_exact(16);
+    assert!(v.capacity() >= 32);
+
+    v.push(16);
+
+    v.reserve_exact(16);
+    assert!(v.capacity() >= 33)
+}
+
+#[test]
+#[cfg(not(miri))] // Miri does not support signalling OOM
+fn test_try_reserve() {
+
+    // These are the interesting cases:
+    // * exactly isize::MAX should never trigger a CapacityOverflow (can be OOM)
+    // * > isize::MAX should always fail
+    //    * On 16/32-bit should CapacityOverflow
+    //    * On 64-bit should OOM
+    // * overflow may trigger when adding `len` to `cap` (in number of elements)
+    // * overflow may trigger when multiplying `new_cap` by size_of::<T> (to get bytes)
+
+    const MAX_CAP: usize = isize::MAX as usize;
+    const MAX_USIZE: usize = usize::MAX;
+
+    // On 16/32-bit, we check that allocations don't exceed isize::MAX,
+    // on 64-bit, we assume the OS will give an OOM for such a ridiculous size.
+    // Any platform that succeeds for these requests is technically broken with
+    // ptr::offset because LLVM is the worst.
+    let guards_against_isize = size_of::<usize>() < 8;
+
+    {
+        // Note: basic stuff is checked by test_reserve
+        let mut empty_bytes: Vec<u8> = Vec::new();
+
+        // Check isize::MAX doesn't count as an overflow
+        if let Err(CapacityOverflow) = empty_bytes.try_reserve(MAX_CAP) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        // Play it again, frank! (just to be sure)
+        if let Err(CapacityOverflow) = empty_bytes.try_reserve(MAX_CAP) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+
+        if guards_against_isize {
+            // Check isize::MAX + 1 does count as overflow
+            if let Err(CapacityOverflow) = empty_bytes.try_reserve(MAX_CAP + 1) {
+            } else { panic!("isize::MAX + 1 should trigger an overflow!") }
+
+            // Check usize::MAX does count as overflow
+            if let Err(CapacityOverflow) = empty_bytes.try_reserve(MAX_USIZE) {
+            } else { panic!("usize::MAX should trigger an overflow!") }
+        } else {
+            // Check isize::MAX + 1 is an OOM
+            if let Err(AllocErr) = empty_bytes.try_reserve(MAX_CAP + 1) {
+            } else { panic!("isize::MAX + 1 should trigger an OOM!") }
+
+            // Check usize::MAX is an OOM
+            if let Err(AllocErr) = empty_bytes.try_reserve(MAX_USIZE) {
+            } else { panic!("usize::MAX should trigger an OOM!") }
+        }
+    }
+
+
+    {
+        // Same basic idea, but with non-zero len
+        let mut ten_bytes: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        if let Err(CapacityOverflow) = ten_bytes.try_reserve(MAX_CAP - 10) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        if let Err(CapacityOverflow) = ten_bytes.try_reserve(MAX_CAP - 10) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        if guards_against_isize {
+            if let Err(CapacityOverflow) = ten_bytes.try_reserve(MAX_CAP - 9) {
+            } else { panic!("isize::MAX + 1 should trigger an overflow!"); }
+        } else {
+            if let Err(AllocErr) = ten_bytes.try_reserve(MAX_CAP - 9) {
+            } else { panic!("isize::MAX + 1 should trigger an OOM!") }
+        }
+        // Should always overflow in the add-to-len
+        if let Err(CapacityOverflow) = ten_bytes.try_reserve(MAX_USIZE) {
+        } else { panic!("usize::MAX should trigger an overflow!") }
+    }
+
+
+    {
+        // Same basic idea, but with interesting type size
+        let mut ten_u32s: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        if let Err(CapacityOverflow) = ten_u32s.try_reserve(MAX_CAP/4 - 10) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        if let Err(CapacityOverflow) = ten_u32s.try_reserve(MAX_CAP/4 - 10) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        if guards_against_isize {
+            if let Err(CapacityOverflow) = ten_u32s.try_reserve(MAX_CAP/4 - 9) {
+            } else { panic!("isize::MAX + 1 should trigger an overflow!"); }
+        } else {
+            if let Err(AllocErr) = ten_u32s.try_reserve(MAX_CAP/4 - 9) {
+            } else { panic!("isize::MAX + 1 should trigger an OOM!") }
+        }
+        // Should fail in the mul-by-size
+        if let Err(CapacityOverflow) = ten_u32s.try_reserve(MAX_USIZE - 20) {
+        } else {
+            panic!("usize::MAX should trigger an overflow!");
+        }
+    }
+
+}
+
+#[test]
+#[cfg(not(miri))] // Miri does not support signalling OOM
+fn test_try_reserve_exact() {
+
+    // This is exactly the same as test_try_reserve with the method changed.
+    // See that test for comments.
+
+    const MAX_CAP: usize = isize::MAX as usize;
+    const MAX_USIZE: usize = usize::MAX;
+
+    let guards_against_isize = size_of::<usize>() < 8;
+
+    {
+        let mut empty_bytes: Vec<u8> = Vec::new();
+
+        if let Err(CapacityOverflow) = empty_bytes.try_reserve_exact(MAX_CAP) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        if let Err(CapacityOverflow) = empty_bytes.try_reserve_exact(MAX_CAP) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+
+        if guards_against_isize {
+            if let Err(CapacityOverflow) = empty_bytes.try_reserve_exact(MAX_CAP + 1) {
+            } else { panic!("isize::MAX + 1 should trigger an overflow!") }
+
+            if let Err(CapacityOverflow) = empty_bytes.try_reserve_exact(MAX_USIZE) {
+            } else { panic!("usize::MAX should trigger an overflow!") }
+        } else {
+            if let Err(AllocErr) = empty_bytes.try_reserve_exact(MAX_CAP + 1) {
+            } else { panic!("isize::MAX + 1 should trigger an OOM!") }
+
+            if let Err(AllocErr) = empty_bytes.try_reserve_exact(MAX_USIZE) {
+            } else { panic!("usize::MAX should trigger an OOM!") }
+        }
+    }
+
+
+    {
+        let mut ten_bytes: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        if let Err(CapacityOverflow) = ten_bytes.try_reserve_exact(MAX_CAP - 10) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        if let Err(CapacityOverflow) = ten_bytes.try_reserve_exact(MAX_CAP - 10) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        if guards_against_isize {
+            if let Err(CapacityOverflow) = ten_bytes.try_reserve_exact(MAX_CAP - 9) {
+            } else { panic!("isize::MAX + 1 should trigger an overflow!"); }
+        } else {
+            if let Err(AllocErr) = ten_bytes.try_reserve_exact(MAX_CAP - 9) {
+            } else { panic!("isize::MAX + 1 should trigger an OOM!") }
+        }
+        if let Err(CapacityOverflow) = ten_bytes.try_reserve_exact(MAX_USIZE) {
+        } else { panic!("usize::MAX should trigger an overflow!") }
+    }
+
+
+    {
+        let mut ten_u32s: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        if let Err(CapacityOverflow) = ten_u32s.try_reserve_exact(MAX_CAP/4 - 10) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        if let Err(CapacityOverflow) = ten_u32s.try_reserve_exact(MAX_CAP/4 - 10) {
+            panic!("isize::MAX shouldn't trigger an overflow!");
+        }
+        if guards_against_isize {
+            if let Err(CapacityOverflow) = ten_u32s.try_reserve_exact(MAX_CAP/4 - 9) {
+            } else { panic!("isize::MAX + 1 should trigger an overflow!"); }
+        } else {
+            if let Err(AllocErr) = ten_u32s.try_reserve_exact(MAX_CAP/4 - 9) {
+            } else { panic!("isize::MAX + 1 should trigger an OOM!") }
+        }
+        if let Err(CapacityOverflow) = ten_u32s.try_reserve_exact(MAX_USIZE - 20) {
+        } else { panic!("usize::MAX should trigger an overflow!") }
+    }
+
+}
+
+#[test]
+fn test_stable_push_pop() {
+    // Test that, if we reserved enough space, adding and removing elements does not
+    // invalidate references into the vector (such as `v0`).  This test also
+    // runs in Miri, which would detect such problems.
+    let mut v = Vec::with_capacity(10);
+    v.push(13);
+
+    // laundering the lifetime -- we take care that `v` does not reallocate, so that's okay.
+    let v0 = unsafe { &*(&v[0] as *const _) };
+
+    // Now do a bunch of things and occasionally use `v0` again to assert it is still valid.
+    v.push(1);
+    v.push(2);
+    v.insert(1, 1);
+    assert_eq!(*v0, 13);
+    v.remove(1);
+    v.pop().unwrap();
+    assert_eq!(*v0, 13);
+}

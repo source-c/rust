@@ -1,4 +1,4 @@
-.TH RUSTC "1" "September 2016" "rustc 1.13.0" "User Commands"
+.TH RUSTC "1" "<INSERT DATE HERE>" "rustc <INSERT VERSION HERE>" "User Commands"
 .SH NAME
 rustc \- The Rust compiler
 .SH SYNOPSIS
@@ -55,7 +55,7 @@ Configure the output that \fBrustc\fR will produce. Each emission may also have
 an optional explicit output \fIPATH\fR specified for that particular emission
 kind. This path takes precedence over the \fB-o\fR option.
 .TP
-\fB\-\-print\fR [crate\-name|file\-names|sysroot]
+\fB\-\-print\fR [crate\-name|\:file\-names|\:sysroot|\:cfg|\:target\-list|\:target\-cpus|\:target\-features|\:relocation\-models|\:code\-models|\:tls\-models|\:target\-spec\-json|\:native\-static\-libs]
 Comma separated list of compiler information to print on stdout.
 .TP
 \fB\-g\fR
@@ -125,6 +125,16 @@ Print version info and exit.
 \fB\-v\fR, \fB\-\-verbose\fR
 Use verbose output.
 .TP
+\fB\-\-remap\-path\-prefix\fR \fIfrom\fR=\fIto\fR
+Remap source path prefixes in all output, including compiler diagnostics, debug information,
+macro expansions, etc. The \fIfrom\fR=\fIto\fR parameter is scanned from right to left, so \fIfrom\fR
+may contain '=', but \fIto\fR may not.
+
+This is useful for normalizing build products, for example by removing the current directory out of
+pathnames emitted into the object files. The replacement is purely textual, with no consideration of
+the current system's pathname syntax. For example \fI\-\-remap\-path\-prefix foo=bar\fR will
+match \fBfoo/lib.rs\fR but not \fB./foo/lib.rs\fR.
+.TP
 \fB\-\-extern\fR \fINAME\fR=\fIPATH\fR
 Specify where an external rust library is located. These should match
 \fIextern\fR declarations in the crate's source code.
@@ -152,9 +162,6 @@ never colorize output.
 
 .SH CODEGEN OPTIONS
 
-.TP
-\fBar\fR=\fI/path/to/ar\fR
-Path to the archive utility to use when assembling archives.
 .TP
 \fBlinker\fR=\fI/path/to/cc\fR
 Path to the linker utility to use when linking libraries, executables, and
@@ -254,12 +261,12 @@ full debug info with variable and type information.
 .RE
 .TP
 \fBopt\-level\fR=\fIVAL\fR
-Optimize with possible levels 0\[en]3
+Optimize with possible levels 0\[en]3, s (optimize for size), or z (for minimal size)
 
 .SH ENVIRONMENT
 
-Some of these affect the output of the compiler, while others affect programs
-which link to the standard library.
+Some of these affect only test harness programs (generated via rustc --test);
+others affect all programs which link to the Rust standard library.
 
 .TP
 \fBRUST_TEST_THREADS\fR

@@ -1,17 +1,8 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 #![feature(generators, generator_trait)]
 
 use std::ops::{GeneratorState, Generator};
 use std::cell::Cell;
+use std::pin::Pin;
 
 fn yield_during_iter_owned_data(x: Vec<i32>) {
     // The generator owns `x`, so we error out when yielding with a
@@ -52,7 +43,7 @@ fn yield_during_iter_borrowed_slice_3() {
             yield p;
         }
     };
-    b.resume();
+    Pin::new(&mut b).resume();
 }
 
 fn yield_during_iter_borrowed_slice_4() {
@@ -65,7 +56,7 @@ fn yield_during_iter_borrowed_slice_4() {
         }
     };
     println!("{}", x[0]); //~ ERROR
-    b.resume();
+    Pin::new(&mut b).resume();
 }
 
 fn yield_during_range_iter() {
@@ -78,7 +69,7 @@ fn yield_during_range_iter() {
             yield x;
         }
     };
-    b.resume();
+    Pin::new(&mut b).resume();
 }
 
 fn main() { }

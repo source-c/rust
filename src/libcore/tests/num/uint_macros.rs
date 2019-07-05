@@ -1,21 +1,12 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 macro_rules! uint_module { ($T:ident, $T_i:ident) => (
 #[cfg(test)]
 mod tests {
     use core::$T_i::*;
-    use num;
     use core::ops::{BitOr, BitAnd, BitXor, Shl, Shr, Not};
     use std::str::FromStr;
     use std::mem;
+
+    use crate::num;
 
     #[test]
     fn test_overflows() {
@@ -95,6 +86,17 @@ mod tests {
         // Swapping these should make no difference
         assert_eq!(_0.swap_bytes(), _0);
         assert_eq!(_1.swap_bytes(), _1);
+    }
+
+    #[test]
+    fn test_reverse_bits() {
+        assert_eq!(A.reverse_bits().reverse_bits(), A);
+        assert_eq!(B.reverse_bits().reverse_bits(), B);
+        assert_eq!(C.reverse_bits().reverse_bits(), C);
+
+        // Swapping these should make no difference
+        assert_eq!(_0.reverse_bits(), _0);
+        assert_eq!(_1.reverse_bits(), _1);
     }
 
     #[test]

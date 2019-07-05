@@ -1,13 +1,11 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+#![feature(generators)]
 
+#![allow(non_camel_case_types)]
+#![allow(dead_code)]
+#![allow(unreachable_code)]
+#![allow(unused_parens)]
+
+#![recursion_limit = "256"]
 
 use std::cell::Cell;
 use std::mem::swap;
@@ -83,23 +81,26 @@ fn dots() {
                                .. .. .. .. .. .. .. .. .. .. .. ..));
 }
 
-fn you_eight() {
-    assert_eq!(8, {
-        macro_rules! u8 {
-            (u8) => {
-                mod u8 {
-                    pub fn u8<'u8>(u8: &'u8 u8) -> &'u8 u8 {
-                        "u8";
-                        u8
+fn u8(u8: u8) {
+    if u8 != 0u8 {
+        assert_eq!(8u8, {
+            macro_rules! u8 {
+                (u8) => {
+                    mod u8 {
+                        pub fn u8<'u8: 'u8 + 'u8>(u8: &'u8 u8) -> &'u8 u8 {
+                            "u8";
+                            u8
+                        }
                     }
-                }
-            };
-        }
+                };
+            }
 
-        u8!(u8);
-        let &u8: &u8 = u8::u8(&8u8);
-        u8
-    });
+            u8!(u8);
+            let &u8: &u8 = u8::u8(&8u8);
+            ::u8(0u8);
+            u8
+        });
+    }
 }
 
 fn fishy() {
@@ -109,6 +110,51 @@ fn fishy() {
 
 fn union() {
     union union<'union> { union: &'union union<'union>, }
+}
+
+fn special_characters() {
+    let val = !((|(..):(_,_),__@_|__)((&*"\\",'🤔')/**/,{})=={&[..=..][..];})//
+    ;
+    assert!(!val);
+}
+
+fn punch_card() -> impl std::fmt::Debug {
+    ..=..=.. ..    .. .. .. ..    .. .. .. ..    .. ..=.. ..
+    ..=.. ..=..    .. .. .. ..    .. .. .. ..    ..=..=..=..
+    ..=.. ..=..    ..=.. ..=..    .. ..=..=..    .. ..=.. ..
+    ..=..=.. ..    ..=.. ..=..    ..=.. .. ..    .. ..=.. ..
+    ..=.. ..=..    ..=.. ..=..    .. ..=.. ..    .. ..=.. ..
+    ..=.. ..=..    ..=.. ..=..    .. .. ..=..    .. ..=.. ..
+    ..=.. ..=..    .. ..=..=..    ..=..=.. ..    .. ..=.. ..
+}
+
+fn r#match() {
+    let val = match match match match match () {
+        () => ()
+    } {
+        () => ()
+    } {
+        () => ()
+    } {
+        () => ()
+    } {
+        () => ()
+    };
+    assert_eq!(val, ());
+}
+
+fn i_yield() {
+    static || {
+        yield yield yield yield yield yield yield yield yield;
+    };
+}
+
+fn match_nested_if() {
+    let val = match () {
+        () if if if if true {true} else {false} {true} else {false} {true} else {false} => true,
+        _ => false,
+    };
+    assert!(val);
 }
 
 pub fn main() {
@@ -121,7 +167,12 @@ pub fn main() {
     angrydome();
     evil_lincoln();
     dots();
-    you_eight();
+    u8(8u8);
     fishy();
     union();
+    special_characters();
+    punch_card();
+    r#match();
+    i_yield();
+    match_nested_if();
 }

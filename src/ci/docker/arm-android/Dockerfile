@@ -5,7 +5,7 @@ RUN sh /scripts/android-base-apt-get.sh
 
 COPY scripts/android-ndk.sh /scripts/
 RUN . /scripts/android-ndk.sh && \
-    download_and_make_toolchain android-ndk-r13b-linux-x86_64.zip arm 9
+    download_and_make_toolchain android-ndk-r15c-linux-x86_64.zip arm 14
 
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
@@ -14,20 +14,22 @@ RUN dpkg --add-architecture i386 && \
   libpulse0 \
   libstdc++6:i386 \
   openjdk-9-jre-headless \
-  tzdata
+  tzdata \
+  wget \
+  python3
 
 COPY scripts/android-sdk.sh /scripts/
-RUN . /scripts/android-sdk.sh && \
-    download_and_create_avd tools_r25.2.5-linux.zip armeabi-v7a 18
+COPY scripts/android-sdk-manager.py /scripts/
+COPY arm-android/android-sdk.lock /android/sdk/android-sdk.lock
+RUN /scripts/android-sdk.sh
 
+ENV PATH=$PATH:/android/sdk/emulator
 ENV PATH=$PATH:/android/sdk/tools
 ENV PATH=$PATH:/android/sdk/platform-tools
 
 ENV TARGETS=arm-linux-androideabi
 
-ENV RUST_CONFIGURE_ARGS \
-      --target=$TARGETS \
-      --arm-linux-androideabi-ndk=/android/ndk/arm-9
+ENV RUST_CONFIGURE_ARGS --arm-linux-androideabi-ndk=/android/ndk/arm-14
 
 ENV SCRIPT python2.7 ../x.py test --target $TARGETS
 

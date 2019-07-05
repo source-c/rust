@@ -1,7 +1,7 @@
 # The `#[doc]` attribute
 
 The `#[doc]` attribute lets you control various aspects of how `rustdoc` does
-its job. 
+its job.
 
 The most basic function of `#[doc]` is to handle the actual documentation
 text. That is, `///` is syntax sugar for `#[doc]`. This means that these two
@@ -92,6 +92,21 @@ the tracking issue.
 #![doc(issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/")]
 ```
 
+### `html_root_url`
+
+The `#[doc(html_root_url = "…")]` attribute value indicates the URL for
+generating links to external crates. When rustdoc needs to generate a link to
+an item in an external crate, it will first check if the extern crate has been
+documented locally on-disk, and if so link directly to it. Failing that, it
+will use the URL given by the `--extern-html-root-url` command-line flag if
+available. If that is not available, then it will use the `html_root_url`
+value in the extern crate if it is available. If that is not available, then
+the extern items will not be linked.
+
+```rust,ignore
+#![doc(html_root_url = "https://docs.rs/serde/1.0")]
+```
+
 ### `html_no_source`
 
 By default, `rustdoc` will include the source code of your program, with links
@@ -102,6 +117,26 @@ to it in the docs. But if you include this:
 ```
 
 it will not.
+
+### `test(no_crate_inject)`
+
+By default, `rustdoc` will automatically add a line with `extern crate my_crate;` into each doctest.
+But if you include this:
+
+```rust,ignore
+#![doc(test(no_crate_inject))]
+```
+
+it will not.
+
+### `test(attr(...))`
+
+This form of the `doc` attribute allows you to add arbitrary attributes to all your doctests. For
+example, if you want your doctests to fail if they produce any warnings, you could add this:
+
+```rust,ignore
+#![doc(test(attr(deny(warnings))))]
+```
 
 ## At the item level
 
@@ -123,7 +158,7 @@ pub mod bar {
 }
 ```
 
-The documentation will generate a "Reexports" section, and say `pub use bar::Bar;`, where
+The documentation will generate a "Re-exports" section, and say `pub use bar::Bar;`, where
 `Bar` is a link to its page.
 
 If we change the `use` line like this:
@@ -164,7 +199,10 @@ mod bar {
 }
 ```
 
-Now we'll have a `Reexports` line, and `Bar` will not link to anywhere.
+Now we'll have a `Re-exports` line, and `Bar` will not link to anywhere.
+
+One special case: In Rust 2018 and later, if you `pub use` one of your dependencies, `rustdoc` will
+not eagerly inline it as a module unless you add `#[doc(inline)]`.
 
 ## `#[doc(hidden)]`
 

@@ -1,42 +1,33 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+#![allow(missing_docs, nonstandard_style)]
 
-#![allow(missing_docs, bad_style)]
+use crate::io::ErrorKind;
 
-use io::{self, ErrorKind};
-use libc;
+#[cfg(any(rustdoc, target_os = "linux"))] pub use crate::os::linux as platform;
 
-#[cfg(any(dox, target_os = "linux"))] pub use os::linux as platform;
+#[cfg(all(not(rustdoc), target_os = "android"))]   pub use crate::os::android as platform;
+#[cfg(all(not(rustdoc), target_os = "dragonfly"))] pub use crate::os::dragonfly as platform;
+#[cfg(all(not(rustdoc), target_os = "freebsd"))]   pub use crate::os::freebsd as platform;
+#[cfg(all(not(rustdoc), target_os = "haiku"))]     pub use crate::os::haiku as platform;
+#[cfg(all(not(rustdoc), target_os = "ios"))]       pub use crate::os::ios as platform;
+#[cfg(all(not(rustdoc), target_os = "macos"))]     pub use crate::os::macos as platform;
+#[cfg(all(not(rustdoc), target_os = "netbsd"))]    pub use crate::os::netbsd as platform;
+#[cfg(all(not(rustdoc), target_os = "openbsd"))]   pub use crate::os::openbsd as platform;
+#[cfg(all(not(rustdoc), target_os = "solaris"))]   pub use crate::os::solaris as platform;
+#[cfg(all(not(rustdoc), target_os = "emscripten"))] pub use crate::os::emscripten as platform;
+#[cfg(all(not(rustdoc), target_os = "fuchsia"))]   pub use crate::os::fuchsia as platform;
+#[cfg(all(not(rustdoc), target_os = "l4re"))]      pub use crate::os::linux as platform;
+#[cfg(all(not(rustdoc), target_os = "hermit"))]    pub use crate::os::hermit as platform;
 
-#[cfg(all(not(dox), target_os = "android"))]   pub use os::android as platform;
-#[cfg(all(not(dox), target_os = "bitrig"))]    pub use os::bitrig as platform;
-#[cfg(all(not(dox), target_os = "dragonfly"))] pub use os::dragonfly as platform;
-#[cfg(all(not(dox), target_os = "freebsd"))]   pub use os::freebsd as platform;
-#[cfg(all(not(dox), target_os = "haiku"))]     pub use os::haiku as platform;
-#[cfg(all(not(dox), target_os = "ios"))]       pub use os::ios as platform;
-#[cfg(all(not(dox), target_os = "macos"))]     pub use os::macos as platform;
-#[cfg(all(not(dox), target_os = "nacl"))]      pub use os::nacl as platform;
-#[cfg(all(not(dox), target_os = "netbsd"))]    pub use os::netbsd as platform;
-#[cfg(all(not(dox), target_os = "openbsd"))]   pub use os::openbsd as platform;
-#[cfg(all(not(dox), target_os = "solaris"))]   pub use os::solaris as platform;
-#[cfg(all(not(dox), target_os = "emscripten"))] pub use os::emscripten as platform;
-#[cfg(all(not(dox), target_os = "fuchsia"))]   pub use os::fuchsia as platform;
-#[cfg(all(not(dox), target_os = "l4re"))]      pub use os::linux as platform;
+pub use self::rand::hashmap_random_keys;
+pub use libc::strlen;
 
 #[macro_use]
 pub mod weak;
 
+pub mod alloc;
 pub mod args;
 pub mod android;
-#[cfg(feature = "backtrace")]
-pub mod backtrace;
+pub mod cmath;
 pub mod condvar;
 pub mod env;
 pub mod ext;
@@ -44,6 +35,7 @@ pub mod fast_thread_local;
 pub mod fd;
 pub mod fs;
 pub mod memchr;
+pub mod io;
 pub mod mutex;
 #[cfg(not(target_os = "l4re"))]
 pub mod net;
@@ -52,7 +44,6 @@ mod l4re;
 #[cfg(target_os = "l4re")]
 pub use self::l4re::net;
 pub mod os;
-pub mod os_str;
 pub mod path;
 pub mod pipe;
 pub mod process;
@@ -63,6 +54,8 @@ pub mod thread;
 pub mod thread_local;
 pub mod time;
 pub mod stdio;
+
+pub use crate::sys_common::os_str_bytes as os_str;
 
 #[cfg(not(test))]
 pub fn init() {
@@ -77,16 +70,16 @@ pub fn init() {
         reset_sigpipe();
     }
 
-    #[cfg(not(any(target_os = "nacl", target_os = "emscripten", target_os="fuchsia")))]
+    #[cfg(not(any(target_os = "emscripten", target_os = "fuchsia")))]
     unsafe fn reset_sigpipe() {
         assert!(signal(libc::SIGPIPE, libc::SIG_IGN) != libc::SIG_ERR);
     }
-    #[cfg(any(target_os = "nacl", target_os = "emscripten", target_os="fuchsia"))]
+    #[cfg(any(target_os = "emscripten", target_os = "fuchsia"))]
     unsafe fn reset_sigpipe() {}
 }
 
 #[cfg(target_os = "android")]
-pub use sys::android::signal;
+pub use crate::sys::android::signal;
 #[cfg(not(target_os = "android"))]
 pub use libc::signal;
 
@@ -131,15 +124,15 @@ macro_rules! impl_is_minus_one {
 
 impl_is_minus_one! { i8 i16 i32 i64 isize }
 
-pub fn cvt<T: IsMinusOne>(t: T) -> io::Result<T> {
+pub fn cvt<T: IsMinusOne>(t: T) -> crate::io::Result<T> {
     if t.is_minus_one() {
-        Err(io::Error::last_os_error())
+        Err(crate::io::Error::last_os_error())
     } else {
         Ok(t)
     }
 }
 
-pub fn cvt_r<T, F>(mut f: F) -> io::Result<T>
+pub fn cvt_r<T, F>(mut f: F) -> crate::io::Result<T>
     where T: IsMinusOne,
           F: FnMut() -> T
 {
@@ -159,5 +152,5 @@ pub fn cvt_r<T, F>(mut f: F) -> io::Result<T>
 // instruction" that intrinsics::abort would cause, as intrinsics::abort is
 // implemented as an illegal instruction.
 pub unsafe fn abort_internal() -> ! {
-    ::libc::abort()
+    libc::abort()
 }

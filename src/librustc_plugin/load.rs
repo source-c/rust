@@ -1,30 +1,22 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Used by `rustc` when loading a plugin.
 
 use rustc::session::Session;
 use rustc_metadata::creader::CrateLoader;
 use rustc_metadata::cstore::CStore;
-use registry::Registry;
+use crate::registry::Registry;
 
 use std::borrow::ToOwned;
 use std::env;
 use std::mem;
 use std::path::PathBuf;
 use syntax::ast;
+use syntax::struct_span_err;
+use syntax::symbol::{Symbol, kw, sym};
 use syntax_pos::{Span, DUMMY_SP};
 
 /// Pointer to a registrar function.
 pub type PluginRegistrarFun =
-    fn(&mut Registry);
+    fn(&mut Registry<'_>);
 
 pub struct PluginRegistrar {
     pub fun: PluginRegistrarFun,
@@ -37,8 +29,10 @@ struct PluginLoader<'a> {
     plugins: Vec<PluginRegistrar>,
 }
 
-fn call_malformed_plugin_attribute(a: &Session, b: Span) {
-    span_err!(a, b, E0498, "malformed plugin attribute");
+fn call_malformed_plugin_attribute(sess: &Session, span: Span) {
+    struct_span_err!(sess, span, E0498, "malformed `plugin` attribute")
+        .span_label(span, "malformed attribute")
+        .emit();
 }
 
 /// Read plugin metadata and dynamically load registrar functions.
@@ -52,28 +46,25 @@ pub fn load_plugins(sess: &Session,
     // do not report any error now. since crate attributes are
     // not touched by expansion, every use of plugin without
     // the feature enabled will result in an error later...
-    if sess.features.borrow().plugin {
+    if sess.features_untracked().plugin {
         for attr in &krate.attrs {
-            if !attr.check_name("plugin") {
+            if !attr.check_name(sym::plugin) {
                 continue;
             }
 
             let plugins = match attr.meta_item_list() {
                 Some(xs) => xs,
-                None => {
-                    call_malformed_plugin_attribute(sess, attr.span);
-                    continue;
-                }
+                None => continue,
             };
 
             for plugin in plugins {
                 // plugins must have a name and can't be key = value
-                match plugin.name() {
-                    Some(name) if !plugin.is_value_str() => {
-                        let args = plugin.meta_item_list().map(ToOwned::to_owned);
-                        loader.load_plugin(plugin.span, &name.as_str(), args.unwrap_or_default());
-                    },
-                    _ => call_malformed_plugin_attribute(sess, attr.span),
+                let name = plugin.name_or_empty();
+                if name != kw::Invalid && !plugin.is_value_str() {
+                    let args = plugin.meta_item_list().map(ToOwned::to_owned);
+                    loader.load_plugin(plugin.span(), name, args.unwrap_or_default());
+                } else {
+                    call_malformed_plugin_attribute(sess, attr.span);
                 }
             }
         }
@@ -81,7 +72,7 @@ pub fn load_plugins(sess: &Session,
 
     if let Some(plugins) = addl_plugins {
         for plugin in plugins {
-            loader.load_plugin(DUMMY_SP, &plugin, vec![]);
+            loader.load_plugin(DUMMY_SP, Symbol::intern(&plugin), vec![]);
         }
     }
 
@@ -97,11 +88,11 @@ impl<'a> PluginLoader<'a> {
         }
     }
 
-    fn load_plugin(&mut self, span: Span, name: &str, args: Vec<ast::NestedMetaItem>) {
+    fn load_plugin(&mut self, span: Span, name: Symbol, args: Vec<ast::NestedMetaItem>) {
         let registrar = self.reader.find_plugin_registrar(span, name);
 
-        if let Some((lib, disambiguator, index)) = registrar {
-            let symbol = self.sess.generate_plugin_registrar_symbol(disambiguator, index);
+        if let Some((lib, disambiguator)) = registrar {
+            let symbol = self.sess.generate_plugin_registrar_symbol(disambiguator);
             let fun = self.dylink_registrar(span, lib, symbol);
             self.plugins.push(PluginRegistrar {
                 fun,
@@ -115,7 +106,7 @@ impl<'a> PluginLoader<'a> {
                         span: Span,
                         path: PathBuf,
                         symbol: String) -> PluginRegistrarFun {
-        use rustc_back::dynamic_lib::DynamicLibrary;
+        use rustc_metadata::dynamic_lib::DynamicLibrary;
 
         // Make sure the path contains a / or the linker will search for it.
         let path = env::current_dir().unwrap().join(&path);
@@ -144,7 +135,7 @@ impl<'a> PluginLoader<'a> {
 
             // Intentionally leak the dynamic library. We can't ever unload it
             // since the library can make things that will live arbitrarily long
-            // (e.g. an @-box cycle or a thread).
+            // (e.g., an @-box cycle or a thread).
             mem::forget(lib);
 
             registrar

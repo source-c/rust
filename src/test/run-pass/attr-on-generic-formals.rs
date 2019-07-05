@@ -1,12 +1,4 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+#![allow(unused_attributes)]
 
 // This test ensures we can attach attributes to the formals in all
 // places where generic parameter lists occur, assuming appropriate
@@ -17,7 +9,7 @@
 // using `rustc_attrs` feature. There is a separate compile-fail/ test
 // ensuring that the attribute feature-gating works in this context.)
 
-#![feature(generic_param_attrs, rustc_attrs)]
+#![feature(rustc_attrs)]
 #![allow(dead_code)]
 
 struct StLt<#[rustc_lt_struct] 'a>(&'a u32);

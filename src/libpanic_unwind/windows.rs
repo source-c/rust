@@ -1,14 +1,4 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-#![allow(bad_style)]
+#![allow(nonstandard_style)]
 #![allow(dead_code)]
 #![cfg(windows)]
 
@@ -79,18 +69,18 @@ pub enum EXCEPTION_DISPOSITION {
 pub use self::EXCEPTION_DISPOSITION::*;
 
 extern "system" {
-    #[unwind]
+    #[unwind(allowed)]
     pub fn RaiseException(dwExceptionCode: DWORD,
                           dwExceptionFlags: DWORD,
                           nNumberOfArguments: DWORD,
                           lpArguments: *const ULONG_PTR);
-    #[unwind]
+    #[unwind(allowed)]
     pub fn RtlUnwindEx(TargetFrame: LPVOID,
                        TargetIp: LPVOID,
                        ExceptionRecord: *const EXCEPTION_RECORD,
                        ReturnValue: LPVOID,
                        OriginalContext: *const CONTEXT,
                        HistoryTable: *const UNWIND_HISTORY_TABLE);
-    #[unwind]
+    #[unwind(allowed)]
     pub fn _CxxThrowException(pExceptionObject: *mut c_void, pThrowInfo: *mut u8);
 }

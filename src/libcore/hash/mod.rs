@@ -1,13 +1,3 @@
-// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Generic hashing support.
 //!
 //! This module provides a generic way to compute the hash of a value. The
@@ -91,17 +81,17 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use fmt;
-use marker;
-use mem;
+use crate::fmt;
+use crate::marker;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow(deprecated)]
 pub use self::sip::SipHasher;
 
-#[unstable(feature = "sip_hash_13", issue = "34767")]
+#[unstable(feature = "hashmap_internals", issue = "0")]
 #[allow(deprecated)]
-pub use self::sip::{SipHasher13, SipHasher24};
+#[doc(hidden)]
+pub use self::sip::SipHasher13;
 
 mod sip;
 
@@ -259,7 +249,7 @@ pub trait Hasher {
     /// println!("Hash is {:x}!", hasher.finish());
     /// ```
     ///
-    /// ['write']: #tymethod.write
+    /// [`write`]: #tymethod.write
     #[stable(feature = "rust1", since = "1.0.0")]
     fn finish(&self) -> u64;
 
@@ -291,34 +281,31 @@ pub trait Hasher {
     #[inline]
     #[stable(feature = "hasher_write", since = "1.3.0")]
     fn write_u16(&mut self, i: u16) {
-        self.write(&unsafe { mem::transmute::<_, [u8; 2]>(i) })
+        self.write(&i.to_ne_bytes())
     }
     /// Writes a single `u32` into this hasher.
     #[inline]
     #[stable(feature = "hasher_write", since = "1.3.0")]
     fn write_u32(&mut self, i: u32) {
-        self.write(&unsafe { mem::transmute::<_, [u8; 4]>(i) })
+        self.write(&i.to_ne_bytes())
     }
     /// Writes a single `u64` into this hasher.
     #[inline]
     #[stable(feature = "hasher_write", since = "1.3.0")]
     fn write_u64(&mut self, i: u64) {
-        self.write(&unsafe { mem::transmute::<_, [u8; 8]>(i) })
+        self.write(&i.to_ne_bytes())
     }
     /// Writes a single `u128` into this hasher.
     #[inline]
-    #[unstable(feature = "i128", issue = "35118")]
+    #[stable(feature = "i128", since = "1.26.0")]
     fn write_u128(&mut self, i: u128) {
-        self.write(&unsafe { mem::transmute::<_, [u8; 16]>(i) })
+        self.write(&i.to_ne_bytes())
     }
     /// Writes a single `usize` into this hasher.
     #[inline]
     #[stable(feature = "hasher_write", since = "1.3.0")]
     fn write_usize(&mut self, i: usize) {
-        let bytes = unsafe {
-            ::slice::from_raw_parts(&i as *const usize as *const u8, mem::size_of::<usize>())
-        };
-        self.write(bytes);
+        self.write(&i.to_ne_bytes())
     }
 
     /// Writes a single `i8` into this hasher.
@@ -331,36 +318,36 @@ pub trait Hasher {
     #[inline]
     #[stable(feature = "hasher_write", since = "1.3.0")]
     fn write_i16(&mut self, i: i16) {
-        self.write_u16(i as u16)
+        self.write(&i.to_ne_bytes())
     }
     /// Writes a single `i32` into this hasher.
     #[inline]
     #[stable(feature = "hasher_write", since = "1.3.0")]
     fn write_i32(&mut self, i: i32) {
-        self.write_u32(i as u32)
+        self.write(&i.to_ne_bytes())
     }
     /// Writes a single `i64` into this hasher.
     #[inline]
     #[stable(feature = "hasher_write", since = "1.3.0")]
     fn write_i64(&mut self, i: i64) {
-        self.write_u64(i as u64)
+        self.write(&i.to_ne_bytes())
     }
     /// Writes a single `i128` into this hasher.
     #[inline]
-    #[unstable(feature = "i128", issue = "35118")]
+    #[stable(feature = "i128", since = "1.26.0")]
     fn write_i128(&mut self, i: i128) {
-        self.write_u128(i as u128)
+        self.write(&i.to_ne_bytes())
     }
     /// Writes a single `isize` into this hasher.
     #[inline]
     #[stable(feature = "hasher_write", since = "1.3.0")]
     fn write_isize(&mut self, i: isize) {
-        self.write_usize(i as usize)
+        self.write(&i.to_ne_bytes())
     }
 }
 
 #[stable(feature = "indirect_hasher_impl", since = "1.22.0")]
-impl<'a, H: Hasher + ?Sized> Hasher for &'a mut H {
+impl<H: Hasher + ?Sized> Hasher for &mut H {
     fn finish(&self) -> u64 {
         (**self).finish()
     }
@@ -407,7 +394,7 @@ impl<'a, H: Hasher + ?Sized> Hasher for &'a mut H {
 
 /// A trait for creating instances of [`Hasher`].
 ///
-/// A `BuildHasher` is typically used (e.g. by [`HashMap`]) to create
+/// A `BuildHasher` is typically used (e.g., by [`HashMap`]) to create
 /// [`Hasher`]s for each key such that they are hashed independently of one
 /// another, since [`Hasher`]s contain state.
 ///
@@ -513,7 +500,7 @@ pub struct BuildHasherDefault<H>(marker::PhantomData<H>);
 
 #[stable(since = "1.9.0", feature = "core_impl_debug")]
 impl<H> fmt::Debug for BuildHasherDefault<H> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("BuildHasherDefault")
     }
 }
@@ -541,11 +528,22 @@ impl<H> Default for BuildHasherDefault<H> {
     }
 }
 
+#[stable(since = "1.29.0", feature = "build_hasher_eq")]
+impl<H> PartialEq for BuildHasherDefault<H> {
+    fn eq(&self, _other: &BuildHasherDefault<H>) -> bool {
+        true
+    }
+}
+
+#[stable(since = "1.29.0", feature = "build_hasher_eq")]
+impl<H> Eq for BuildHasherDefault<H> {}
+
 //////////////////////////////////////////////////////////////////////////////
 
 mod impls {
-    use mem;
-    use slice;
+    use crate::mem;
+    use crate::slice;
+
     use super::*;
 
     macro_rules! impl_write {
@@ -602,6 +600,13 @@ mod impls {
         }
     }
 
+    #[stable(feature = "never_hash", since = "1.29.0")]
+    impl Hash for ! {
+        fn hash<H: Hasher>(&self, _: &mut H) {
+            *self
+        }
+    }
+
     macro_rules! impl_hash_tuple {
         () => (
             #[stable(feature = "rust1", since = "1.0.0")]
@@ -612,11 +617,11 @@ mod impls {
 
         ( $($name:ident)+) => (
             #[stable(feature = "rust1", since = "1.0.0")]
-            impl<$($name: Hash),*> Hash for ($($name,)*) where last_type!($($name,)+): ?Sized {
+            impl<$($name: Hash),+> Hash for ($($name,)+) where last_type!($($name,)+): ?Sized {
                 #[allow(non_snake_case)]
                 fn hash<S: Hasher>(&self, state: &mut S) {
-                    let ($(ref $name,)*) = *self;
-                    $($name.hash(state);)*
+                    let ($(ref $name,)+) = *self;
+                    $($name.hash(state);)+
                 }
             }
         );
@@ -651,30 +656,50 @@ mod impls {
 
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a, T: ?Sized + Hash> Hash for &'a T {
+    impl<T: ?Sized + Hash> Hash for &T {
         fn hash<H: Hasher>(&self, state: &mut H) {
             (**self).hash(state);
         }
     }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a, T: ?Sized + Hash> Hash for &'a mut T {
+    impl<T: ?Sized + Hash> Hash for &mut T {
         fn hash<H: Hasher>(&self, state: &mut H) {
             (**self).hash(state);
         }
     }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<T> Hash for *const T {
+    impl<T: ?Sized> Hash for *const T {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            state.write_usize(*self as usize)
+            if mem::size_of::<Self>() == mem::size_of::<usize>() {
+                // Thin pointer
+                state.write_usize(*self as *const () as usize);
+            } else {
+                // Fat pointer
+                let (a, b) = unsafe {
+                    *(self as *const Self as *const (usize, usize))
+                };
+                state.write_usize(a);
+                state.write_usize(b);
+            }
         }
     }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<T> Hash for *mut T {
+    impl<T: ?Sized> Hash for *mut T {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            state.write_usize(*self as usize)
+            if mem::size_of::<Self>() == mem::size_of::<usize>() {
+                // Thin pointer
+                state.write_usize(*self as *const () as usize);
+            } else {
+                // Fat pointer
+                let (a, b) = unsafe {
+                    *(self as *const Self as *const (usize, usize))
+                };
+                state.write_usize(a);
+                state.write_usize(b);
+            }
         }
     }
 }

@@ -1,13 +1,3 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 /// The unary logical negation operator `!`.
 ///
 /// # Examples
@@ -27,7 +17,7 @@
 /// impl Not for Answer {
 ///     type Output = Answer;
 ///
-///     fn not(self) -> Answer {
+///     fn not(self) -> Self::Output {
 ///         match self {
 ///             Answer::Yes => Answer::No,
 ///             Answer::No => Answer::Yes
@@ -46,6 +36,7 @@ pub trait Not {
     type Output;
 
     /// Performs the unary `!` operation.
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn not(self) -> Self::Output;
 }
@@ -68,7 +59,7 @@ not_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 
 /// The bitwise AND operator `&`.
 ///
-/// Note that `RHS` is `Self` by default, but this is not mandatory.
+/// Note that `Rhs` is `Self` by default, but this is not mandatory.
 ///
 /// # Examples
 ///
@@ -84,7 +75,7 @@ not_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 ///     type Output = Self;
 ///
 ///     // rhs is the "right-hand side" of the expression `a & b`
-///     fn bitand(self, rhs: Self) -> Self {
+///     fn bitand(self, rhs: Self) -> Self::Output {
 ///         Scalar(self.0 & rhs.0)
 ///     }
 /// }
@@ -106,7 +97,7 @@ not_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// impl BitAnd for BooleanVector {
 ///     type Output = Self;
 ///
-///     fn bitand(self, BooleanVector(rhs): Self) -> Self {
+///     fn bitand(self, BooleanVector(rhs): Self) -> Self::Output {
 ///         let BooleanVector(lhs) = self;
 ///         assert_eq!(lhs.len(), rhs.len());
 ///         BooleanVector(lhs.iter().zip(rhs.iter()).map(|(x, y)| *x && *y).collect())
@@ -119,16 +110,19 @@ not_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// assert_eq!(bv1 & bv2, expected);
 /// ```
 #[lang = "bitand"]
+#[doc(alias = "&")]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} & {RHS}`"]
-pub trait BitAnd<RHS=Self> {
+#[rustc_on_unimplemented(message="no implementation for `{Self} & {Rhs}`",
+                         label="no implementation for `{Self} & {Rhs}`")]
+pub trait BitAnd<Rhs=Self> {
     /// The resulting type after applying the `&` operator.
     #[stable(feature = "rust1", since = "1.0.0")]
     type Output;
 
     /// Performs the `&` operation.
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    fn bitand(self, rhs: RHS) -> Self::Output;
+    fn bitand(self, rhs: Rhs) -> Self::Output;
 }
 
 macro_rules! bitand_impl {
@@ -149,7 +143,7 @@ bitand_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 
 /// The bitwise OR operator `|`.
 ///
-/// Note that `RHS` is `Self` by default, but this is not mandatory.
+/// Note that `Rhs` is `Self` by default, but this is not mandatory.
 ///
 /// # Examples
 ///
@@ -187,7 +181,7 @@ bitand_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// impl BitOr for BooleanVector {
 ///     type Output = Self;
 ///
-///     fn bitor(self, BooleanVector(rhs): Self) -> Self {
+///     fn bitor(self, BooleanVector(rhs): Self) -> Self::Output {
 ///         let BooleanVector(lhs) = self;
 ///         assert_eq!(lhs.len(), rhs.len());
 ///         BooleanVector(lhs.iter().zip(rhs.iter()).map(|(x, y)| *x || *y).collect())
@@ -200,16 +194,19 @@ bitand_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// assert_eq!(bv1 | bv2, expected);
 /// ```
 #[lang = "bitor"]
+#[doc(alias = "|")]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} | {RHS}`"]
-pub trait BitOr<RHS=Self> {
+#[rustc_on_unimplemented(message="no implementation for `{Self} | {Rhs}`",
+                         label="no implementation for `{Self} | {Rhs}`")]
+pub trait BitOr<Rhs=Self> {
     /// The resulting type after applying the `|` operator.
     #[stable(feature = "rust1", since = "1.0.0")]
     type Output;
 
     /// Performs the `|` operation.
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    fn bitor(self, rhs: RHS) -> Self::Output;
+    fn bitor(self, rhs: Rhs) -> Self::Output;
 }
 
 macro_rules! bitor_impl {
@@ -230,7 +227,7 @@ bitor_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 
 /// The bitwise XOR operator `^`.
 ///
-/// Note that `RHS` is `Self` by default, but this is not mandatory.
+/// Note that `Rhs` is `Self` by default, but this is not mandatory.
 ///
 /// # Examples
 ///
@@ -246,7 +243,7 @@ bitor_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 ///     type Output = Self;
 ///
 ///     // rhs is the "right-hand side" of the expression `a ^ b`
-///     fn bitxor(self, rhs: Self) -> Self {
+///     fn bitxor(self, rhs: Self) -> Self::Output {
 ///         Scalar(self.0 ^ rhs.0)
 ///     }
 /// }
@@ -268,7 +265,7 @@ bitor_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// impl BitXor for BooleanVector {
 ///     type Output = Self;
 ///
-///     fn bitxor(self, BooleanVector(rhs): Self) -> Self {
+///     fn bitxor(self, BooleanVector(rhs): Self) -> Self::Output {
 ///         let BooleanVector(lhs) = self;
 ///         assert_eq!(lhs.len(), rhs.len());
 ///         BooleanVector(lhs.iter()
@@ -284,16 +281,19 @@ bitor_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// assert_eq!(bv1 ^ bv2, expected);
 /// ```
 #[lang = "bitxor"]
+#[doc(alias = "^")]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} ^ {RHS}`"]
-pub trait BitXor<RHS=Self> {
+#[rustc_on_unimplemented(message="no implementation for `{Self} ^ {Rhs}`",
+                         label="no implementation for `{Self} ^ {Rhs}`")]
+pub trait BitXor<Rhs=Self> {
     /// The resulting type after applying the `^` operator.
     #[stable(feature = "rust1", since = "1.0.0")]
     type Output;
 
     /// Performs the `^` operation.
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    fn bitxor(self, rhs: RHS) -> Self::Output;
+    fn bitxor(self, rhs: Rhs) -> Self::Output;
 }
 
 macro_rules! bitxor_impl {
@@ -312,7 +312,12 @@ macro_rules! bitxor_impl {
 
 bitxor_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 
-/// The left shift operator `<<`.
+/// The left shift operator `<<`. Note that because this trait is implemented
+/// for all integer types with multiple right-hand-side types, Rust's type
+/// checker has special handling for `_ << _`, setting the result type for
+/// integer operations to the type of the left-hand-side operand. This means
+/// that though `a << b` and `a.shl(b)` are one and the same from an evaluation
+/// standpoint, they are different when it comes to type inference.
 ///
 /// # Examples
 ///
@@ -350,7 +355,7 @@ bitxor_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// impl<T: Clone> Shl<usize> for SpinVector<T> {
 ///     type Output = Self;
 ///
-///     fn shl(self, rhs: usize) -> SpinVector<T> {
+///     fn shl(self, rhs: usize) -> Self::Output {
 ///         // Rotate the vector by `rhs` places.
 ///         let (a, b) = self.vec.split_at(rhs);
 ///         let mut spun_vector: Vec<T> = vec![];
@@ -364,16 +369,19 @@ bitxor_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 ///            SpinVector { vec: vec![2, 3, 4, 0, 1] });
 /// ```
 #[lang = "shl"]
+#[doc(alias = "<<")]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} << {RHS}`"]
-pub trait Shl<RHS> {
+#[rustc_on_unimplemented(message="no implementation for `{Self} << {Rhs}`",
+                         label="no implementation for `{Self} << {Rhs}`")]
+pub trait Shl<Rhs=Self> {
     /// The resulting type after applying the `<<` operator.
     #[stable(feature = "rust1", since = "1.0.0")]
     type Output;
 
     /// Performs the `<<` operation.
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    fn shl(self, rhs: RHS) -> Self::Output;
+    fn shl(self, rhs: Rhs) -> Self::Output;
 }
 
 macro_rules! shl_impl {
@@ -413,7 +421,12 @@ macro_rules! shl_impl_all {
 
 shl_impl_all! { u8 u16 u32 u64 u128 usize i8 i16 i32 i64 isize i128 }
 
-/// The right shift operator `>>`.
+/// The right shift operator `>>`. Note that because this trait is implemented
+/// for all integer types with multiple right-hand-side types, Rust's type
+/// checker has special handling for `_ >> _`, setting the result type for
+/// integer operations to the type of the left-hand-side operand. This means
+/// that though `a >> b` and `a.shr(b)` are one and the same from an evaluation
+/// standpoint, they are different when it comes to type inference.
 ///
 /// # Examples
 ///
@@ -451,7 +464,7 @@ shl_impl_all! { u8 u16 u32 u64 u128 usize i8 i16 i32 i64 isize i128 }
 /// impl<T: Clone> Shr<usize> for SpinVector<T> {
 ///     type Output = Self;
 ///
-///     fn shr(self, rhs: usize) -> SpinVector<T> {
+///     fn shr(self, rhs: usize) -> Self::Output {
 ///         // Rotate the vector by `rhs` places.
 ///         let (a, b) = self.vec.split_at(self.vec.len() - rhs);
 ///         let mut spun_vector: Vec<T> = vec![];
@@ -465,16 +478,19 @@ shl_impl_all! { u8 u16 u32 u64 u128 usize i8 i16 i32 i64 isize i128 }
 ///            SpinVector { vec: vec![3, 4, 0, 1, 2] });
 /// ```
 #[lang = "shr"]
+#[doc(alias = ">>")]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} >> {RHS}`"]
-pub trait Shr<RHS> {
+#[rustc_on_unimplemented(message="no implementation for `{Self} >> {Rhs}`",
+                         label="no implementation for `{Self} >> {Rhs}`")]
+pub trait Shr<Rhs=Self> {
     /// The resulting type after applying the `>>` operator.
     #[stable(feature = "rust1", since = "1.0.0")]
     type Output;
 
     /// Performs the `>>` operation.
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    fn shr(self, rhs: RHS) -> Self::Output;
+    fn shr(self, rhs: Rhs) -> Self::Output;
 }
 
 macro_rules! shr_impl {
@@ -578,8 +594,10 @@ shr_impl_all! { u8 u16 u32 u64 u128 usize i8 i16 i32 i64 i128 isize }
 /// assert_eq!(bv, expected);
 /// ```
 #[lang = "bitand_assign"]
+#[doc(alias = "&=")]
 #[stable(feature = "op_assign_traits", since = "1.8.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} &= {Rhs}`"]
+#[rustc_on_unimplemented(message="no implementation for `{Self} &= {Rhs}`",
+                         label="no implementation for `{Self} &= {Rhs}`")]
 pub trait BitAndAssign<Rhs=Self> {
     /// Performs the `&=` operation.
     #[stable(feature = "op_assign_traits", since = "1.8.0")]
@@ -593,6 +611,8 @@ macro_rules! bitand_assign_impl {
             #[inline]
             fn bitand_assign(&mut self, other: $t) { *self &= other }
         }
+
+        forward_ref_op_assign! { impl BitAndAssign, bitand_assign for $t, $t }
     )+)
 }
 
@@ -623,8 +643,10 @@ bitand_assign_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// assert_eq!(prefs, PersonalPreferences { likes_cats: true, likes_dogs: true });
 /// ```
 #[lang = "bitor_assign"]
+#[doc(alias = "|=")]
 #[stable(feature = "op_assign_traits", since = "1.8.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} |= {Rhs}`"]
+#[rustc_on_unimplemented(message="no implementation for `{Self} |= {Rhs}`",
+                         label="no implementation for `{Self} |= {Rhs}`")]
 pub trait BitOrAssign<Rhs=Self> {
     /// Performs the `|=` operation.
     #[stable(feature = "op_assign_traits", since = "1.8.0")]
@@ -638,6 +660,8 @@ macro_rules! bitor_assign_impl {
             #[inline]
             fn bitor_assign(&mut self, other: $t) { *self |= other }
         }
+
+        forward_ref_op_assign! { impl BitOrAssign, bitor_assign for $t, $t }
     )+)
 }
 
@@ -668,8 +692,10 @@ bitor_assign_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// assert_eq!(personality, Personality { has_soul: true, likes_knitting: false});
 /// ```
 #[lang = "bitxor_assign"]
+#[doc(alias = "^=")]
 #[stable(feature = "op_assign_traits", since = "1.8.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} ^= {Rhs}`"]
+#[rustc_on_unimplemented(message="no implementation for `{Self} ^= {Rhs}`",
+                         label="no implementation for `{Self} ^= {Rhs}`")]
 pub trait BitXorAssign<Rhs=Self> {
     /// Performs the `^=` operation.
     #[stable(feature = "op_assign_traits", since = "1.8.0")]
@@ -683,6 +709,8 @@ macro_rules! bitxor_assign_impl {
             #[inline]
             fn bitxor_assign(&mut self, other: $t) { *self ^= other }
         }
+
+        forward_ref_op_assign! { impl BitXorAssign, bitxor_assign for $t, $t }
     )+)
 }
 
@@ -711,9 +739,11 @@ bitxor_assign_impl! { bool usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 /// assert_eq!(scalar, Scalar(16));
 /// ```
 #[lang = "shl_assign"]
+#[doc(alias = "<<=")]
 #[stable(feature = "op_assign_traits", since = "1.8.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} <<= {Rhs}`"]
-pub trait ShlAssign<Rhs> {
+#[rustc_on_unimplemented(message="no implementation for `{Self} <<= {Rhs}`",
+                         label="no implementation for `{Self} <<= {Rhs}`")]
+pub trait ShlAssign<Rhs=Self> {
     /// Performs the `<<=` operation.
     #[stable(feature = "op_assign_traits", since = "1.8.0")]
     fn shl_assign(&mut self, rhs: Rhs);
@@ -729,6 +759,8 @@ macro_rules! shl_assign_impl {
                 *self <<= other
             }
         }
+
+        forward_ref_op_assign! { impl ShlAssign, shl_assign for $t, $f }
     )
 }
 
@@ -775,8 +807,10 @@ shl_assign_impl_all! { u8 u16 u32 u64 u128 usize i8 i16 i32 i64 i128 isize }
 /// assert_eq!(scalar, Scalar(4));
 /// ```
 #[lang = "shr_assign"]
+#[doc(alias = ">>=")]
 #[stable(feature = "op_assign_traits", since = "1.8.0")]
-#[rustc_on_unimplemented = "no implementation for `{Self} >>= {Rhs}`"]
+#[rustc_on_unimplemented(message="no implementation for `{Self} >>= {Rhs}`",
+                         label="no implementation for `{Self} >>= {Rhs}`")]
 pub trait ShrAssign<Rhs=Self> {
     /// Performs the `>>=` operation.
     #[stable(feature = "op_assign_traits", since = "1.8.0")]
@@ -793,6 +827,8 @@ macro_rules! shr_assign_impl {
                 *self >>= other
             }
         }
+
+        forward_ref_op_assign! { impl ShrAssign, shr_assign for $t, $f }
     )
 }
 

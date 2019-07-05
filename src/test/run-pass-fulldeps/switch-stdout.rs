@@ -1,21 +1,7 @@
-// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-#![feature(rustc_private)]
-
-extern crate rustc_back;
-
+use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
-
-use rustc_back::tempdir::TempDir;
+use std::path::PathBuf;
 
 #[cfg(unix)]
 fn switch_stdout_to(file: File) {
@@ -48,8 +34,8 @@ fn switch_stdout_to(file: File) {
 }
 
 fn main() {
-    let td = TempDir::new("foo").unwrap();
-    let path = td.path().join("bar");
+    let path = PathBuf::from(env::var_os("RUST_TEST_TMPDIR").unwrap());
+    let path = path.join("switch-stdout-output");
     let f = File::create(&path).unwrap();
 
     println!("foo");

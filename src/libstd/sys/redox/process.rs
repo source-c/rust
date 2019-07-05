@@ -1,24 +1,21 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::env::{self, split_paths};
+use crate::ffi::{CStr, OsStr};
+use crate::fmt;
+use crate::fs::File;
+use crate::io::{self, prelude::*, BufReader, Error, ErrorKind, SeekFrom};
+use crate::os::unix::ffi::OsStrExt;
+use crate::path::{Path, PathBuf};
+use crate::ptr;
+use crate::sys::ext::fs::MetadataExt;
+use crate::sys::ext::io::AsRawFd;
+use crate::sys::fd::FileDesc;
+use crate::sys::fs::{File as SysFile, OpenOptions};
+use crate::sys::os::{ENV_LOCK, environ};
+use crate::sys::pipe::{self, AnonPipe};
+use crate::sys::{cvt, syscall};
+use crate::sys_common::process::{CommandEnv, DefaultEnvKey};
 
-use collections::hash_map::HashMap;
-use env::{self, split_paths};
-use ffi::OsStr;
-use os::unix::ffi::OsStrExt;
-use fmt;
-use io::{self, Error, ErrorKind};
-use path::{Path, PathBuf};
-use sys::fd::FileDesc;
-use sys::fs::{File, OpenOptions};
-use sys::pipe::{self, AnonPipe};
-use sys::{cvt, syscall};
+use libc::{EXIT_SUCCESS, EXIT_FAILURE};
 
 ////////////////////////////////////////////////////////////////////////////////
 // Command
@@ -44,13 +41,13 @@ pub struct Command {
     // other keys.
     program: String,
     args: Vec<String>,
-    env: HashMap<String, String>,
+    env: CommandEnv<DefaultEnvKey>,
 
     cwd: Option<String>,
     uid: Option<u32>,
     gid: Option<u32>,
     saw_nul: bool,
-    closures: Vec<Box<FnMut() -> io::Result<()> + Send + Sync>>,
+    closures: Vec<Box<dyn FnMut() -> io::Result<()> + Send + Sync>>,
     stdin: Option<Stdio>,
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
@@ -90,7 +87,7 @@ impl Command {
         Command {
             program: program.to_str().unwrap().to_owned(),
             args: Vec::new(),
-            env: HashMap::new(),
+            env: Default::default(),
             cwd: None,
             uid: None,
             gid: None,
@@ -106,16 +103,8 @@ impl Command {
         self.args.push(arg.to_str().unwrap().to_owned());
     }
 
-    pub fn env(&mut self, key: &OsStr, val: &OsStr) {
-        self.env.insert(key.to_str().unwrap().to_owned(), val.to_str().unwrap().to_owned());
-    }
-
-    pub fn env_remove(&mut self, key: &OsStr) {
-        self.env.remove(key.to_str().unwrap());
-    }
-
-    pub fn env_clear(&mut self) {
-        self.env.clear();
+    pub fn env_mut(&mut self) -> &mut CommandEnv<DefaultEnvKey> {
+        &mut self.env
     }
 
     pub fn cwd(&mut self, dir: &OsStr) {
@@ -128,8 +117,10 @@ impl Command {
         self.gid = Some(id);
     }
 
-    pub fn before_exec(&mut self,
-                       f: Box<FnMut() -> io::Result<()> + Send + Sync>) {
+    pub unsafe fn pre_exec(
+        &mut self,
+        f: Box<dyn FnMut() -> io::Result<()> + Send + Sync>,
+    ) {
         self.closures.push(f);
     }
 
@@ -145,7 +136,7 @@ impl Command {
 
     pub fn spawn(&mut self, default: Stdio, needs_stdin: bool)
                  -> io::Result<(Process, StdioPipes)> {
-         const CLOEXEC_MSG_FOOTER: &'static [u8] = b"NOEX";
+         const CLOEXEC_MSG_FOOTER: &[u8] = b"NOEX";
 
          if self.saw_nul {
              return Err(io::Error::new(ErrorKind::InvalidInput,
@@ -159,7 +150,7 @@ impl Command {
              match cvt(syscall::clone(0))? {
                  0 => {
                      drop(input);
-                     let err = self.do_exec(theirs);
+                     let Err(err) = self.do_exec(theirs);
                      let errno = err.raw_os_error().unwrap_or(syscall::EINVAL) as u32;
                      let bytes = [
                          (errno >> 24) as u8,
@@ -227,7 +218,10 @@ impl Command {
         }
 
         match self.setup_io(default, true) {
-            Ok((_, theirs)) => unsafe { self.do_exec(theirs) },
+            Ok((_, theirs)) => unsafe {
+                let Err(e) = self.do_exec(theirs);
+                e
+            },
             Err(e) => e,
         }
     }
@@ -262,60 +256,45 @@ impl Command {
     // allocation). Instead we just close it manually. This will never
     // have the drop glue anyway because this code never returns (the
     // child will either exec() or invoke syscall::exit)
-    unsafe fn do_exec(&mut self, stdio: ChildPipes) -> io::Error {
-        macro_rules! t {
-            ($e:expr) => (match $e {
-                Ok(e) => e,
-                Err(e) => return e,
-            })
-        }
-
+    unsafe fn do_exec(&mut self, stdio: ChildPipes) -> Result<!, io::Error> {
         if let Some(fd) = stdio.stderr.fd() {
-            t!(cvt(syscall::dup2(fd, 2, &[])));
-            let mut flags = t!(cvt(syscall::fcntl(2, syscall::F_GETFD, 0)));
+            cvt(syscall::dup2(fd, 2, &[]))?;
+            let mut flags = cvt(syscall::fcntl(2, syscall::F_GETFD, 0))?;
             flags &= ! syscall::O_CLOEXEC;
-            t!(cvt(syscall::fcntl(2, syscall::F_SETFD, flags)));
+            cvt(syscall::fcntl(2, syscall::F_SETFD, flags))?;
         }
         if let Some(fd) = stdio.stdout.fd() {
-            t!(cvt(syscall::dup2(fd, 1, &[])));
-            let mut flags = t!(cvt(syscall::fcntl(1, syscall::F_GETFD, 0)));
+            cvt(syscall::dup2(fd, 1, &[]))?;
+            let mut flags = cvt(syscall::fcntl(1, syscall::F_GETFD, 0))?;
             flags &= ! syscall::O_CLOEXEC;
-            t!(cvt(syscall::fcntl(1, syscall::F_SETFD, flags)));
+            cvt(syscall::fcntl(1, syscall::F_SETFD, flags))?;
         }
         if let Some(fd) = stdio.stdin.fd() {
-            t!(cvt(syscall::dup2(fd, 0, &[])));
-            let mut flags = t!(cvt(syscall::fcntl(0, syscall::F_GETFD, 0)));
+            cvt(syscall::dup2(fd, 0, &[]))?;
+            let mut flags = cvt(syscall::fcntl(0, syscall::F_GETFD, 0))?;
             flags &= ! syscall::O_CLOEXEC;
-            t!(cvt(syscall::fcntl(0, syscall::F_SETFD, flags)));
+            cvt(syscall::fcntl(0, syscall::F_SETFD, flags))?;
         }
 
         if let Some(g) = self.gid {
-            t!(cvt(syscall::setregid(g as usize, g as usize)));
+            cvt(syscall::setregid(g as usize, g as usize))?;
         }
         if let Some(u) = self.uid {
-            t!(cvt(syscall::setreuid(u as usize, u as usize)));
+            cvt(syscall::setreuid(u as usize, u as usize))?;
         }
         if let Some(ref cwd) = self.cwd {
-            t!(cvt(syscall::chdir(cwd)));
+            cvt(syscall::chdir(cwd))?;
         }
 
         for callback in self.closures.iter_mut() {
-            t!(callback());
+            callback()?;
         }
 
-        let mut args: Vec<[usize; 2]> = Vec::new();
-        args.push([self.program.as_ptr() as usize, self.program.len()]);
-        for arg in self.args.iter() {
-            args.push([arg.as_ptr() as usize, arg.len()]);
-        }
-
-        for (key, val) in self.env.iter() {
-            env::set_var(key, val);
-        }
+        self.env.apply();
 
         let program = if self.program.contains(':') || self.program.contains('/') {
             Some(PathBuf::from(&self.program))
-        } else if let Ok(path_env) = ::env::var("PATH") {
+        } else if let Ok(path_env) = env::var("PATH") {
             let mut program = None;
             for mut path in split_paths(&path_env) {
                 path.push(&self.program);
@@ -329,17 +308,95 @@ impl Command {
             None
         };
 
-        if let Some(program) = program {
-            if let Err(err) = syscall::execve(program.as_os_str().as_bytes(), &args) {
-                io::Error::from_raw_os_error(err.errno as i32)
-            } else {
-                panic!("return from exec without err");
-            }
+        let mut file = if let Some(program) = program {
+            File::open(program.as_os_str())?
         } else {
-            io::Error::from_raw_os_error(syscall::ENOENT)
+            return Err(io::Error::from_raw_os_error(syscall::ENOENT));
+        };
+
+        // Push all the arguments
+        let mut args: Vec<[usize; 2]> = Vec::with_capacity(1 + self.args.len());
+
+        let interpreter = {
+            let mut reader = BufReader::new(&file);
+
+            let mut shebang = [0; 2];
+            let mut read = 0;
+            loop {
+                match reader.read(&mut shebang[read..])? {
+                    0 => break,
+                    n => read += n,
+                }
+            }
+
+            if &shebang == b"#!" {
+                // This is an interpreted script.
+                // First of all, since we'll be passing another file to
+                // fexec(), we need to manually check that we have permission
+                // to execute this file:
+                let uid = cvt(syscall::getuid())?;
+                let gid = cvt(syscall::getgid())?;
+                let meta = file.metadata()?;
+
+                let mode = if uid == meta.uid() as usize {
+                    meta.mode() >> 3*2 & 0o7
+                } else if gid == meta.gid() as usize {
+                    meta.mode() >> 3*1 & 0o7
+                } else {
+                    meta.mode() & 0o7
+                };
+                if mode & 1 == 0 {
+                    return Err(io::Error::from_raw_os_error(syscall::EPERM));
+                }
+
+                // Second of all, we need to actually read which interpreter it wants
+                let mut interpreter = Vec::new();
+                reader.read_until(b'\n', &mut interpreter)?;
+                // Pop one trailing newline, if any
+                if interpreter.ends_with(&[b'\n']) {
+                    interpreter.pop().unwrap();
+                }
+
+                // FIXME: Here we could just reassign `file` directly, if it
+                // wasn't for lexical lifetimes. Remove the whole `let
+                // interpreter = { ... };` hack once NLL lands.
+                // NOTE: Although DO REMEMBER to make sure the interpreter path
+                // still lives long enough to reach fexec.
+                Some(interpreter)
+            } else {
+                None
+            }
+        };
+        if let Some(ref interpreter) = interpreter {
+            let path: &OsStr = OsStr::from_bytes(&interpreter);
+            file = File::open(path)?;
+
+            args.push([interpreter.as_ptr() as usize, interpreter.len()]);
+        } else {
+            file.seek(SeekFrom::Start(0))?;
+        }
+
+        args.push([self.program.as_ptr() as usize, self.program.len()]);
+        args.extend(self.args.iter().map(|arg| [arg.as_ptr() as usize, arg.len()]));
+
+        // Push all the variables
+        let mut vars: Vec<[usize; 2]> = Vec::new();
+        {
+            let _guard = ENV_LOCK.lock();
+            let mut environ = *environ();
+            while *environ != ptr::null() {
+                let var = CStr::from_ptr(*environ).to_bytes();
+                vars.push([var.as_ptr() as usize, var.len()]);
+                environ = environ.offset(1);
+            }
+        }
+
+        if let Err(err) = syscall::fexec(file.as_raw_fd(), &args, &vars) {
+            Err(io::Error::from_raw_os_error(err.errno as i32))
+        } else {
+            panic!("return from exec without err");
         }
     }
-
 
     fn setup_io(&self, default: Stdio, needs_stdin: bool)
                 -> io::Result<(StdioPipes, ChildPipes)> {
@@ -400,7 +457,7 @@ impl Stdio {
                 let mut opts = OpenOptions::new();
                 opts.read(readable);
                 opts.write(!readable);
-                let fd = File::open(Path::new("null:"), &opts)?;
+                let fd = SysFile::open(Path::new("null:"), &opts)?;
                 Ok((ChildStdio::Owned(fd.into_fd()), None))
             }
         }
@@ -413,8 +470,8 @@ impl From<AnonPipe> for Stdio {
     }
 }
 
-impl From<File> for Stdio {
-    fn from(file: File) -> Stdio {
+impl From<SysFile> for Stdio {
+    fn from(file: SysFile) -> Stdio {
         Stdio::Fd(file.into_fd())
     }
 }
@@ -430,7 +487,7 @@ impl ChildStdio {
 }
 
 impl fmt::Debug for Command {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.program)?;
         for arg in &self.args {
             write!(f, " {:?}", arg)?;
@@ -480,7 +537,7 @@ impl From<i32> for ExitStatus {
 }
 
 impl fmt::Display for ExitStatus {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(code) = self.code() {
             write!(f, "exit code: {}", code)
         } else {
@@ -490,7 +547,19 @@ impl fmt::Display for ExitStatus {
     }
 }
 
-/// The unique id of the process (this should never be negative).
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct ExitCode(u8);
+
+impl ExitCode {
+    pub const SUCCESS: ExitCode = ExitCode(EXIT_SUCCESS as _);
+    pub const FAILURE: ExitCode = ExitCode(EXIT_FAILURE as _);
+
+    pub fn as_i32(&self) -> i32 {
+        self.0 as i32
+    }
+}
+
+/// The unique ID of the process (this should never be negative).
 pub struct Process {
     pid: usize,
     status: Option<ExitStatus>,

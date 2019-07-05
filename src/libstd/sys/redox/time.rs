@@ -1,18 +1,10 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::cmp::Ordering;
+use crate::fmt;
+use crate::sys::{cvt, syscall};
+use crate::time::Duration;
+use crate::convert::TryInto;
 
-use cmp::Ordering;
-use fmt;
-use sys::{cvt, syscall};
-use time::Duration;
-use convert::TryInto;
+use core::hash::{Hash, Hasher};
 
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
@@ -40,51 +32,47 @@ impl Timespec {
         }
     }
 
-    fn add_duration(&self, other: &Duration) -> Timespec {
+    fn checked_add_duration(&self, other: &Duration) -> Option<Timespec> {
         let mut secs = other
             .as_secs()
             .try_into() // <- target type would be `i64`
             .ok()
-            .and_then(|secs| self.t.tv_sec.checked_add(secs))
-            .expect("overflow when adding duration to time");
+            .and_then(|secs| self.t.tv_sec.checked_add(secs))?;
 
         // Nano calculations can't overflow because nanos are <1B which fit
         // in a u32.
         let mut nsec = other.subsec_nanos() + self.t.tv_nsec as u32;
         if nsec >= NSEC_PER_SEC as u32 {
             nsec -= NSEC_PER_SEC as u32;
-            secs = secs.checked_add(1).expect("overflow when adding \
-                                               duration to time");
+            secs = secs.checked_add(1)?;
         }
-        Timespec {
+        Some(Timespec {
             t: syscall::TimeSpec {
                 tv_sec: secs,
                 tv_nsec: nsec as i32,
             },
-        }
+        })
     }
 
-    fn sub_duration(&self, other: &Duration) -> Timespec {
+    fn checked_sub_duration(&self, other: &Duration) -> Option<Timespec> {
         let mut secs = other
             .as_secs()
             .try_into() // <- target type would be `i64`
             .ok()
-            .and_then(|secs| self.t.tv_sec.checked_sub(secs))
-            .expect("overflow when subtracting duration from time");
+            .and_then(|secs| self.t.tv_sec.checked_sub(secs))?;
 
         // Similar to above, nanos can't overflow.
         let mut nsec = self.t.tv_nsec as i32 - other.subsec_nanos() as i32;
         if nsec < 0 {
             nsec += NSEC_PER_SEC as i32;
-            secs = secs.checked_sub(1).expect("overflow when subtracting \
-                                               duration from time");
+            secs = secs.checked_sub(1)?;
         }
-        Timespec {
+        Some(Timespec {
             t: syscall::TimeSpec {
                 tv_sec: secs,
                 tv_nsec: nsec as i32,
             },
-        }
+        })
     }
 }
 
@@ -110,12 +98,19 @@ impl Ord for Timespec {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+impl Hash for Timespec {
+    fn hash<H : Hasher>(&self, state: &mut H) {
+        self.t.tv_sec.hash(state);
+        self.t.tv_nsec.hash(state);
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Instant {
     t: Timespec,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SystemTime {
     t: Timespec,
 }
@@ -134,23 +129,29 @@ impl Instant {
         Instant { t: now(syscall::CLOCK_MONOTONIC) }
     }
 
-    pub fn sub_instant(&self, other: &Instant) -> Duration {
-        self.t.sub_timespec(&other.t).unwrap_or_else(|_| {
-            panic!("other was less than the current instant")
-        })
+    pub const fn zero() -> Instant {
+        Instant { t: Timespec { t: syscall::TimeSpec { tv_sec: 0, tv_nsec: 0 } } }
     }
 
-    pub fn add_duration(&self, other: &Duration) -> Instant {
-        Instant { t: self.t.add_duration(other) }
+    pub fn actually_monotonic() -> bool {
+        false
     }
 
-    pub fn sub_duration(&self, other: &Duration) -> Instant {
-        Instant { t: self.t.sub_duration(other) }
+    pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
+        self.t.sub_timespec(&other.t).ok()
+    }
+
+    pub fn checked_add_duration(&self, other: &Duration) -> Option<Instant> {
+        Some(Instant { t: self.t.checked_add_duration(other)? })
+    }
+
+    pub fn checked_sub_duration(&self, other: &Duration) -> Option<Instant> {
+        Some(Instant { t: self.t.checked_sub_duration(other)? })
     }
 }
 
 impl fmt::Debug for Instant {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Instant")
          .field("tv_sec", &self.t.t.tv_sec)
          .field("tv_nsec", &self.t.t.tv_nsec)
@@ -168,23 +169,23 @@ impl SystemTime {
         self.t.sub_timespec(&other.t)
     }
 
-    pub fn add_duration(&self, other: &Duration) -> SystemTime {
-        SystemTime { t: self.t.add_duration(other) }
+    pub fn checked_add_duration(&self, other: &Duration) -> Option<SystemTime> {
+        Some(SystemTime { t: self.t.checked_add_duration(other)? })
     }
 
-    pub fn sub_duration(&self, other: &Duration) -> SystemTime {
-        SystemTime { t: self.t.sub_duration(other) }
+    pub fn checked_sub_duration(&self, other: &Duration) -> Option<SystemTime> {
+        Some(SystemTime { t: self.t.checked_sub_duration(other)? })
     }
 }
 
 impl From<syscall::TimeSpec> for SystemTime {
     fn from(t: syscall::TimeSpec) -> SystemTime {
-        SystemTime { t: Timespec { t: t } }
+        SystemTime { t: Timespec { t } }
     }
 }
 
 impl fmt::Debug for SystemTime {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SystemTime")
          .field("tv_sec", &self.t.t.tv_sec)
          .field("tv_nsec", &self.t.t.tv_nsec)

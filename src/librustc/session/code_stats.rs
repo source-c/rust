@@ -1,18 +1,5 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use ty::AdtKind;
-use ty::layout::{Align, Size};
-
+use rustc_target::abi::{Align, Size};
 use rustc_data_structures::fx::{FxHashSet};
-
 use std::cmp::{self, Ordering};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -38,16 +25,6 @@ pub struct FieldInfo {
     pub align: u64,
 }
 
-impl From<AdtKind> for DataTypeKind {
-    fn from(kind: AdtKind) -> Self {
-        match kind {
-            AdtKind::Struct => DataTypeKind::Struct,
-            AdtKind::Enum => DataTypeKind::Enum,
-            AdtKind::Union => DataTypeKind::Union,
-        }
-    }
-}
-
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum DataTypeKind {
     Struct,
@@ -62,30 +39,37 @@ pub struct TypeSizeInfo {
     pub type_description: String,
     pub align: u64,
     pub overall_size: u64,
+    pub packed: bool,
     pub opt_discr_size: Option<u64>,
     pub variants: Vec<VariantInfo>,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Default)]
 pub struct CodeStats {
     type_sizes: FxHashSet<TypeSizeInfo>,
 }
 
 impl CodeStats {
-    pub fn new() -> Self { CodeStats { type_sizes: FxHashSet() } }
-
     pub fn record_type_size<S: ToString>(&mut self,
                                          kind: DataTypeKind,
                                          type_desc: S,
                                          align: Align,
                                          overall_size: Size,
+                                         packed: bool,
                                          opt_discr_size: Option<Size>,
-                                         variants: Vec<VariantInfo>) {
+                                         mut variants: Vec<VariantInfo>) {
+        // Sort variants so the largest ones are shown first. A stable sort is
+        // used here so that source code order is preserved for all variants
+        // that have the same size.
+        variants.sort_by(|info1, info2| {
+            info2.size.cmp(&info1.size)
+        });
         let info = TypeSizeInfo {
             kind,
             type_description: type_desc.to_string(),
-            align: align.abi(),
+            align: align.bytes(),
             overall_size: overall_size.bytes(),
+            packed: packed,
             opt_discr_size: opt_discr_size.map(|s| s.bytes()),
             variants,
         };
@@ -132,8 +116,8 @@ impl CodeStats {
                 let VariantInfo { ref name, kind: _, align: _, size, ref fields } = *variant_info;
                 let indent = if !struct_like {
                     let name = match name.as_ref() {
-                        Some(name) => format!("{}", name),
-                        None => format!("{}", i),
+                        Some(name) => name.to_owned(),
+                        None => i.to_string(),
                     };
                     println!("print-type-size {}variant `{}`: {} bytes",
                              indent, name, size - discr_size);
@@ -153,16 +137,26 @@ impl CodeStats {
                 for field in fields.iter() {
                     let FieldInfo { ref name, offset, size, align } = *field;
 
-                    // Include field alignment in output only if it caused padding injection
-                    if min_offset != offset {
+                    if offset > min_offset {
                         let pad = offset - min_offset;
                         println!("print-type-size {}padding: {} bytes",
                                  indent, pad);
-                        println!("print-type-size {}field `.{}`: {} bytes, alignment: {} bytes",
-                                 indent, name, size, align);
-                    } else {
+                    }
+
+                    if offset < min_offset {
+                        // if this happens something is very wrong
+                        println!("print-type-size {}field `.{}`: {} bytes, \
+                                  offset: {} bytes, \
+                                  alignment: {} bytes",
+                                 indent, name, size, offset, align);
+                    } else if info.packed || offset == min_offset {
                         println!("print-type-size {}field `.{}`: {} bytes",
                                  indent, name, size);
+                    } else {
+                        // Include field alignment in output only if it caused padding injection
+                        println!("print-type-size {}field `.{}`: {} bytes, \
+                                  alignment: {} bytes",
+                                 indent, name, size, align);
                     }
 
                     min_offset = offset + size;

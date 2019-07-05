@@ -1,13 +1,3 @@
-// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Additional functionality for numerics.
 //!
 //! This module provides some extra types that are useful when doing numerical
@@ -21,8 +11,19 @@ pub use core::num::{FpCategory, ParseIntError, ParseFloatError, TryFromIntError}
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::num::Wrapping;
 
-#[cfg(test)] use fmt;
-#[cfg(test)] use ops::{Add, Sub, Mul, Div, Rem};
+#[stable(feature = "nonzero", since = "1.28.0")]
+pub use core::num::{NonZeroU8, NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU128, NonZeroUsize};
+#[stable(feature = "signed_nonzero", since = "1.34.0")]
+pub use core::num::{NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroIsize};
+
+#[unstable(feature = "int_error_matching",
+           reason = "it can be useful to match errors when making error messages \
+                     for integer parsing",
+           issue = "22639")]
+pub use core::num::IntErrorKind;
+
+#[cfg(test)] use crate::fmt;
+#[cfg(test)] use crate::ops::{Add, Sub, Mul, Div, Rem};
 
 /// Helper function for testing numeric operations
 #[cfg(test)]
@@ -42,16 +43,16 @@ pub fn test_num<T>(ten: T, two: T) where
 
 #[cfg(test)]
 mod tests {
-    use u8;
-    use u16;
-    use u32;
-    use u64;
-    use usize;
-    use ops::Mul;
+    use crate::u8;
+    use crate::u16;
+    use crate::u32;
+    use crate::u64;
+    use crate::usize;
+    use crate::ops::Mul;
 
     #[test]
     fn test_saturating_add_uint() {
-        use usize::MAX;
+        use crate::usize::MAX;
         assert_eq!(3_usize.saturating_add(5_usize), 8_usize);
         assert_eq!(3_usize.saturating_add(MAX-1), MAX);
         assert_eq!(MAX.saturating_add(MAX), MAX);
@@ -60,7 +61,7 @@ mod tests {
 
     #[test]
     fn test_saturating_sub_uint() {
-        use usize::MAX;
+        use crate::usize::MAX;
         assert_eq!(5_usize.saturating_sub(3_usize), 2_usize);
         assert_eq!(3_usize.saturating_sub(5_usize), 0_usize);
         assert_eq!(0_usize.saturating_sub(1_usize), 0_usize);
@@ -69,7 +70,7 @@ mod tests {
 
     #[test]
     fn test_saturating_add_int() {
-        use isize::{MIN,MAX};
+        use crate::isize::{MIN,MAX};
         assert_eq!(3i32.saturating_add(5), 8);
         assert_eq!(3isize.saturating_add(MAX-1), MAX);
         assert_eq!(MAX.saturating_add(MAX), MAX);
@@ -81,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_saturating_sub_int() {
-        use isize::{MIN,MAX};
+        use crate::isize::{MIN,MAX};
         assert_eq!(3i32.saturating_sub(5), -2);
         assert_eq!(MIN.saturating_sub(1), MIN);
         assert_eq!((-2isize).saturating_sub(MAX), MIN);
@@ -169,7 +170,6 @@ mod tests {
 
     macro_rules! test_checked_next_power_of_two {
         ($test_name:ident, $T:ident) => (
-            #[cfg_attr(target_os = "emscripten", ignore)] // FIXME(#39119)
             fn $test_name() {
                 #![test]
                 assert_eq!((0 as $T).checked_next_power_of_two(), Some(1));
@@ -240,8 +240,8 @@ mod tests {
         assert_eq!(u64_val.to_string(), "0");
     }
 
-    fn from_str<T: ::str::FromStr>(t: &str) -> Option<T> {
-        ::str::FromStr::from_str(t).ok()
+    fn from_str<T: crate::str::FromStr>(t: &str) -> Option<T> {
+        crate::str::FromStr::from_str(t).ok()
     }
 
     #[test]
@@ -283,8 +283,7 @@ mod tests {
 
 #[cfg(test)]
 mod bench {
-    extern crate test;
-    use self::test::Bencher;
+    use test::Bencher;
 
     #[bench]
     fn bench_pow_function(b: &mut Bencher) {

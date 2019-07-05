@@ -1,13 +1,3 @@
-// Copyright 2012-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Global initialization and retrieval of command line arguments.
 //!
 //! On some platforms these are stored during runtime startup,
@@ -15,9 +5,9 @@
 
 #![allow(dead_code)] // runtime init functions not used during testing
 
-use ffi::OsString;
-use marker::PhantomData;
-use vec;
+use crate::ffi::OsString;
+use crate::marker::PhantomData;
+use crate::vec;
 
 /// One-time global initialization.
 pub unsafe fn init(argc: isize, argv: *const *const u8) { imp::init(argc, argv) }
@@ -59,75 +49,64 @@ impl DoubleEndedIterator for Args {
           target_os = "android",
           target_os = "freebsd",
           target_os = "dragonfly",
-          target_os = "bitrig",
           target_os = "netbsd",
           target_os = "openbsd",
           target_os = "solaris",
           target_os = "emscripten",
           target_os = "haiku",
           target_os = "l4re",
-          target_os = "fuchsia"))]
+          target_os = "fuchsia",
+          target_os = "hermit"))]
 mod imp {
-    use os::unix::prelude::*;
-    use mem;
-    use ffi::{CStr, OsString};
-    use marker::PhantomData;
-    use libc;
+    use crate::os::unix::prelude::*;
+    use crate::ptr;
+    use crate::ffi::{CStr, OsString};
+    use crate::marker::PhantomData;
     use super::Args;
 
-    use sys_common::mutex::Mutex;
+    use crate::sys_common::mutex::Mutex;
 
-    static mut GLOBAL_ARGS_PTR: usize = 0;
+    static mut ARGC: isize = 0;
+    static mut ARGV: *const *const u8 = ptr::null();
+    // We never call `ENV_LOCK.init()`, so it is UB to attempt to
+    // acquire this mutex reentrantly!
     static LOCK: Mutex = Mutex::new();
 
     pub unsafe fn init(argc: isize, argv: *const *const u8) {
-        let args = (0..argc).map(|i| {
-            CStr::from_ptr(*argv.offset(i) as *const libc::c_char).to_bytes().to_vec()
-        }).collect();
-
-        LOCK.lock();
-        let ptr = get_global_ptr();
-        assert!((*ptr).is_none());
-        (*ptr) = Some(box args);
-        LOCK.unlock();
+        let _guard = LOCK.lock();
+        ARGC = argc;
+        ARGV = argv;
     }
 
     pub unsafe fn cleanup() {
-        LOCK.lock();
-        *get_global_ptr() = None;
-        LOCK.unlock();
+        let _guard = LOCK.lock();
+        ARGC = 0;
+        ARGV = ptr::null();
     }
 
     pub fn args() -> Args {
-        let bytes = clone().unwrap_or(Vec::new());
-        let v: Vec<OsString> = bytes.into_iter().map(|v| {
-            OsStringExt::from_vec(v)
-        }).collect();
-        Args { iter: v.into_iter(), _dont_send_or_sync_me: PhantomData }
-    }
-
-    fn clone() -> Option<Vec<Vec<u8>>> {
-        unsafe {
-            LOCK.lock();
-            let ptr = get_global_ptr();
-            let ret = (*ptr).as_ref().map(|s| (**s).clone());
-            LOCK.unlock();
-            return ret
+        Args {
+            iter: clone().into_iter(),
+            _dont_send_or_sync_me: PhantomData
         }
     }
 
-    fn get_global_ptr() -> *mut Option<Box<Vec<Vec<u8>>>> {
-        unsafe { mem::transmute(&GLOBAL_ARGS_PTR) }
+    fn clone() -> Vec<OsString> {
+        unsafe {
+            let _guard = LOCK.lock();
+            (0..ARGC).map(|i| {
+                let cstr = CStr::from_ptr(*ARGV.offset(i) as *const libc::c_char);
+                OsStringExt::from_vec(cstr.to_bytes().to_vec())
+            }).collect()
+        }
     }
-
 }
 
 #[cfg(any(target_os = "macos",
           target_os = "ios"))]
 mod imp {
-    use ffi::CStr;
-    use marker::PhantomData;
-    use libc;
+    use crate::ffi::CStr;
+    use crate::marker::PhantomData;
     use super::Args;
 
     pub unsafe fn init(_argc: isize, _argv: *const *const u8) {
@@ -138,7 +117,7 @@ mod imp {
 
     #[cfg(target_os = "macos")]
     pub fn args() -> Args {
-        use os::unix::prelude::*;
+        use crate::os::unix::prelude::*;
         extern {
             // These functions are in crt_externs.h.
             fn _NSGetArgc() -> *mut libc::c_int;
@@ -173,9 +152,9 @@ mod imp {
     // res
     #[cfg(target_os = "ios")]
     pub fn args() -> Args {
-        use ffi::OsString;
-        use mem;
-        use str;
+        use crate::ffi::OsString;
+        use crate::mem;
+        use crate::str;
 
         extern {
             fn sel_registerName(name: *const libc::c_uchar) -> Sel;

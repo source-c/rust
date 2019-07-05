@@ -1,38 +1,24 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 /// A trait for customizing the behavior of the `?` operator.
 ///
 /// A type implementing `Try` is one that has a canonical way to view it
-/// in terms of a success/failure dichotomy.  This trait allows both
+/// in terms of a success/failure dichotomy. This trait allows both
 /// extracting those success or failure values from an existing instance and
 /// creating a new instance from a success or failure value.
 #[unstable(feature = "try_trait", issue = "42327")]
-#[cfg_attr(stage0,
-           rustc_on_unimplemented = "the `?` operator can only be used in a \
-                                     function that returns `Result` \
-                                     (or another type that implements `{Try}`)")]
-#[cfg_attr(not(stage0),
-           rustc_on_unimplemented(
-               on(all(
-                   any(from_method="from_error", from_method="from_ok"),
-                   from_desugaring="?"),
-                  message="the `?` operator can only be used in a \
-                           function that returns `Result` \
-                           (or another type that implements `{Try}`)",
-                  label="cannot use the `?` operator in a function that returns `{Self}`"),
-               on(all(from_method="into_result", from_desugaring="?"),
-                  message="the `?` operator can only be applied to values \
-                           that implement `{Try}`",
-                  label="the `?` operator cannot be applied to type `{Self}`")
-))]
+#[rustc_on_unimplemented(
+   on(all(
+       any(from_method="from_error", from_method="from_ok"),
+       from_desugaring="?"),
+      message="the `?` operator can only be used in a \
+               function that returns `Result` or `Option` \
+               (or another type that implements `{Try}`)",
+      label="cannot use the `?` operator in a function that returns `{Self}`"),
+   on(all(from_method="into_result", from_desugaring="?"),
+      message="the `?` operator can only be applied to values \
+               that implement `{Try}`",
+      label="the `?` operator cannot be applied to type `{Self}`")
+)]
+#[doc(alias = "?")]
 pub trait Try {
     /// The type of this value when viewed as successful.
     #[unstable(feature = "try_trait", issue = "42327")]

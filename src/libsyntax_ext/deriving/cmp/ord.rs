@@ -1,34 +1,25 @@
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use deriving::generic::*;
-use deriving::generic::ty::*;
+use crate::deriving::path_std;
+use crate::deriving::generic::*;
+use crate::deriving::generic::ty::*;
 
 use syntax::ast::{self, Expr, MetaItem};
 use syntax::ext::base::{Annotatable, ExtCtxt};
 use syntax::ext::build::AstBuilder;
 use syntax::ptr::P;
-use syntax::symbol::Symbol;
+use syntax::symbol::sym;
 use syntax_pos::Span;
 
-pub fn expand_deriving_ord(cx: &mut ExtCtxt,
+pub fn expand_deriving_ord(cx: &mut ExtCtxt<'_>,
                            span: Span,
                            mitem: &MetaItem,
                            item: &Annotatable,
-                           push: &mut FnMut(Annotatable)) {
-    let inline = cx.meta_word(span, Symbol::intern("inline"));
+                           push: &mut dyn FnMut(Annotatable)) {
+    let inline = cx.meta_word(span, sym::inline);
     let attrs = vec![cx.attribute(span, inline)];
     let trait_def = TraitDef {
         span,
         attributes: Vec::new(),
-        path: path_std!(cx, core::cmp::Ord),
+        path: path_std!(cx, cmp::Ord),
         additional_bounds: Vec::new(),
         generics: LifetimeBounds::empty(),
         is_unsafe: false,
@@ -37,8 +28,8 @@ pub fn expand_deriving_ord(cx: &mut ExtCtxt,
                           name: "cmp",
                           generics: LifetimeBounds::empty(),
                           explicit_self: borrowed_explicit_self(),
-                          args: vec![borrowed_self()],
-                          ret_ty: Literal(path_std!(cx, core::cmp::Ordering)),
+                          args: vec![(borrowed_self(), "other")],
+                          ret_ty: Literal(path_std!(cx, cmp::Ordering)),
                           attributes: attrs,
                           is_unsafe: false,
                           unify_fieldless_variants: true,
@@ -53,7 +44,7 @@ pub fn expand_deriving_ord(cx: &mut ExtCtxt,
 }
 
 
-pub fn ordering_collapsed(cx: &mut ExtCtxt,
+pub fn ordering_collapsed(cx: &mut ExtCtxt<'_>,
                           span: Span,
                           self_arg_tags: &[ast::Ident])
                           -> P<ast::Expr> {
@@ -62,11 +53,11 @@ pub fn ordering_collapsed(cx: &mut ExtCtxt,
     cx.expr_method_call(span, lft, cx.ident_of("cmp"), vec![rgt])
 }
 
-pub fn cs_cmp(cx: &mut ExtCtxt, span: Span, substr: &Substructure) -> P<Expr> {
-    let test_id = cx.ident_of("__cmp");
-    let equals_path = cx.path_global(span, cx.std_path(&["cmp", "Ordering", "Equal"]));
+pub fn cs_cmp(cx: &mut ExtCtxt<'_>, span: Span, substr: &Substructure<'_>) -> P<Expr> {
+    let test_id = cx.ident_of("cmp").gensym();
+    let equals_path = cx.path_global(span, cx.std_path(&[sym::cmp, sym::Ordering, sym::Equal]));
 
-    let cmp_path = cx.std_path(&["cmp", "Ord", "cmp"]);
+    let cmp_path = cx.std_path(&[sym::cmp, sym::Ord, sym::cmp]);
 
     // Builds:
     //
@@ -76,9 +67,9 @@ pub fn cs_cmp(cx: &mut ExtCtxt, span: Span, substr: &Substructure) -> P<Expr> {
     // ::std::cmp::Ordering::Equal => {
     // ...
     // }
-    // __cmp => __cmp
+    // cmp => cmp
     // },
-    // __cmp => __cmp
+    // cmp => cmp
     // }
     //
     cs_fold(// foldr nests the if-elses correctly, leaving the first field
@@ -87,12 +78,12 @@ pub fn cs_cmp(cx: &mut ExtCtxt, span: Span, substr: &Substructure) -> P<Expr> {
             |cx, span, old, self_f, other_fs| {
         // match new {
         //     ::std::cmp::Ordering::Equal => old,
-        //     __cmp => __cmp
+        //     cmp => cmp
         // }
 
         let new = {
-            let other_f = match (other_fs.len(), other_fs.get(0)) {
-                (1, Some(o_f)) => o_f,
+            let other_f = match other_fs {
+                [o_f] => o_f,
                 _ => cx.span_bug(span, "not exactly 2 arguments in `derive(Ord)`"),
             };
 

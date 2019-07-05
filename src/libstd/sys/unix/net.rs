@@ -1,32 +1,25 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::ffi::CStr;
+use crate::io::{self, IoSlice, IoSliceMut};
+use crate::mem;
+use crate::net::{SocketAddr, Shutdown};
+use crate::str;
+use crate::sys::fd::FileDesc;
+use crate::sys_common::{AsInner, FromInner, IntoInner};
+use crate::sys_common::net::{getsockopt, setsockopt, sockaddr_to_addr};
+use crate::time::{Duration, Instant};
+use crate::cmp;
 
-use ffi::CStr;
-use io;
-use libc::{self, c_int, c_void, size_t, sockaddr, socklen_t, EAI_SYSTEM, MSG_PEEK};
-use mem;
-use net::{SocketAddr, Shutdown};
-use str;
-use sys::fd::FileDesc;
-use sys_common::{AsInner, FromInner, IntoInner};
-use sys_common::net::{getsockopt, setsockopt, sockaddr_to_addr};
-use time::{Duration, Instant};
-use cmp;
+use libc::{c_int, c_void, size_t, sockaddr, socklen_t, EAI_SYSTEM, MSG_PEEK};
 
-pub use sys::{cvt, cvt_r};
+pub use crate::sys::{cvt, cvt_r};
+
+#[allow(unused_extern_crates)]
 pub extern crate libc as netc;
 
 pub type wrlen_t = size_t;
 
 // See below for the usage of SOCK_CLOEXEC, but this constant is only defined on
-// Linux currently (e.g. support doesn't exist on other platforms). In order to
+// Linux currently (e.g., support doesn't exist on other platforms). In order to
 // get name resolution to work and things to compile we just define a dummy
 // SOCK_CLOEXEC here for other platforms. Note that the dummy constant isn't
 // actually ever used (the blocks below are wrapped in `if cfg!` as well.
@@ -35,7 +28,7 @@ use libc::SOCK_CLOEXEC;
 #[cfg(not(target_os = "linux"))]
 const SOCK_CLOEXEC: c_int = 0;
 
-// Another conditional contant for name resolution: Macos et iOS use
+// Another conditional constant for name resolution: Macos et iOS use
 // SO_NOSIGPIPE as a setsockopt flag to disable SIGPIPE emission on socket.
 // Other platforms do otherwise.
 #[cfg(target_vendor = "apple")]
@@ -51,6 +44,10 @@ pub fn cvt_gai(err: c_int) -> io::Result<()> {
     if err == 0 {
         return Ok(())
     }
+
+    // We may need to trigger a glibc workaround. See on_resolver_failure() for details.
+    on_resolver_failure();
+
     if err == EAI_SYSTEM {
         return Err(io::Error::last_os_error())
     }
@@ -176,11 +173,16 @@ impl Socket {
                 }
                 0 => {}
                 _ => {
-                    if pollfd.revents & libc::POLLOUT == 0 {
-                        if let Some(e) = self.take_error()? {
-                            return Err(e);
-                        }
+                    // linux returns POLLOUT|POLLERR|POLLHUP for refused connections (!), so look
+                    // for POLLHUP rather than read readiness
+                    if pollfd.revents & libc::POLLHUP != 0 {
+                        let e = self.take_error()?
+                            .unwrap_or_else(|| {
+                                io::Error::new(io::ErrorKind::Other, "no error set after POLLHUP")
+                            });
+                        return Err(e);
                     }
+
                     return Ok(());
                 }
             }
@@ -194,18 +196,21 @@ impl Socket {
         // Linux. This was added in 2.6.28, however, and because we support
         // 2.6.18 we must detect this support dynamically.
         if cfg!(target_os = "linux") {
-            weak! {
-                fn accept4(c_int, *mut sockaddr, *mut socklen_t, c_int) -> c_int
+            syscall! {
+                fn accept4(
+                    fd: c_int,
+                    addr: *mut sockaddr,
+                    addr_len: *mut socklen_t,
+                    flags: c_int
+                ) -> c_int
             }
-            if let Some(accept) = accept4.get() {
-                let res = cvt_r(|| unsafe {
-                    accept(self.0.raw(), storage, len, SOCK_CLOEXEC)
-                });
-                match res {
-                    Ok(fd) => return Ok(Socket(FileDesc::new(fd))),
-                    Err(ref e) if e.raw_os_error() == Some(libc::ENOSYS) => {}
-                    Err(e) => return Err(e),
-                }
+            let res = cvt_r(|| unsafe {
+                accept4(self.0.raw(), storage, len, SOCK_CLOEXEC)
+            });
+            match res {
+                Ok(fd) => return Ok(Socket(FileDesc::new(fd))),
+                Err(ref e) if e.raw_os_error() == Some(libc::ENOSYS) => {}
+                Err(e) => return Err(e),
             }
         }
 
@@ -239,6 +244,10 @@ impl Socket {
         self.recv_with_flags(buf, MSG_PEEK)
     }
 
+    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.0.read_vectored(bufs)
+    }
+
     fn recv_from_with_flags(&self, buf: &mut [u8], flags: c_int)
                             -> io::Result<(usize, SocketAddr)> {
         let mut storage: libc::sockaddr_storage = unsafe { mem::zeroed() };
@@ -265,6 +274,10 @@ impl Socket {
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         self.0.write(buf)
+    }
+
+    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.0.write_vectored(bufs)
     }
 
     pub fn set_timeout(&self, dur: Option<Duration>, kind: libc::c_int) -> io::Result<()> {
@@ -355,3 +368,34 @@ impl FromInner<c_int> for Socket {
 impl IntoInner<c_int> for Socket {
     fn into_inner(self) -> c_int { self.0.into_raw() }
 }
+
+// In versions of glibc prior to 2.26, there's a bug where the DNS resolver
+// will cache the contents of /etc/resolv.conf, so changes to that file on disk
+// can be ignored by a long-running program. That can break DNS lookups on e.g.
+// laptops where the network comes and goes. See
+// https://sourceware.org/bugzilla/show_bug.cgi?id=984. Note however that some
+// distros including Debian have patched glibc to fix this for a long time.
+//
+// A workaround for this bug is to call the res_init libc function, to clear
+// the cached configs. Unfortunately, while we believe glibc's implementation
+// of res_init is thread-safe, we know that other implementations are not
+// (https://github.com/rust-lang/rust/issues/43592). Code here in libstd could
+// try to synchronize its res_init calls with a Mutex, but that wouldn't
+// protect programs that call into libc in other ways. So instead of calling
+// res_init unconditionally, we call it only when we detect we're linking
+// against glibc version < 2.26. (That is, when we both know its needed and
+// believe it's thread-safe).
+#[cfg(target_env = "gnu")]
+fn on_resolver_failure() {
+    use crate::sys;
+
+    // If the version fails to parse, we treat it the same as "not glibc".
+    if let Some(version) = sys::os::glibc_version() {
+        if version < (2, 26) {
+            unsafe { libc::res_init() };
+        }
+    }
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn on_resolver_failure() {}

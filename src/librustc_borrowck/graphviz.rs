@@ -1,29 +1,17 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! This module provides linkage between rustc::middle::graph and
 //! libgraphviz traits, specialized to attaching borrowck analysis
 //! data to rendered labels.
 
-pub use self::Variant::*;
+pub use Variant::*;
 
 pub use rustc::cfg::graphviz::{Node, Edge};
 use rustc::cfg::graphviz as cfg_dot;
 
-use borrowck;
-use borrowck::{BorrowckCtxt, LoanPath};
-use dot;
+use crate::borrowck::{self, BorrowckCtxt, LoanPath};
+use crate::dataflow::{DataFlowOperator, DataFlowContext, EntryOrExit};
+use log::debug;
 use rustc::cfg::CFGIndex;
-use rustc::middle::dataflow::{DataFlowOperator, DataFlowContext, EntryOrExit};
 use std::rc::Rc;
-use dot::IntoCow;
 
 #[derive(Debug, Copy, Clone)]
 pub enum Variant {
@@ -42,18 +30,18 @@ impl Variant {
     }
 }
 
-pub struct DataflowLabeller<'a, 'tcx: 'a> {
+pub struct DataflowLabeller<'a, 'tcx> {
     pub inner: cfg_dot::LabelledCFG<'a, 'tcx>,
     pub variants: Vec<Variant>,
     pub borrowck_ctxt: &'a BorrowckCtxt<'a, 'tcx>,
-    pub analysis_data: &'a borrowck::AnalysisData<'a, 'tcx>,
+    pub analysis_data: &'a borrowck::AnalysisData<'tcx>,
 }
 
 impl<'a, 'tcx> DataflowLabeller<'a, 'tcx> {
     fn dataflow_for(&self, e: EntryOrExit, n: &Node<'a>) -> String {
         let id = n.1.data.id();
         debug!("dataflow_for({:?}, id={:?}) {:?}", e, id, self.variants);
-        let mut sets = "".to_string();
+        let mut sets = String::new();
         let mut seen_one = false;
         for &variant in &self.variants {
             if seen_one { sets.push_str(" "); } else { seen_one = true; }
@@ -64,7 +52,7 @@ impl<'a, 'tcx> DataflowLabeller<'a, 'tcx> {
         sets
     }
 
-    fn dataflow_for_variant(&self, e: EntryOrExit, n: &Node, v: Variant) -> String {
+    fn dataflow_for_variant(&self, e: EntryOrExit, n: &Node<'_>, v: Variant) -> String {
         let cfgidx = n.0;
         match v {
             Loans   => self.dataflow_loans_for(e, cfgidx),
@@ -73,11 +61,14 @@ impl<'a, 'tcx> DataflowLabeller<'a, 'tcx> {
         }
     }
 
-    fn build_set<O:DataFlowOperator, F>(&self,
-                                        e: EntryOrExit,
-                                        cfgidx: CFGIndex,
-                                        dfcx: &DataFlowContext<'a, 'tcx, O>,
-                                        mut to_lp: F) -> String where
+    fn build_set<O: DataFlowOperator, F>(
+        &self,
+        e: EntryOrExit,
+        cfgidx: CFGIndex,
+        dfcx: &DataFlowContext<'tcx, O>,
+        mut to_lp: F,
+    ) -> String
+    where
         F: FnMut(usize) -> Rc<LoanPath<'tcx>>,
     {
         let mut saw_some = false;
@@ -100,7 +91,7 @@ impl<'a, 'tcx> DataflowLabeller<'a, 'tcx> {
         let dfcx = &self.analysis_data.loans;
         let loan_index_to_path = |loan_index| {
             let all_loans = &self.analysis_data.all_loans;
-            let l: &borrowck::Loan = &all_loans[loan_index];
+            let l: &borrowck::Loan<'_> = &all_loans[loan_index];
             l.loan_path()
         };
         self.build_set(e, cfgidx, dfcx, loan_index_to_path)
@@ -139,8 +130,8 @@ impl<'a, 'tcx> dot::Labeller<'a> for DataflowLabeller<'a, 'tcx> {
         let suffix = self.dataflow_for(EntryOrExit::Exit, n);
         let inner_label = self.inner.node_label(n);
         inner_label
-            .prefix_line(dot::LabelText::LabelStr(prefix.into_cow()))
-            .suffix_line(dot::LabelText::LabelStr(suffix.into_cow()))
+            .prefix_line(dot::LabelText::LabelStr(prefix.into()))
+            .suffix_line(dot::LabelText::LabelStr(suffix.into()))
     }
     fn edge_label(&'a self, e: &Edge<'a>) -> dot::LabelText<'a> { self.inner.edge_label(e) }
 }

@@ -1,13 +1,17 @@
 error[E0308]: mismatched types
-  --> $DIR/issue-5500.rs:12:5
+  --> $DIR/issue-5500.rs:2:5
    |
-11 | fn main() {
+LL | fn main() {
    |           - expected `()` because of default return type
-12 |     &panic!()
-   |     ^^^^^^^^^ expected (), found reference
+LL |     &panic!()
+   |     ^^^^^^^^^
+   |     |
+   |     expected (), found reference
+   |     help: consider removing the borrow: `panic!()`
    |
    = note: expected type `()`
               found type `&_`
 
 error: aborting due to previous error
 
+For more information about this error, try `rustc --explain E0308`.

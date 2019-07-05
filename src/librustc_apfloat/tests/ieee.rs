@@ -1,21 +1,9 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-#![feature(i128_type)]
-
-#[macro_use]
-extern crate rustc_apfloat;
+// ignore-tidy-filelength
 
 use rustc_apfloat::{Category, ExpInt, IEK_INF, IEK_NAN, IEK_ZERO};
 use rustc_apfloat::{Float, FloatConvert, ParseError, Round, Status};
 use rustc_apfloat::ieee::{Half, Single, Double, Quad, X87DoubleExtended};
+use rustc_apfloat::unpack;
 
 trait SingleExt {
     fn from_f32(input: f32) -> Self;
@@ -2201,12 +2189,12 @@ fn is_finite_non_zero() {
     assert!(!Single::ZERO.is_finite_non_zero());
     assert!(!(-Single::ZERO).is_finite_non_zero());
 
-    // Test +/- qNaN. +/- dont mean anything with qNaN but paranoia can't hurt in
+    // Test +/- qNaN. +/- don't mean anything with qNaN but paranoia can't hurt in
     // this instance.
     assert!(!Single::NAN.is_finite_non_zero());
     assert!(!(-Single::NAN).is_finite_non_zero());
 
-    // Test +/- sNaN. +/- dont mean anything with sNaN but paranoia can't hurt in
+    // Test +/- sNaN. +/- don't mean anything with sNaN but paranoia can't hurt in
     // this instance.
     assert!(!Single::snan(None).is_finite_non_zero());
     assert!(!(-Single::snan(None)).is_finite_non_zero());

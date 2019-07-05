@@ -1,17 +1,7 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 #![allow(deprecated)]
 
 use core::hash::{Hash, Hasher};
-use core::hash::{SipHasher, SipHasher13, SipHasher24};
+use core::hash::{SipHasher, SipHasher13};
 use core::{slice, mem};
 
 // Hash just the bytes of the slice, without length prefix
@@ -224,14 +214,14 @@ fn test_siphash_2_4() {
     let k1 = 0x_0f_0e_0d_0c_0b_0a_09_08;
     let mut buf = Vec::new();
     let mut t = 0;
-    let mut state_inc = SipHasher24::new_with_keys(k0, k1);
+    let mut state_inc = SipHasher::new_with_keys(k0, k1);
 
     while t < 64 {
         let vec = u8to64_le!(vecs[t], 0);
-        let out = hash_with(SipHasher24::new_with_keys(k0, k1), &Bytes(&buf));
+        let out = hash_with(SipHasher::new_with_keys(k0, k1), &Bytes(&buf));
         assert_eq!(vec, out);
 
-        let full = hash_with(SipHasher24::new_with_keys(k0, k1), &Bytes(&buf));
+        let full = hash_with(SipHasher::new_with_keys(k0, k1), &Bytes(&buf));
         let i = state_inc.finish();
 
         assert_eq!(full, i);
@@ -243,23 +233,21 @@ fn test_siphash_2_4() {
         t += 1;
     }
 }
-#[test] #[cfg(target_arch = "arm")]
+
+#[test]
+#[cfg(target_pointer_width = "32")]
 fn test_hash_usize() {
     let val = 0xdeadbeef_deadbeef_u64;
     assert!(hash(&(val as u64)) != hash(&(val as usize)));
     assert_eq!(hash(&(val as u32)), hash(&(val as usize)));
 }
-#[test] #[cfg(target_arch = "x86_64")]
+
+#[test]
+#[cfg(target_pointer_width = "64")]
 fn test_hash_usize() {
     let val = 0xdeadbeef_deadbeef_u64;
     assert_eq!(hash(&(val as u64)), hash(&(val as usize)));
     assert!(hash(&(val as u32)) != hash(&(val as usize)));
-}
-#[test] #[cfg(target_arch = "x86")]
-fn test_hash_usize() {
-    let val = 0xdeadbeef_deadbeef_u64;
-    assert!(hash(&(val as u64)) != hash(&(val as usize)));
-    assert_eq!(hash(&(val as u32)), hash(&(val as usize)));
 }
 
 #[test]
@@ -324,13 +312,13 @@ fn test_hash_no_concat_alias() {
 #[test]
 fn test_write_short_works() {
     let test_usize = 0xd0c0b0a0usize;
-    let mut h1 = SipHasher24::new();
+    let mut h1 = SipHasher::new();
     h1.write_usize(test_usize);
     h1.write(b"bytes");
     h1.write(b"string");
     h1.write_u8(0xFFu8);
     h1.write_u8(0x01u8);
-    let mut h2 = SipHasher24::new();
+    let mut h2 = SipHasher::new();
     h2.write(unsafe {
         slice::from_raw_parts(&test_usize as *const _ as *const u8,
                               mem::size_of::<usize>())

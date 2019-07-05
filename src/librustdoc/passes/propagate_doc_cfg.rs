@@ -1,26 +1,23 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use std::sync::Arc;
 
-use std::rc::Rc;
+use crate::clean::{Crate, Item};
+use crate::clean::cfg::Cfg;
+use crate::core::DocContext;
+use crate::fold::DocFolder;
+use crate::passes::Pass;
 
-use clean::{Crate, Item};
-use clean::cfg::Cfg;
-use fold::DocFolder;
-use plugins::PluginResult;
+pub const PROPAGATE_DOC_CFG: Pass = Pass {
+    name: "propagate-doc-cfg",
+    pass: propagate_doc_cfg,
+    description: "propagates `#[doc(cfg(...))]` to child items",
+};
 
-pub fn propagate_doc_cfg(cr: Crate) -> PluginResult {
+pub fn propagate_doc_cfg(cr: Crate, _: &DocContext<'_>) -> Crate {
     CfgPropagator { parent_cfg: None }.fold_crate(cr)
 }
 
 struct CfgPropagator {
-    parent_cfg: Option<Rc<Cfg>>,
+    parent_cfg: Option<Arc<Cfg>>,
 }
 
 impl DocFolder for CfgPropagator {
@@ -31,8 +28,8 @@ impl DocFolder for CfgPropagator {
             (None, None) => None,
             (Some(rc), None) | (None, Some(rc)) => Some(rc),
             (Some(mut a), Some(b)) => {
-                let b = Rc::try_unwrap(b).unwrap_or_else(|rc| Cfg::clone(&rc));
-                *Rc::make_mut(&mut a) &= b;
+                let b = Arc::try_unwrap(b).unwrap_or_else(|rc| Cfg::clone(&rc));
+                *Arc::make_mut(&mut a) &= b;
                 Some(a)
             }
         };
